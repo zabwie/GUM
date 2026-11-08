@@ -134,6 +134,18 @@ struct TimedResult {
     bool valid = false;
 };
 
+bool validate_output(const float* expected, const std::vector<float>& actual,
+                     float& max_abs_error, double& checksum) {
+    float max_reference = 0.0f;
+    for (int row = 0; row < kRows; ++row) {
+        const float reference = expected[row];
+        checksum += actual[row];
+        max_abs_error = std::max(max_abs_error, std::abs(actual[row] - reference));
+        max_reference = std::max(max_reference, std::abs(reference));
+    }
+    return max_abs_error <= 5.0e-4f * (1.0f + max_reference);
+}
+
 void flush_l2(const float4* eviction, size_t eviction_vectors, float* sink,
               cudaStream_t stream, int eviction_blocks) {
     evict_l2<<<eviction_blocks, 256, 0, stream>>>(eviction, eviction_vectors, sink);
@@ -189,20 +201,12 @@ TimedResult run_sample(Mode mode, int passes, int sample,
     check(cudaEventElapsedTime(&result.milliseconds, start, stop), "measure Q4_0 trial");
     check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
                      cudaMemcpyDeviceToHost), "copy Q4_0 outputs for validation");
-    float max_reference = 0.0f;
-    for (int row = 0; row < kRows; ++row) {
-        const float reference = expected[row];
-        result.checksum += host_output[row];
-        result.max_abs_error = std::max(result.max_abs_error,
-                                         std::abs(host_output[row] - reference));
-        max_reference = std::max(max_reference, std::abs(reference));
-    }
-    result.valid = result.max_abs_error <= 5.0e-4f * (1.0f + max_reference);
+    result.valid = validate_output(expected, host_output, result.max_abs_error,
+                                   result.checksum);
     if (!result.valid) {
         std::fprintf(stderr,
-            "Q4_0 output mismatch mode=%s passes=%d sample=%d max_abs_error=%.8g tolerance=%.8g\n",
-            mode_name(mode), passes, sample, result.max_abs_error,
-            5.0e-4f * (1.0f + max_reference));
+            "Q4_0 output mismatch mode=%s passes=%d sample=%d max_abs_error=%.8g\n",
+            mode_name(mode), passes, sample, result.max_abs_error);
     }
     return result;
 }
@@ -375,6 +379,81 @@ int main(int argc, char** argv) {
         for (int mode_index = 0; mode_index < 4; ++mode_index) {
             print_summary(modes[mode_index], passes, samples[mode_index], weight_bytes);
         }
+    }
+
+    std::printf("transfer_only_format,summary_or_sample,path,n_or_trial,elapsed_ms,effective_GB_s,valid\n");
+    std::vector<float> transfer_samples[2];
+    for (int sample = -1; sample < options.repeats; ++sample) {
+        const int first_path = sample < 0 ? 0 : sample % 2;
+        for (int order = 0; order < 2; ++order) {
+            const int path = (first_path + order) % 2;
+            const bool managed_path = path == 1;
+            if (managed_path) {
+                cudaMemLocation host_location{};
+                host_location.type = cudaMemLocationTypeHost;
+                check(cudaMemPrefetchAsync(managed_weights, weight_bytes,
+                                           host_location, 0, stream),
+                      "reset managed weights to host before transfer-only sample");
+                check(cudaStreamSynchronize(stream), "wait for managed host reset");
+            }
+            flush_l2(eviction, eviction_vectors, eviction_sink, stream, eviction_blocks);
+            check(cudaEventRecord(start, stream), "record transfer-only start");
+            if (managed_path) {
+                cudaMemLocation gpu_location{};
+                gpu_location.type = cudaMemLocationTypeDevice;
+                gpu_location.id = 0;
+                check(cudaMemPrefetchAsync(managed_weights, weight_bytes,
+                                           gpu_location, 0, stream),
+                      "prefetch managed weights for transfer-only sample");
+            } else {
+                check(cudaMemcpyAsync(staged_weights, host_weights, weight_bytes,
+                                      cudaMemcpyHostToDevice, stream),
+                      "copy pinned weights for transfer-only sample");
+            }
+            check(cudaEventRecord(stop, stream), "record transfer-only stop");
+            check(cudaEventSynchronize(stop), "wait for transfer-only operation");
+            float transfer_ms = 0.0f;
+            check(cudaEventElapsedTime(&transfer_ms, start, stop),
+                  "measure transfer-only operation");
+
+            const BlockQ4_0* validation_weights = managed_path
+                ? managed_weights : staged_weights;
+            q4_matvec<<<kRows, kThreads, 0, stream>>>(validation_weights,
+                device_inputs + static_cast<size_t>(3) * columns,
+                device_output, static_cast<int>(blocks_per_row));
+            check(cudaGetLastError(), "launch transfer-only validation matvec");
+            check(cudaStreamSynchronize(stream), "wait for transfer-only validation matvec");
+            check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
+                             cudaMemcpyDeviceToHost), "copy transfer-only outputs");
+            float max_abs_error = 0.0f;
+            double checksum = 0.0;
+            const bool valid = validate_output(expected[3].data(), host_output,
+                                                max_abs_error, checksum);
+            all_valid = all_valid && valid;
+            if (!valid) {
+                std::fprintf(stderr,
+                    "transfer-only Q4_0 validation failed path=%s sample=%d max_abs_error=%.8g\n",
+                    managed_path ? "managed_prefetch" : "staged_h2d",
+                    sample + 1, max_abs_error);
+            }
+            if (sample >= 0) {
+                transfer_samples[path].push_back(transfer_ms);
+                const double gbps = weight_bytes / (static_cast<double>(transfer_ms) * 1.0e6);
+                std::printf("transfer_sample,%s,%d,%.6f,%.3f,%s;max_abs_error=%.8g,checksum=%.9g\n",
+                    managed_path ? "managed_prefetch" : "staged_h2d",
+                    sample + 1, transfer_ms, gbps, valid ? "yes" : "no",
+                    max_abs_error, checksum);
+            }
+        }
+    }
+    for (int path = 0; path < 2; ++path) {
+        std::vector<float> sorted = transfer_samples[path];
+        std::sort(sorted.begin(), sorted.end());
+        const float median = sorted[sorted.size() / 2];
+        const double gbps = weight_bytes / (static_cast<double>(median) * 1.0e6);
+        std::printf("transfer_summary,%s,n=%zu,median_ms=%.6f,min_ms=%.6f,max_ms=%.6f,effective_GB_s=%.3f\n",
+            path == 0 ? "staged_h2d" : "managed_prefetch", sorted.size(), median,
+            sorted.front(), sorted.back(), gbps);
     }
 
     check(cudaEventDestroy(start), "destroy start event");
