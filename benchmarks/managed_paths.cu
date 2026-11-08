@@ -126,6 +126,22 @@ float elapsed_ms(cudaEvent_t start, cudaEvent_t stop, const char* what) {
     return value;
 }
 
+size_t free_device_mib() {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    check(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
+    return free_bytes / (1024 * 1024);
+}
+
+void print_device_memory(const char* label) {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    check(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
+    std::printf("device_memory,%s,free_MiB=%zu,used_MiB=%zu,total_MiB=%zu\n",
+                label, free_bytes / (1024 * 1024),
+                (total_bytes - free_bytes) / (1024 * 1024), total_bytes / (1024 * 1024));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -182,9 +198,11 @@ int main(int argc, char** argv) {
     }
     check(cudaFree(warm_buffer), "free warm-up buffer");
 
+    print_device_memory("before_managed_allocation");
     float4* managed = nullptr;
     check(cudaMallocManaged(reinterpret_cast<void**>(&managed), bytes, cudaMemAttachGlobal),
           "allocate managed buffer");
+    print_device_memory("after_managed_allocation");
     double expected = 0.0;
     const size_t elements = bytes / sizeof(float);
     auto host_init_start = std::chrono::steady_clock::now();
@@ -197,12 +215,14 @@ int main(int argc, char** argv) {
     const double host_init_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - host_init_start).count();
     std::printf("host_init,CPU_first_touch,%.3f_ms,expected_checksum=%.9g\n", host_init_ms, expected);
+    print_device_memory("after_CPU_first_touch");
 
     // First GPU access after CPU initialization is isolated from explicit prefetch.
     const ScanResult first = run_scan(managed, vector_count, bytes, expected, blocks,
                                       stream, block_sums, host_sums, start, stop);
     std::printf("first_gpu_access,cpu_initialized_no_prefetch,%.6f_ms,checksum=%.9g,valid=%s\n",
                 first.milliseconds, first.checksum, first.valid ? "yes" : "no");
+    print_device_memory("after_first_GPU_access");
     std::vector<float> cold_samples{first.milliseconds};
     bool all_valid = first.valid;
     for (int i = 1; i < options.repeats; ++i) {
@@ -256,6 +276,7 @@ int main(int argc, char** argv) {
         check(cudaEventRecord(cpu_stop, stream), "record CPU prefetch stop");
         check(cudaEventSynchronize(cpu_stop), "wait for CPU prefetch");
         host_prefetch_samples.push_back(elapsed_ms(cpu_start, cpu_stop, "measure CPU prefetch"));
+        const size_t free_after_cpu_prefetch = free_device_mib();
 
         check(cudaEventRecord(whole_start, stream), "record prefetch-plus-scan start");
         check(cudaEventRecord(prefetch_start, stream), "record GPU prefetch start");
@@ -268,6 +289,7 @@ int main(int argc, char** argv) {
         check(cudaEventRecord(scan_stop, stream), "record prefetched scan stop");
         check(cudaEventRecord(stop, stream), "record prefetch-plus-scan stop");
         check(cudaEventSynchronize(stop), "wait for prefetch and scan");
+        const size_t free_after_gpu_prefetch = free_device_mib();
 
         const float prefetch_ms = elapsed_ms(prefetch_start, prefetch_stop, "measure GPU prefetch");
         const float scan_ms = elapsed_ms(scan_start, scan_stop, "measure scan after prefetch");
@@ -282,8 +304,9 @@ int main(int argc, char** argv) {
         for (int block = 0; block < blocks; ++block) checksum += host_sums[block];
         const bool valid = std::abs(checksum - expected) / expected < 1.0e-4;
         all_valid = all_valid && valid;
-        std::printf("prefetch_trial,%d,cpu_prefetch_ms=%.6f,gpu_prefetch_ms=%.6f,scan_ms=%.6f,total_ms=%.6f,checksum=%.9g,valid=%s\n",
+        std::printf("prefetch_trial,%d,cpu_prefetch_ms=%.6f,gpu_prefetch_ms=%.6f,scan_ms=%.6f,total_ms=%.6f,free_after_cpu_MiB=%zu,free_after_gpu_MiB=%zu,checksum=%.9g,valid=%s\n",
                     i + 1, host_prefetch_samples.back(), prefetch_ms, scan_ms, total_ms,
+                    free_after_cpu_prefetch, free_after_gpu_prefetch,
                     checksum, valid ? "yes" : "no");
     }
 
