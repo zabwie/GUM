@@ -49,7 +49,11 @@ GPU_SUMMARY="$(printf '%s\n' "${GPU_SNAPSHOTS[@]}" | awk -F, '
 ')"
 IFS='|' read -r GPU_UTIL_SAMPLES GPU_MIN_FREE_MIB GPU_MAX_TEMP_C GPU_MAX_POWER_W GPU_POWER_LIMIT_W GPU_MAX_UTIL GPU_HIGH_UTIL_SAMPLES <<< "$GPU_SUMMARY"
 RAM_AVAILABLE_MIB="$(awk '/MemAvailable:/ {print int($2 / 1024); exit}' /proc/meminfo)"
-COMPUTE_PIDS="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d '[:space:]' || true)"
+# A CUDA context by itself is not treated as active load: report its memory and
+# defer only when sampled GPU/process activity shows substantial contention.
+COMPUTE_APPS="$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null | awk -F, '
+  NF >= 2 { gsub(/[[:space:]]/, "", $1); gsub(/[[:space:]]/, "", $2); printf "%s:%sMiB ", $1, $2 }
+' || true)"
 PMON_OUTPUT="$(nvidia-smi pmon -c "$SAMPLES" -d 1)"
 HEAVY_GPU_PIDS="$(printf '%s\n' "$PMON_OUTPUT" | awk '
   $1 !~ /^#/ && NF >= 9 && $2 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $4 >= 50 { hits[$2]++ }
@@ -57,9 +61,9 @@ HEAVY_GPU_PIDS="$(printf '%s\n' "$PMON_OUTPUT" | awk '
 ')"
 MIN_GPU_FREE_MIB="$((2048 + MIB))"
 
-printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute PIDs=%s, sustained heavy GPU PIDs=%s\n' \
+printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute clients=%s, sustained heavy GPU PIDs=%s\n' \
   "$GPU_UTIL_SAMPLES" "$GPU_MAX_UTIL" "$GPU_MIN_FREE_MIB" "$RAM_AVAILABLE_MIB" "$GPU_MAX_TEMP_C" \
-  "$GPU_MAX_POWER_W" "$GPU_POWER_LIMIT_W" "${COMPUTE_PIDS:-none}" "${HEAVY_GPU_PIDS:-none}"
+  "$GPU_MAX_POWER_W" "$GPU_POWER_LIMIT_W" "${COMPUTE_APPS:-none}" "${HEAVY_GPU_PIDS:-none}"
 
 if (( GPU_MIN_FREE_MIB < MIN_GPU_FREE_MIB )); then
   echo "Deferred: less than 2 GiB VRAM headroom remains after the benchmark buffer." >&2
@@ -75,10 +79,6 @@ if (( GPU_MAX_TEMP_C >= MAX_TEMP_C )); then
 fi
 if (( GPU_HIGH_UTIL_SAMPLES >= 4 )); then
   echo "Deferred: GPU utilization remained at or above 85% in at least four of five samples." >&2
-  exit 3
-fi
-if [[ -n "$COMPUTE_PIDS" ]]; then
-  echo "Deferred: a CUDA compute process is already active." >&2
   exit 3
 fi
 if [[ -n "$HEAVY_GPU_PIDS" ]]; then

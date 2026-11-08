@@ -100,7 +100,8 @@ ScanResult run_scan(const float4* input, size_t vector_count, size_t bytes,
     check(cudaMemcpy(host_sums.data(), block_sums, blocks * sizeof(float), cudaMemcpyDeviceToHost),
           "copy checksum partials");
     for (int block = 0; block < blocks; ++block) result.checksum += host_sums[block];
-    result.valid = std::abs(result.checksum - expected) / expected < 1.0e-4;
+    const double error = std::abs(result.checksum - expected);
+    result.valid = expected == 0.0 ? error < 1.0e-4 : error / expected < 1.0e-4;
     return result;
 }
 
@@ -175,7 +176,10 @@ int main(int argc, char** argv) {
     check(cudaMemset(warm_buffer, 0, 1u << 20), "initialize warm-up buffer");
     const ScanResult warm = run_scan(warm_buffer, (1u << 20) / sizeof(float4), 1u << 20,
                                      0.0, blocks, stream, block_sums, host_sums, start, stop);
-    (void)warm;
+    if (!warm.valid) {
+        std::fprintf(stderr, "Warm-up buffer checksum was not zero (got %.9g).\n", warm.checksum);
+        return 1;
+    }
     check(cudaFree(warm_buffer), "free warm-up buffer");
 
     float4* managed = nullptr;
