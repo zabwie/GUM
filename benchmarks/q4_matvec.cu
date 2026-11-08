@@ -8,12 +8,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace {
 
-constexpr int kRows = 4096;
+constexpr int kDefaultRows = 4096;
 constexpr int kQK = 32;
 constexpr int kThreads = 256;
 constexpr int kWarps = kThreads / 32;
@@ -85,6 +87,12 @@ __global__ void evict_l2(const float4* input, size_t count, float* sink) {
 struct Options {
     int mib = 64;
     int repeats = 5;
+    int rows = kDefaultRows;
+    size_t blocks_per_row = 0;
+    size_t weights_offset = 0;
+    std::string weights_file;
+    bool rows_set = false;
+    bool blocks_set = false;
 };
 
 int parse_positive(const char* value, const char* option) {
@@ -104,14 +112,37 @@ Options parse_options(int argc, char** argv) {
             options.mib = parse_positive(argv[++i], "--mib");
         } else if (std::strcmp(argv[i], "--repeats") == 0 && i + 1 < argc) {
             options.repeats = parse_positive(argv[++i], "--repeats");
+        } else if (std::strcmp(argv[i], "--rows") == 0 && i + 1 < argc) {
+            options.rows = parse_positive(argv[++i], "--rows");
+            options.rows_set = true;
+        } else if (std::strcmp(argv[i], "--blocks-per-row") == 0 && i + 1 < argc) {
+            options.blocks_per_row = static_cast<size_t>(parse_positive(argv[++i], "--blocks-per-row"));
+            options.blocks_set = true;
+        } else if (std::strcmp(argv[i], "--weights-file") == 0 && i + 1 < argc) {
+            options.weights_file = argv[++i];
+        } else if (std::strcmp(argv[i], "--weights-offset") == 0 && i + 1 < argc) {
+            const char* offset_text = argv[++i];
+            char* end = nullptr;
+            const unsigned long long parsed = std::strtoull(offset_text, &end, 10);
+            if (offset_text[0] == '-' || !end || *end != '\0' ||
+                parsed > std::numeric_limits<size_t>::max()) {
+                std::fprintf(stderr, "Invalid value for --weights-offset\n");
+                std::exit(2);
+            }
+            options.weights_offset = static_cast<size_t>(parsed);
         } else {
-            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10]\n", argv[0]);
+            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE]\n", argv[0]);
             std::exit(2);
         }
     }
     if (options.mib > kMaxMiB || options.repeats > kRepeatsMax) {
         std::fprintf(stderr, "Resource cap exceeded: --mib <= %d, --repeats <= %d\n",
                      kMaxMiB, kRepeatsMax);
+        std::exit(2);
+    }
+    if (options.rows > 32768 || (!options.weights_file.empty() &&
+        (!options.rows_set || !options.blocks_set))) {
+        std::fprintf(stderr, "Invalid dimensions or model-weight input options\n");
         std::exit(2);
     }
     return options;
@@ -136,10 +167,10 @@ struct TimedResult {
     bool valid = false;
 };
 
-bool validate_output(const float* expected, const std::vector<float>& actual,
+bool validate_output(const float* expected, const std::vector<float>& actual, int rows,
                      float& max_abs_error, double& checksum) {
     float max_reference = 0.0f;
-    for (int row = 0; row < kRows; ++row) {
+    for (int row = 0; row < rows; ++row) {
         const float reference = expected[row];
         checksum += actual[row];
         max_abs_error = std::max(max_abs_error, std::abs(actual[row] - reference));
@@ -157,7 +188,7 @@ void flush_l2(const float4* eviction, size_t eviction_vectors, float* sink,
 
 TimedResult run_sample(Mode mode, int passes, int sample,
                        const BlockQ4_0* mapped, const BlockQ4_0* staged,
-                       BlockQ4_0* managed, int blocks_per_row, size_t weight_bytes,
+                       BlockQ4_0* managed, int rows, int blocks_per_row, size_t weight_bytes,
                        const float* device_inputs, int columns, float* device_output,
                        const float* expected, std::vector<float>& host_output,
                        const float4* eviction, size_t eviction_vectors, float* eviction_sink,
@@ -191,9 +222,9 @@ TimedResult run_sample(Mode mode, int passes, int sample,
     }
 
     for (int pass = 0; pass < passes; ++pass) {
-        q4_matvec<<<kRows, kThreads, 0, stream>>>(weights,
+        q4_matvec<<<rows, kThreads, 0, stream>>>(weights,
             device_inputs + static_cast<size_t>(pass) * columns,
-            device_output, blocks_per_row, kRows);
+            device_output, blocks_per_row, rows);
         check(cudaGetLastError(), "launch Q4_0 matvec");
     }
     check(cudaEventRecord(stop, stream), "record trial stop");
@@ -201,9 +232,9 @@ TimedResult run_sample(Mode mode, int passes, int sample,
 
     TimedResult result;
     check(cudaEventElapsedTime(&result.milliseconds, start, stop), "measure Q4_0 trial");
-    check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
+    check(cudaMemcpy(host_output.data(), device_output, rows * sizeof(float),
                      cudaMemcpyDeviceToHost), "copy Q4_0 outputs for validation");
-    result.valid = validate_output(expected, host_output, result.max_abs_error,
+    result.valid = validate_output(expected, host_output, rows, result.max_abs_error,
                                    result.checksum);
     if (!result.valid) {
         std::fprintf(stderr,
@@ -213,7 +244,7 @@ TimedResult run_sample(Mode mode, int passes, int sample,
     return result;
 }
 
-TimedResult run_chunked_sample(bool overlap, int passes, int sample,
+TimedResult run_chunked_sample(bool overlap, int passes, int sample, int rows,
                        const BlockQ4_0* host_weights, BlockQ4_0** chunk_buffers,
                        size_t row_bytes, int chunk_rows, int blocks_per_row,
                        const float* device_inputs, int columns, float* device_output,
@@ -223,7 +254,7 @@ TimedResult run_chunked_sample(bool overlap, int passes, int sample,
                        cudaStream_t copy_stream, cudaStream_t compute_stream,
                        cudaEvent_t start, cudaEvent_t stop,
                        cudaEvent_t* copy_ready, cudaEvent_t* compute_done) {
-    const int num_chunks = (kRows + chunk_rows - 1) / chunk_rows;
+    const int num_chunks = (rows + chunk_rows - 1) / chunk_rows;
     flush_l2(eviction, eviction_vectors, eviction_sink, serial_stream, eviction_blocks);
 
     if (!overlap) {
@@ -231,16 +262,16 @@ TimedResult run_chunked_sample(bool overlap, int passes, int sample,
         for (int pass = 0; pass < passes; ++pass) {
             for (int chunk = 0; chunk < num_chunks; ++chunk) {
                 const int first_row = chunk * chunk_rows;
-                const int rows = std::min(chunk_rows, kRows - first_row);
-                const size_t bytes = static_cast<size_t>(rows) * row_bytes;
+                const int rows_in_chunk = std::min(chunk_rows, rows - first_row);
+                const size_t bytes = static_cast<size_t>(rows_in_chunk) * row_bytes;
                 const int slot = chunk & 1;
                 check(cudaMemcpyAsync(chunk_buffers[slot],
                         host_weights + static_cast<size_t>(first_row) * blocks_per_row,
                         bytes, cudaMemcpyHostToDevice, serial_stream),
                       "copy serial Q4_0 chunk");
-                q4_matvec<<<rows, kThreads, 0, serial_stream>>>(chunk_buffers[slot],
+                q4_matvec<<<rows_in_chunk, kThreads, 0, serial_stream>>>(chunk_buffers[slot],
                     device_inputs + static_cast<size_t>(pass) * columns,
-                    device_output + first_row, blocks_per_row, rows);
+                    device_output + first_row, blocks_per_row, rows_in_chunk);
                 check(cudaGetLastError(), "launch serial chunk matvec");
             }
         }
@@ -252,8 +283,8 @@ TimedResult run_chunked_sample(bool overlap, int passes, int sample,
         for (int pass = 0; pass < passes; ++pass) {
             for (int chunk = 0; chunk < num_chunks; ++chunk) {
                 const int first_row = chunk * chunk_rows;
-                const int rows = std::min(chunk_rows, kRows - first_row);
-                const size_t bytes = static_cast<size_t>(rows) * row_bytes;
+                const int rows_in_chunk = std::min(chunk_rows, rows - first_row);
+                const size_t bytes = static_cast<size_t>(rows_in_chunk) * row_bytes;
                 const int slot = chunk & 1;
                 if (chunk >= 2 || pass > 0) {
                     check(cudaStreamWaitEvent(copy_stream, compute_done[slot], 0),
@@ -267,9 +298,9 @@ TimedResult run_chunked_sample(bool overlap, int passes, int sample,
                       "record copied Q4_0 chunk");
                 check(cudaStreamWaitEvent(compute_stream, copy_ready[slot], 0),
                       "wait for copied Q4_0 chunk");
-                q4_matvec<<<rows, kThreads, 0, compute_stream>>>(chunk_buffers[slot],
+                q4_matvec<<<rows_in_chunk, kThreads, 0, compute_stream>>>(chunk_buffers[slot],
                     device_inputs + static_cast<size_t>(pass) * columns,
-                    device_output + first_row, blocks_per_row, rows);
+                    device_output + first_row, blocks_per_row, rows_in_chunk);
                 check(cudaGetLastError(), "launch pipelined chunk matvec");
                 check(cudaEventRecord(compute_done[slot], compute_stream),
                       "record completed chunk matvec");
@@ -282,9 +313,9 @@ TimedResult run_chunked_sample(bool overlap, int passes, int sample,
     TimedResult result;
     check(cudaEventElapsedTime(&result.milliseconds, start, stop),
           "measure chunked Q4_0 trial");
-    check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
+    check(cudaMemcpy(host_output.data(), device_output, rows * sizeof(float),
                      cudaMemcpyDeviceToHost), "copy chunked outputs for validation");
-    result.valid = validate_output(expected, host_output, result.max_abs_error,
+    result.valid = validate_output(expected, host_output, rows, result.max_abs_error,
                                    result.checksum);
     if (!result.valid) {
         std::fprintf(stderr,
@@ -320,16 +351,26 @@ void print_summary(Mode mode, int passes, const std::vector<float>& samples,
 
 int main(int argc, char** argv) {
     const Options options = parse_options(argc, argv);
+    const int rows = options.rows;
     const size_t target_bytes = static_cast<size_t>(options.mib) * 1024 * 1024;
-    const size_t blocks_per_row = std::max<size_t>(1,
-        (target_bytes / sizeof(BlockQ4_0)) / kRows);
-    const size_t block_count = static_cast<size_t>(kRows) * blocks_per_row;
+    const size_t blocks_per_row = options.blocks_set ? options.blocks_per_row :
+        std::max<size_t>(1, (target_bytes / sizeof(BlockQ4_0)) / rows);
+    if (blocks_per_row > static_cast<size_t>(std::numeric_limits<int>::max() / kQK)) {
+        std::fprintf(stderr, "Q4_0 row is too wide\n");
+        return 2;
+    }
+    const size_t block_count = static_cast<size_t>(rows) * blocks_per_row;
     const size_t weight_bytes = block_count * sizeof(BlockQ4_0);
+    if (weight_bytes > static_cast<size_t>(kMaxMiB) * 1024 * 1024 ||
+        options.weights_offset > std::numeric_limits<size_t>::max() - weight_bytes) {
+        std::fprintf(stderr, "Q4_0 weight allocation exceeds %d MiB\n", kMaxMiB);
+        return 2;
+    }
+    const int columns = static_cast<int>(blocks_per_row * kQK);
     const size_t row_bytes = blocks_per_row * sizeof(BlockQ4_0);
-    const int chunk_rows = static_cast<int>(std::min<size_t>(kRows,
+    const int chunk_rows = static_cast<int>(std::min<size_t>(rows,
         std::max<size_t>(1, (kChunkMiB * 1024 * 1024) / row_bytes)));
     const size_t chunk_bytes = static_cast<size_t>(chunk_rows) * row_bytes;
-    const int columns = static_cast<int>(blocks_per_row * kQK);
     const size_t max_input_bytes = static_cast<size_t>(columns) * 4 * sizeof(float);
 
     check(cudaSetDevice(0), "select GPU 0");
@@ -343,18 +384,24 @@ int main(int argc, char** argv) {
     const int eviction_blocks = prop.multiProcessorCount * 8;
     const size_t chunk_buffer_bytes = options.mib >= 32 ? 2 * chunk_bytes : 0;
     const size_t device_buffers = 2 * weight_bytes + chunk_buffer_bytes + eviction_bytes + max_input_bytes +
-                                  kRows * sizeof(float) +
+                                  static_cast<size_t>(rows) * sizeof(float) +
                                   static_cast<size_t>(eviction_blocks * 256) * sizeof(float);
 
     std::printf("device,%s,cc=%d.%d,driver=%d,runtime=%d,target_MiB=%d,weight_bytes=%zu,rows=%d,columns=%d,blocks_per_row=%zu,repeats=%d,device_buffers_MiB=%.3f,L2_MiB=%zu\n",
                 prop.name, prop.major, prop.minor, driver_version, runtime_version,
-                options.mib, weight_bytes, kRows, columns, blocks_per_row, options.repeats,
+                options.mib, weight_bytes, rows, columns, blocks_per_row, options.repeats,
                 device_buffers / (1024.0 * 1024.0),
                 static_cast<size_t>(prop.l2CacheSize) / (1024 * 1024));
+    if (!options.weights_file.empty()) {
+        std::printf("weight_source,gguf_tensor_slice,path=%s,offset=%zu,bytes=%zu\n",
+                    options.weights_file.c_str(), options.weights_offset, weight_bytes);
+    } else {
+        std::printf("weight_source,synthetic\n");
+    }
     std::printf("format,Q4_0,block_values=32,block_bytes=18,packed_layout=low_nibble_values_0_to_15_high_nibble_values_16_to_31,scale_half_bits=0x2c00\n");
     if (options.mib >= 32) {
         std::printf("chunking,chunk_MiB=16,chunk_rows=%d,chunk_bytes=%zu,num_chunks=%d,buffer_count=2\n",
-                    chunk_rows, chunk_bytes, (kRows + chunk_rows - 1) / chunk_rows);
+                    chunk_rows, chunk_bytes, (rows + chunk_rows - 1) / chunk_rows);
     }
 
     cudaStream_t stream{};
@@ -388,7 +435,7 @@ int main(int argc, char** argv) {
     }
     check(cudaMalloc(reinterpret_cast<void**>(&device_inputs), max_input_bytes),
           "allocate input vectors");
-    check(cudaMalloc(reinterpret_cast<void**>(&device_output), kRows * sizeof(float)),
+    check(cudaMalloc(reinterpret_cast<void**>(&device_output), static_cast<size_t>(rows) * sizeof(float)),
           "allocate output vector");
     check(cudaMalloc(reinterpret_cast<void**>(&eviction), eviction_bytes),
           "allocate L2 eviction buffer");
@@ -396,16 +443,32 @@ int main(int argc, char** argv) {
                      static_cast<size_t>(eviction_blocks * 256) * sizeof(float)),
           "allocate L2 eviction sink");
 
-    constexpr uint16_t kScaleHalf = 0x2c00;  // exactly 1/16
-    for (size_t index = 0; index < block_count; ++index) {
-        BlockQ4_0& block = host_weights[index];
-        block.d = kScaleHalf;
-        const size_t row = index / blocks_per_row;
-        const size_t within_row = index % blocks_per_row;
-        for (int packed_index = 0; packed_index < 16; ++packed_index) {
-            const uint8_t low = static_cast<uint8_t>((row * 3 + within_row * 5 + packed_index * 7) & 15);
-            const uint8_t high = static_cast<uint8_t>((row * 11 + within_row * 9 + packed_index * 13 + 1) & 15);
-            block.qs[packed_index] = static_cast<uint8_t>(low | (high << 4));
+    if (!options.weights_file.empty()) {
+        std::ifstream input_file(options.weights_file, std::ios::binary);
+        if (!input_file) {
+            std::fprintf(stderr, "Could not open Q4_0 weights file: %s\n",
+                         options.weights_file.c_str());
+            return 1;
+        }
+        input_file.seekg(static_cast<std::streamoff>(options.weights_offset));
+        input_file.read(reinterpret_cast<char*>(host_weights),
+                        static_cast<std::streamsize>(weight_bytes));
+        if (!input_file || static_cast<size_t>(input_file.gcount()) != weight_bytes) {
+            std::fprintf(stderr, "Q4_0 weights file range is shorter than requested\n");
+            return 1;
+        }
+    } else {
+        constexpr uint16_t kScaleHalf = 0x2c00;  // exactly 1/16
+        for (size_t index = 0; index < block_count; ++index) {
+            BlockQ4_0& block = host_weights[index];
+            block.d = kScaleHalf;
+            const size_t row = index / blocks_per_row;
+            const size_t within_row = index % blocks_per_row;
+            for (int packed_index = 0; packed_index < 16; ++packed_index) {
+                const uint8_t low = static_cast<uint8_t>((row * 3 + within_row * 5 + packed_index * 7) & 15);
+                const uint8_t high = static_cast<uint8_t>((row * 11 + within_row * 9 + packed_index * 13 + 1) & 15);
+                block.qs[packed_index] = static_cast<uint8_t>(low | (high << 4));
+            }
         }
     }
     check(cudaMemcpy(managed_weights, host_weights, weight_bytes, cudaMemcpyHostToHost),
@@ -428,8 +491,8 @@ int main(int argc, char** argv) {
 
     std::vector<float> expected[4];
     for (int input_index = 0; input_index < 4; ++input_index) {
-        expected[input_index].resize(kRows, 0.0f);
-        for (int row = 0; row < kRows; ++row) {
+        expected[input_index].resize(rows, 0.0f);
+        for (int row = 0; row < rows; ++row) {
             double sum = 0.0;
             for (size_t b = 0; b < blocks_per_row; ++b) {
                 const BlockQ4_0& block = host_weights[static_cast<size_t>(row) * blocks_per_row + b];
@@ -448,7 +511,7 @@ int main(int argc, char** argv) {
     check(cudaEventCreate(&start), "create start event");
     check(cudaEventCreate(&stop), "create stop event");
     const size_t eviction_vectors = eviction_bytes / sizeof(float4);
-    std::vector<float> host_output(kRows);
+    std::vector<float> host_output(rows);
     std::printf("result_format,summary_or_sample,mode,passes,n_or_trial,median_or_elapsed_ms,logical_weight_GB_s,valid_or_explicit_weight_move_MiB\n");
     const Mode modes[] = {Mode::Mapped, Mode::Staged, Mode::Managed, Mode::Vram};
     bool all_valid = true;
@@ -461,7 +524,7 @@ int main(int argc, char** argv) {
                 const int mode_index = (first_mode + order) % 4;
                 const Mode mode = modes[mode_index];
                 const TimedResult result = run_sample(mode, passes, sample + 1,
-                    mapped_weights, staged_weights, managed_weights,
+                    mapped_weights, staged_weights, managed_weights, rows,
                     static_cast<int>(blocks_per_row), weight_bytes, device_inputs,
                     columns, device_output, expected[passes - 1].data(), host_output, eviction,
                     eviction_vectors, eviction_sink, eviction_blocks, stream, start, stop);
@@ -521,16 +584,16 @@ int main(int argc, char** argv) {
 
             const BlockQ4_0* validation_weights = managed_path
                 ? managed_weights : staged_weights;
-            q4_matvec<<<kRows, kThreads, 0, stream>>>(validation_weights,
+            q4_matvec<<<rows, kThreads, 0, stream>>>(validation_weights,
                 device_inputs + static_cast<size_t>(3) * columns,
-                device_output, static_cast<int>(blocks_per_row), kRows);
+                device_output, static_cast<int>(blocks_per_row), rows);
             check(cudaGetLastError(), "launch transfer-only validation matvec");
             check(cudaStreamSynchronize(stream), "wait for transfer-only validation matvec");
-            check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
+            check(cudaMemcpy(host_output.data(), device_output, static_cast<size_t>(rows) * sizeof(float),
                              cudaMemcpyDeviceToHost), "copy transfer-only outputs");
             float max_abs_error = 0.0f;
             double checksum = 0.0;
-            const bool valid = validate_output(expected[3].data(), host_output,
+            const bool valid = validate_output(expected[3].data(), host_output, rows,
                                                 max_abs_error, checksum);
             all_valid = all_valid && valid;
             if (!valid) {
@@ -578,7 +641,7 @@ int main(int argc, char** argv) {
                 for (int order = 0; order < 2; ++order) {
                     const int path = (first_path + order) % 2;
                     const TimedResult result = run_chunked_sample(overlap_modes[path],
-                        passes, sample + 1, host_weights, chunk_buffers,
+                        passes, sample + 1, rows, host_weights, chunk_buffers,
                         row_bytes, chunk_rows, static_cast<int>(blocks_per_row),
                         device_inputs, columns, device_output,
                         expected[passes - 1].data(), host_output, eviction,

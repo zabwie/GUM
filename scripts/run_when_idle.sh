@@ -121,7 +121,7 @@ if [[ "$PROFILE" == "um_faults" ]]; then
   printf 'Profiling Unified Memory page faults and migrations to %s.nsys-rep.\n' "$REPORT"
   exec nsys profile --trace=cuda --cuda-um-cpu-page-faults=true \
     --cuda-um-gpu-page-faults=true --output="$REPORT" \
-    "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS"
+    "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" "$@"
 fi
 
-exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS"
+exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" "$@"
