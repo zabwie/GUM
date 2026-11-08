@@ -11,7 +11,8 @@ An isolated, reproducible study of GPU access to system RAM for local inference.
 - Its resource gate is [scripts/run_when_idle.sh](scripts/run_when_idle.sh).
 - Valid 16–128 MiB streaming measurements now exist for mapped host, H2D copy-only, H2D plus scan, and VRAM paths; five-sample results and caveats are in [BENCHMARKS.md](BENCHMARKS.md).
 - A 64 MiB managed-memory test measured CPU-first GPU access, repeated access, explicit prefetch, and page migrations. Nsight recorded 640 MiB H2D and 320 MiB D2H across the controlled trials; details are in [EXPERIMENTS.md](EXPERIMENTS.md).
-- These are synthetic float4 scans, not LLM inference. Inference throughput, cache benefit, and model-scale oversubscription remain unmeasured.
+- A cache-evicted strided-access benchmark compared mapped reads, full staging, and managed prefetch across 1–100% selectivity and 1–4 passes; sparse one-pass reads favored direct mapping, while denser or reused reads favored prefetch in this synthetic test.
+- These are synthetic float4 scans, not LLM inference. Inference throughput, cache hit rates for real kernels, and model-scale oversubscription remain unmeasured.
 
 Build with the installed CUDA 13.2 toolkit:
 

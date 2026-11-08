@@ -27,6 +27,25 @@ The pinned H2D-only path stayed near 14.7 GB/s over 16–128 MiB. E004 measured 
 
 The managed-memory results come from [the fresh-allocation run](results/managed-memory-fresh-64mib-20261108.txt). Nsight Systems separately confirmed 640 MiB H2D and 320 MiB D2H migration across the designed trials; the profiled timings are excluded because fault tracing adds overhead. This is not an inference comparison.
 
+## Access selectivity and reuse at 64 MiB
+
+The benchmark reads every 1st, 4th, 10th, or 100th float4 across the buffer, then repeats that read 1 or 4 times. Each H2D or managed-prefetch path moves the full 64 MiB once per trial. A 16 MiB device scan runs before each timed sample to evict prior L2 data; repeated passes within a sample can reuse data.
+
+| Access fraction | Passes | Mapped host | Full H2D + scans | Managed prefetch + scans |
+|---:|---:|---:|---:|---:|
+| 100% | 1 | 5.561 ms | 4.742 ms | 3.130 ms |
+| 100% | 4 | 21.389 ms | 5.334 ms | 3.661 ms |
+| 25% | 1 | 4.460 ms | 4.638 ms | 2.974 ms |
+| 25% | 4 | 17.891 ms | 4.931 ms | 3.267 ms |
+| 10% | 1 | 2.059 ms | 4.599 ms | 2.915 ms |
+| 10% | 4 | 8.730 ms | 5.373 ms | 2.998 ms |
+| 1% | 1 | 0.380 ms | 4.687 ms | 2.894 ms |
+| 1% | 4 | 1.260 ms | 4.639 ms | 2.949 ms |
+
+For this synthetic strided gather, mapped access wins at 1% for all tested pass counts and at 10% for one pass. Managed prefetch wins at 10% with two or more passes and at 25% or 100% even for one pass. The benchmark tests full-buffer movement; it does not yet test packing only selected values into a compact cache. The useful-bandwidth column in the raw output counts requested float4 values, not physical PCIe transaction bytes.
+
+Full samples and preflight data are in [the raw reuse run](results/reuse-selectivity-cold-64mib-20261108.txt); all checksums passed.
+
 ## Reproducibility notes
 
 - Hardware/runtime details are in [HARDWARE.md](HARDWARE.md).

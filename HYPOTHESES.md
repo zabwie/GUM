@@ -37,3 +37,13 @@
 **Results:** At 64 MiB, five independent CPU-first GPU scans had a 5.201 ms median; five GPU-prefetch-plus-scan trials had a 3.108 ms median. The latter is about 40% lower in this synthetic test. Nsight Systems observed 640 MiB H2D and 320 MiB D2H migrations across the five fresh first-touch trials and five explicit CPU↔GPU prefetch cycles. Repeated scans after first access were much faster (0.210 ms median), consistent with GPU-local reuse after migration.
 
 **Limitations:** The no-prefetch and prefetch arms use different allocation/reuse patterns, profiling overhead invalidates profiled timing comparisons, and no transformer or inference workload was tested. Repeat with matched fresh allocations and measure realistic tensor access/reuse before using this result to guide an inference design.
+
+## H5 — access selectivity and reuse determine whether full-buffer migration pays
+
+**Claim to falsify:** Direct mapped reads are preferable for a small one-pass fraction of a large host buffer, while moving the full buffer to VRAM pays when enough data is used or reused.
+
+**Experiment:** E009 sampled 100%, 25%, 10%, or 1% of float4 values at uniform strides across a 64 MiB buffer. It compared mapped reads, full pinned H2D staging, and full managed-memory prefetch for 1, 2, and 4 scans. Five samples per configuration used a 16 MiB L2 eviction scan before each timed trial; reuse within the passes of one trial remained available.
+
+**Results:** Mapped access was fastest at 1% for 1–4 passes (0.380–1.260 ms) and at 10% for one pass (2.059 ms). Managed prefetch became fastest at 10% with two or four passes (2.978 and 2.998 ms), and at 25% or 100% even for one pass (2.974 and 3.130 ms). Every checksum passed.
+
+**Limitations:** The gather is synthetic and uniformly strided; full-buffer staging/prefetch always moves 64 MiB, and no compact/selective cache path has yet been tested. These timings do not model quantized GEMV, attention, MoE routing, or end-to-end inference.

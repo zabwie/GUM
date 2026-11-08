@@ -5,9 +5,10 @@
 3. **Completed:** Measure 16, 24, 32, 64, and 128 MiB sequential scans. Staging was nearly tied at 16 MiB and faster at 24 MiB and above in these runs.
 4. **Completed:** Compare managed CPU-first access, repeated GPU access, and explicit prefetch; repeat first access across five fresh allocations.
 5. **Completed:** Use Nsight Systems to confirm host-to-device and device-to-host managed-memory migrations. Do not use profiler-inflated times as performance results.
-6. **Next:** Implement a 64 MiB reuse/selectivity benchmark. Compare mapped-host reads with GPU prefetch plus local reads for 1, 2, and 4 passes over full, 25%, 10%, and 1% of the data. Record useful bytes, migration bytes, checksums, and total time to identify when staging pays for itself.
-7. **Then:** Inspect the project-local availability of llama.cpp and an authorized model. Compare its existing unified-memory flag against the same ordinary-offload configuration only when the model and run fit the stated resource limits.
-8. **After access-pattern results:** Prototype a bounded GPU-side cache or overlapped prefetch pipeline only if a measured reuse/selectivity region justifies it.
+6. **Completed:** Compare mapped reads, full H2D staging, and managed prefetch for 1%, 10%, 25%, and 100% strided access with 1, 2, and 4 passes. Evict L2 before every timed trial; all checksums passed.
+7. **Next:** Add a bounded GPU-side cache path that gathers selected mapped-host values into compact VRAM, then reuses the compact set. Compare it with direct access and full prefetch for the same selectivity/reuse matrix.
+8. **Then:** Inspect project-local llama.cpp and authorized model availability. Compare its unified-memory flag with ordinary offload using the same workload only when the model and run fit the resource limits.
+9. Build an overlapped chunk-prefetch pipeline only if the cache and reuse measurements show a useful region.
 
 ## Guard behavior
 
