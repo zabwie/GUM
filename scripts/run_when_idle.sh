@@ -4,8 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIB="${MIB:-64}"
 REPEATS="${REPEATS:-5}"
+BENCHMARK="${BENCHMARK:-memory_paths}"
 SAMPLES=5
 MAX_TEMP_C=80
+
+case "$BENCHMARK" in
+  memory_paths|managed_paths) ;;
+  *) echo "Refusing: BENCHMARK must be memory_paths or managed_paths." >&2; exit 2 ;;
+esac
 
 if (( MIB < 1 || MIB > 256 )); then
   echo "Refusing: MIB must be between 1 and 256 (the project resource cap)." >&2
@@ -81,6 +87,6 @@ if [[ -n "$HEAVY_GPU_PIDS" ]]; then
 fi
 
 printf 'pmon_samples_begin\n%s\npmon_samples_end\n' "$PMON_OUTPUT"
-printf 'Starting bounded benchmark at %s (host pinned MiB=%s, VRAM MiB=%s, measured repeats=%s).\n' "$(date -Is)" "$MIB" "$MIB" "$REPEATS"
+printf 'Starting bounded benchmark at %s (benchmark=%s, buffer MiB=%s, measured repeats=%s).\n' "$(date -Is)" "$BENCHMARK" "$MIB" "$REPEATS"
 
-exec "$ROOT/benchmarks/memory_paths" --mib "$MIB" --repeats "$REPEATS"
+exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS"
