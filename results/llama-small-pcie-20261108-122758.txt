@@ -1,0 +1,4 @@
+# gpu  rxpci  txpci 
+# Idx   MB/s   MB/s 
+    0     19    108 
+    0     79     85 

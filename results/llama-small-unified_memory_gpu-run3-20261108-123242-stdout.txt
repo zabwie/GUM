@@ -1,0 +1,31 @@
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b8991-beb42fffa
+model      : Qwen3-0.6B-Q4_0.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> In three concise sentences, explain why mapped system RAM is slower than VRAM for a GPU. State that the GPU still performs the math, and mention PCIe bandwidth and latency.
+
+Mapped system RAM is slower than VRAM for a GPU because it is not directly accessible by the GPU's memory architecture, which limits its performance. The GPU still performs the math, but the performance is constrained by the PCIe bandwidth and latency of the system's memory. This means that while the GPU can execute the computations, the actual speed of the memory is a factor in how efficiently the GPU can handle the workload.
+
+[ Prompt: 4510.1 t/s | Generation: 407.6 t/s ]
+
+Exiting...

@@ -1,0 +1,55 @@
+Preflight: sampled GPU utilization=[42,42,41,41,41]% (max 42%), planned device buffers=304 MiB, planned host allocations~=288 MiB, minimum free VRAM=10462 MiB, available RAM=17600 MiB, max temperature=50 C, max power=61/170 W, CUDA compute clients=165671:165MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     34      7      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      5      1      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0    2260941     G      -      -      -      -      -      -    desktop --chang
+    0    2285981     G      -      -      -      -      -      -    antigravity    
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     34      7      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      5      1      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0    2260941     G      -      -      -      -      -      -    desktop --chang
+    0    2285981     G      -      -      -      -      -      -    antigravity    
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     39      9      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0    2260941     G      -      -      -      -      -      -    desktop --chang
+    0    2285981     G      -      -      -      -      -      -    antigravity    
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     39      9      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0    2260941     G      -      -      -      -      -      -    desktop --chang
+    0    2285981     G      -      -      -      -      -      -    antigravity    
+    0      18911     G      5      1      -      -      -      -    Xorg           
+    0      19328     G     28      6      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      5      1      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0    2260941     G      -      -      -      -      -      -    desktop --chang
+    0    2285981     G      -      -      -      -      -      -    antigravity    
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T13:48:02-04:00 (benchmark=residency_manager, buffer MiB=256, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,host_MiB=256,cache_MiB=64,page_bytes=2097152,pages=128,pressure_MiB=128,passes=4,repeats=5,requests=4194304
+mechanism,GPU_access_counters=frequency_tracking,CPU_role=rank_page_metadata_and_schedule_copies,host_backing=mapped_pinned_RAM,cold_page_policy=direct_host_access,hot_page_policy=VRAM_cache
+sample,phase=stable,repeat=1,baseline_5_pass_ms=277.537535,cache_total_ms=79.570258,training_ms=52.606565,manager_ms=7.194206,cached_4_pass_ms=19.769487,cache_hit_pct=90.001,promoted_pages=32,transfer_MiB=64.000,baseline_errors=0,cache_errors=0
+sample,phase=stable,repeat=2,baseline_5_pass_ms=297.593808,cache_total_ms=90.424454,training_ms=60.566695,manager_ms=6.583592,cached_4_pass_ms=23.274167,cache_hit_pct=89.971,promoted_pages=32,transfer_MiB=64.000,baseline_errors=0,cache_errors=0
+sample,phase=stable,repeat=3,baseline_5_pass_ms=279.431321,cache_total_ms=82.842409,training_ms=53.239536,manager_ms=6.899319,cached_4_pass_ms=22.703554,cache_hit_pct=89.974,promoted_pages=32,transfer_MiB=64.000,baseline_errors=0,cache_errors=0
+sample,phase=stable,repeat=4,baseline_5_pass_ms=269.072733,cache_total_ms=78.755727,training_ms=50.198221,manager_ms=6.795556,cached_4_pass_ms=21.761950,cache_hit_pct=89.980,promoted_pages=32,transfer_MiB=64.000,baseline_errors=0,cache_errors=0
+sample,phase=stable,repeat=5,baseline_5_pass_ms=272.341589,cache_total_ms=81.849452,training_ms=54.339860,manager_ms=6.974110,cached_4_pass_ms=20.535482,cache_hit_pct=89.995,promoted_pages=32,transfer_MiB=64.000,baseline_errors=0,cache_errors=0
+summary,phase=stable,n=5,baseline_median_ms=277.537535,learn_prefetch_reuse_median_ms=81.849452,cache_hit_pct_median=89.980,initial_cache_promotions=32,initial_transfer_MiB=64.000,baseline_errors=0,cache_errors=0
+pressure,allocated_MiB=128,free_before_evict_MiB=10150,free_after_remap_MiB=10182,cache_frames_before=32,cache_frames_after=16,evicted_pages=23,shifted_promotions=16,shifted_evictions=16,shifted_transfer_MiB=32.000,phase_two_cache_hit_pct=45.086,phase_two_errors=0

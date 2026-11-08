@@ -25,6 +25,9 @@ Measure and improve local LLM inference throughput when model state exceeds the 
 - E019 measured independent-chain scaling and managed-memory crossovers. At 960 MiB, full prefetch crossed mapped access between 896 and 1,024 chains; demand migration crossed between 1,024 and 1,536. Nsight migration volume approached repeated full-allocation movement at 256+ chains.
 - E021 extended synthetic Q4_0 GEMV to 960 MiB. At four passes, managed prefetch took 76.531 ms, versus 103.612 ms H2D-staged, 440.832 ms mapped, and 38.655 ms VRAM-resident. Every CPU-reference check passed.
 - E022 compared 960 MiB migration traces at 1, 256, and 4,096 chains. Higher fanout was associated with near-full-allocation aggregate migration and fewer GPU page faults; the traces combine demand and prefetch paths.
+- E023 verified a 1 GiB device plus 2 GiB mapped-host mixed kernel; all checks passed. Mixed one-pass latency was 394.184 ms versus 393.268 ms host-only, with 10.896 GB/s logical host bandwidth.
+- E024 verified a single CUDA VMM address range backed by 64 MiB device and 128 MiB host memory; both areas passed GPU validation with zero mismatches.
+- E025 compared Qwen3-0.6B Q4_0 actual inference in ordinary and cudaMallocManaged modes. Both outputs were correct and 29/29 layers were offloaded. Five-sample decode means were 383.054 and 381.812 tokens/s; this fitting model does not test oversubscription.
 - E013 found no standalone model small enough to verify inference within the 4 GiB additional-host-RAM cap. The 15.15 GB (14.1 GiB) base GGUF was not loaded.
 - Raw outputs, commands, source revisions, preflight conditions, and interpretation are in [EXPERIMENTS.md](EXPERIMENTS.md) and `results/`.
 
@@ -48,12 +51,14 @@ Measure and improve local LLM inference throughput when model state exceeds the 
 - Managed prefetch is the best tested path for reusable Q4_0 matrices that fit in VRAM. Chunk double-buffering reduces serialized chunk time but repeats transfers each pass and has not beaten one-time staging/prefetch for reused weights.
 - Synthetic Q4_0 GEMV tests through 960 MiB still favor managed prefetch over mapped and full H2D host-backed paths; the 960 MiB matrix fits in VRAM, so no oversubscription conclusion follows.
 - Random dependent loads show mapped-host aggregate throughput plateaus around 120–125 million loads/s at 64 MiB and around 76–87 million loads/s at 960 MiB. The managed crossover chain counts are specific to this test.
-- A real Q4_0 tensor GEMV slice works, but model inputs and neural-network execution were not tested.
+- A real Q4_0 tensor GEMV slice works, and a small quantized LLM has now run end to end. No model larger than available VRAM or dynamic residency manager has been validated.
 - `cudaMemGetInfo` changed by 128 MiB after first access and did not return after CPU prefetch; this global counter does not prove current placement.
-- llama.cpp's existing `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` path remains the inference baseline to compare. No model was run because no standalone model fit the current RAM cap; read-only CUDA registration of file-backed weights is unsupported by the device.
+- llama.cpp's managed-memory switch completed a small fitting-model baseline. Read-only CUDA registration of file-backed weights remains unsupported; over-VRAM inference remains untested.
 
 ## Next executable experiments
 
-Implement page-selective managed prefetch for the nodes reached by the randomized chains and compare it with mapped access, demand migration, and full-allocation prefetch at sparse and dense chain counts. Nsight showed that low fanout has many faults while higher fanout moves nearly the full allocation; test whether selective prefetch reduces both costs.
+The 13 GiB managed-allocation experiment is prepared in OVERSUBSCRIPTION_PLAN.md. Do not launch it until the user approves the revised budget stated there. The existing 2 GiB device and 4 GiB host limits remain in force.
 
-Compare llama.cpp's ordinary offload and `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` using a standalone model whose measured host-memory use stays within the existing 4 GiB additional-RAM cap. Keep context, batch, prompt, output length, and GPU-layer settings matched; record prefill/decode speed, first-token latency, correctness, and memory use. No such base model was found locally, so do not load the 14.1 GiB GGUF under the current cap. If no suitable model becomes available, continue with bounded tensor-level experiments rather than claiming end-to-end inference results.
+The next safe implementation is a page-aware residency manager under the existing caps. Track GPU page-access counts, prefetch predicted hot pages into VRAM, keep cold data host-backed, evict pages when the hot set shifts, and validate the complete data after each transition. Compare against the existing direct-mapped and compact-cache paths.
+
+After explicit over-VRAM budget approval, run the 13 GiB experiment and then repeat actual LLM inference above VRAM capacity with matched decode settings, output checks, memory-residency telemetry, PCIe records, and zero-swap enforcement.

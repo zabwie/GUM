@@ -173,3 +173,40 @@ Raw data: [serial 1 MiB](results/host-latency-1mib-20261108.txt), [4 MiB](result
 - Raw outputs preserve per-sample timings, checksums, preflight resource samples, source revision, and command conditions.
 - The 64 MiB VRAM scan had two outliers in the initial E003 run. Later 16–128 MiB samples were stable after three warm-ups.
 - Do not infer LLM throughput, cache benefit, physical placement of every page, or a model-size threshold from these scans.
+
+
+## Mixed device and mapped-host residency
+
+The CUDA-only mixed kernel used one device allocation and one mapped pinned-host allocation in the same launch. GPU kernels initialized, transformed, and checked both regions. Five samples per path passed with zero mismatches.
+
+| Path | Passes | Median | Logical bandwidth |
+|---|---:|---:|---:|
+| VRAM only | 1 | 6.620 ms | 324.387 GB/s |
+| VRAM only | 4 | 27.330 ms | 314.310 GB/s |
+| Mapped host only | 1 | 393.268 ms | 10.921 GB/s |
+| Mapped host only | 4 | 1,611.589 ms | 10.660 GB/s |
+| Mixed, one kernel | 1 | 394.184 ms | 16.344 GB/s total; 10.896 host and 5.448 device |
+| Mixed, one kernel | 4 | 1,612.628 ms | 15.980 GB/s total; 10.653 host and 5.327 device |
+
+Logical bandwidth counts the kernel's read and write traffic. The mixed kernel took about 0.9 ms longer than host-only while processing an additional 1 GiB device region. Host reads remain much slower than VRAM; the mixed path did not improve this streaming workload. This is combined GPU access, not oversubscription.
+
+The PCIe monitor was system-wide. Its five-sample quiet baseline median was 76 MB/s RX and 15 MB/s TX. During the run, 37 samples had medians of 6,341 MB/s RX and 7,102 MB/s TX. These rates are consistent with substantial transfer activity, but other GPU clients were present, so they are not attributed as exact benchmark traffic. Raw records: [mixed run](results/mixed-residency-1gib-device-2gib-host-20261108.txt), [quiet PCIe baseline](results/mixed-residency-pcie-baseline2-20261108.txt), and [during-run PCIe monitor](results/mixed-residency-pcie-final-20261108.txt).
+
+## Contiguous mixed-backed CUDA VMM range
+
+The VMM probe reserved one contiguous GPU virtual range and mapped 64 MiB of device backing followed by 128 MiB of host backing. Both VMM support attributes were enabled; both minimum allocation granularities were 2 MiB. A single GPU pointer initialized, transformed, and validated every element. It reported zero mismatches in both regions. The 22.248 ms timing is one probe sample and is not a stable performance estimate. The prototype is static mapping; it does not migrate pages or prove oversubscription. Raw result: [VMM probe](results/vmm-mixed-range-64dev-128host-20261108.txt).
+
+## Small-model inference baseline
+
+The actual Qwen3-0.6B Q4_0 GGUF was run through the existing llama.cpp CUDA build, commit beb42fffa. Ordinary allocation and the GGML_CUDA_ENABLE_UNIFIED_MEMORY mode both offloaded 29 of 29 layers to the GPU and produced the same correct response, “2 + 2 = 4”. The pinned model file is 428,970,080 bytes with SHA-256 da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4.
+
+Five llama-bench repetitions used 47 prompt tokens, 128 generated tokens, batch/ubatch 128, and all GPU layers:
+
+| Measure | Ordinary CUDA allocation | Unified-memory switch |
+|---|---:|---:|
+| Prompt processing | 6,032.8 ± 1,234.7 tokens/s | 6,273.3 ± 1,364.1 tokens/s |
+| Generation | 383.054 ± 2.923 tokens/s | 381.812 ± 1.210 tokens/s |
+
+The decode difference is about 0.3% and does not establish a speedup. The 8-token correctness run is separate from the 128-token throughput benchmark. The model fits comfortably in VRAM, so these results do not test host backing, page migration, a working set beyond VRAM, or a custom manager. The llama.cpp Unified Memory allocator also reports system RAM as GPU-free memory in this mode; its internal free-memory figure is invalid on this discrete GPU. Use external GPU telemetry.
+
+The GPU-memory monitor ranged from 810 MiB baseline to 1,428 MiB used during the whole comparison, with 11,082 MiB minimum free VRAM at preflight. RAM available was 20,106 MiB and swap use was zero. PCIe monitoring produced only seven one-second system-wide samples (median 104 MB/s RX and 39 MB/s TX, with one 8,043 MB/s RX sample); those measurements are too sparse and noisy to assign traffic to either mode. Raw benchmark outputs: [ordinary mode CSV](results/llama-small-conventional_gpu-bench-20261108-123905.csv), [unified-memory mode CSV](results/llama-small-unified_memory_gpu-bench-20261108-123905.csv), [ordinary answer](results/llama-small-conventional_gpu-correctness-20261108-123905-stdout.txt), [unified-memory answer](results/llama-small-unified_memory_gpu-correctness-20261108-123905-stdout.txt), [GPU-memory monitor](results/llama-small-gpu-memory-20261108-123914.txt), and [PCIe monitor](results/llama-small-pcie-20261108-123914.txt).

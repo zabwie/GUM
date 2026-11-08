@@ -1,0 +1,59 @@
+Preflight: sampled GPU utilization=[34,34,16,34,34]% (max 34%), planned device buffers=81 MiB, planned host allocations~=128 MiB, minimum free VRAM=10945 MiB, available RAM=20478 MiB, max temperature=41 C, max power=19/170 W, CUDA compute clients=165671:150MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     39     37      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     66     52      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     35     35      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     34     34      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     44     40      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T12:03:57-04:00 (device MiB=64, pinned host MiB=128, repeats=2, swap used MiB=0).
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,VRAM_MiB=11905,driver=13020,runtime=13020,canMapHostMemory=1,unifiedAddressing=1
+regions,device_MiB=64,host_pinned_MiB=128,total_working_set_MiB=192,device_allocation_plan_MiB=80.000,host_memlock_limit_MiB=3978
+addressing,device_ptr=0x7fa278000000,host_cpu_ptr=0x7fa270000000,host_gpu_ptr=0x7fa270000000,host_alias_equal=1
+execution,cpu_dataset_math=none,initializer=gpu_kernel,transform=gpu_kernel,validator=gpu_kernel,cpu_reads_only_two_error_counters
+result_format,sample,mode,passes,run,elapsed_ms,logical_total_GB_s,logical_host_GB_s,device_mismatches,host_mismatches,valid
+summary,device_only,passes=1,n=2,median_ms=0.427008,min_ms=0.403456,max_ms=0.427008,logical_total_GB_s=314.321,logical_device_GB_s=314.321,logical_host_GB_s=0.000,device_mismatches=0,host_mismatches=0,valid=yes
+sample,device_only,1,1,0.403456,332.670,0.000,device_mismatches=0,host_mismatches=0,valid=yes
+sample,device_only,1,2,0.427008,314.321,0.000,device_mismatches=0,host_mismatches=0,valid=yes
+summary,device_only,passes=4,n=2,median_ms=1.723328,min_ms=1.624704,max_ms=1.723328,logical_total_GB_s=311.531,logical_device_GB_s=311.531,logical_host_GB_s=0.000,device_mismatches=0,host_mismatches=0,valid=yes
+sample,device_only,4,1,1.723328,311.531,0.000,device_mismatches=0,host_mismatches=0,valid=yes
+sample,device_only,4,2,1.624704,330.442,0.000,device_mismatches=0,host_mismatches=0,valid=yes
+summary,mapped_host_only,passes=1,n=2,median_ms=22.902784,min_ms=21.925888,max_ms=22.902784,logical_total_GB_s=11.721,logical_device_GB_s=0.000,logical_host_GB_s=11.721,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mapped_host_only,1,1,21.925888,12.243,12.243,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mapped_host_only,1,2,22.902784,11.721,11.721,device_mismatches=0,host_mismatches=0,valid=yes
+summary,mapped_host_only,passes=4,n=2,median_ms=89.739265,min_ms=88.737793,max_ms=89.739265,logical_total_GB_s=11.965,logical_device_GB_s=0.000,logical_host_GB_s=11.965,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mapped_host_only,4,1,89.739265,11.965,11.965,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mapped_host_only,4,2,88.737793,12.100,12.100,device_mismatches=0,host_mismatches=0,valid=yes
+summary,mixed_single_kernel,passes=1,n=2,median_ms=23.081152,min_ms=21.519264,max_ms=23.081152,logical_total_GB_s=17.445,logical_device_GB_s=5.815,logical_host_GB_s=11.630,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mixed_single_kernel,1,1,21.519264,18.711,12.474,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mixed_single_kernel,1,2,23.081152,17.445,11.630,device_mismatches=0,host_mismatches=0,valid=yes
+summary,mixed_single_kernel,passes=4,n=2,median_ms=90.340515,min_ms=89.225220,max_ms=90.340515,logical_total_GB_s=17.828,logical_device_GB_s=5.943,logical_host_GB_s=11.885,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mixed_single_kernel,4,1,90.340515,17.828,11.885,device_mismatches=0,host_mismatches=0,valid=yes
+sample,mixed_single_kernel,4,2,89.225220,18.051,12.034,device_mismatches=0,host_mismatches=0,valid=yes

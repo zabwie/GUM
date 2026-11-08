@@ -1,6 +1,9 @@
 /benchmarks/memory_paths
 /benchmarks/managed_paths
 /benchmarks/reuse_paths
+/benchmarks/mixed_residency
+/benchmarks/vmm_mixed_probe
+/models/*.gguf
 /results/*.csv
 /results/*.sqlite
 /logs/*.log

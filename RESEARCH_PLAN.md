@@ -14,8 +14,11 @@ Find the best reproducible way for local inference to use system RAM with the RT
    - **Completed:** Add randomized dependent-load tests from 1 to 960 MiB and measure independent-chain scaling, managed demand faults, full prefetch, and a migration trace.
 6. **Completed:** Measure a compact GPU-side cache, synthetic Q4_0 matvec paths, and a bounded Q4_0 tensor GEMV. Add serialized and double-buffered chunk pipelines; chunk reuse remains slower than one-time staging/prefetch for the tested working sets.
    - **Completed:** Extend the synthetic Q4_0 matrix benchmark through 960 MiB. Managed prefetch remains the fastest tested host-backed path for this matrix workload.
-7. **Pending a suitable model under the current resource cap:** Compare llama.cpp's existing Linux CUDA path (`GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`, which switches CUDA allocations to `cudaMallocManaged`) against ordinary CUDA allocation/offload using identical settings. The only standalone local base model found is about 14.1 GiB, above the 4 GiB additional-RAM budget.
-8. **Next:** Run end-to-end inference only with a standalone model whose actual incremental host and device use can remain within the stated budgets. Record output correctness, prefill/decode rates, time to first token, and memory use.
+7. **Completed for the small-model baseline:** Compare llama.cpp ordinary CUDA allocation and GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 on Qwen3-0.6B Q4_0 with matched generation settings. Both outputs passed; no speed difference was established.
+8. **Pending explicit budget approval:** Run a 13 GiB managed working set and then an over-VRAM quantized LLM comparison only after the user approves the revised caps. See OVERSUBSCRIPTION_PLAN.md.
+
+9. **Next safe stage:** Implement and measure dynamic hot/cold residency and eviction using a bounded GPU/host allocation within the existing limits.
+10. **Completed:** CUDA VMM on this device can map host and device physical allocations into adjacent segments of one GPU-visible virtual range.
 
 ## Guardrails
 

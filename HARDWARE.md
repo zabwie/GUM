@@ -40,3 +40,8 @@ Mapped-host and H2D streaming rates, managed-memory first-touch/prefetch timings
 ### Capacity ceiling
 
 PCIe 4.0 x16 has a nominal one-direction line-rate ceiling of about 31.5 GB/s before protocol and workload overhead. This is a theoretical link limit, not a measured result and not a prediction that host-memory kernels will achieve it.
+
+
+### CUDA VMM capability check
+
+A later CUDA Driver API probe reported virtual-memory-management support and host-backed VMM support on the RTX 3060. The minimum granularity for both device and host allocations was 2,097,152 bytes. The mixed-range experiment successfully mapped these distinct backings into adjacent segments of one GPU-visible address range; see E024 in EXPERIMENTS.md. The same successful probe does not imply that Linux HMM automatically implements the mapping policy.

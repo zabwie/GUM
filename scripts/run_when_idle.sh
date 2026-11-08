@@ -7,6 +7,8 @@ REPEATS="${REPEATS:-5}"
 CHUNK_MIB="${CHUNK_MIB:-16}"
 BENCHMARK="${BENCHMARK:-memory_paths}"
 PROFILE="${PROFILE:-none}"
+DEVICE_MIB="${DEVICE_MIB:-1024}"
+HOST_MIB="${HOST_MIB:-2048}"
 SAMPLES=5
 MAX_TEMP_C=80
 MAX_MIB=256
@@ -17,10 +19,13 @@ fi
 if [[ "$BENCHMARK" == "q4_matvec" ]]; then
   MAX_MIB=960
 fi
+if [[ "$BENCHMARK" == "residency_manager" ]]; then
+  MAX_MIB=512
+fi
 
 case "$BENCHMARK" in
-  memory_paths|managed_paths|reuse_paths|q4_matvec|host_latency) ;;
-  *) echo "Refusing: BENCHMARK must be memory_paths, managed_paths, reuse_paths, q4_matvec, or host_latency." >&2; exit 2 ;;
+  memory_paths|managed_paths|reuse_paths|q4_matvec|host_latency|mixed_residency|vmm_mixed_probe|residency_manager) ;;
+  *) echo "Refusing: unknown BENCHMARK=$BENCHMARK." >&2; exit 2 ;;
 esac
 case "$PROFILE" in
   none|um_faults) ;;
@@ -42,6 +47,18 @@ fi
 if (( CHUNK_MIB < 4 || CHUNK_MIB > 64 )); then
   echo "Refusing: CHUNK_MIB must be between 4 and 64." >&2
   exit 2
+fi
+if [[ "$BENCHMARK" == "mixed_residency" || "$BENCHMARK" == "vmm_mixed_probe" ]]; then
+  if [[ ! "$DEVICE_MIB" =~ ^[0-9]+$ || ! "$HOST_MIB" =~ ^[0-9]+$ ]] ||
+     (( DEVICE_MIB < 1 || DEVICE_MIB > 2031 || HOST_MIB < 1 || HOST_MIB > 4096 )); then
+    echo "Refusing: DEVICE_MIB must be 1..2031 and HOST_MIB must be 1..4096." >&2
+    exit 2
+  fi
+  LOCKED_MEM_KIB="$(ulimit -l)"
+  if [[ "$LOCKED_MEM_KIB" =~ ^[0-9]+$ ]] && (( LOCKED_MEM_KIB < HOST_MIB * 1024 )); then
+    echo "Refusing: HOST_MIB exceeds this process's locked-memory limit." >&2
+    exit 2
+  fi
 fi
 
 mapfile -t GPU_SNAPSHOTS < <(
@@ -94,15 +111,26 @@ elif [[ "$BENCHMARK" == "host_latency" ]]; then
   VRAM_BUFFER_COUNT=2
   VRAM_FIXED_MIB=17
 fi
-PLANNED_DEVICE_MIB="$((MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
+if [[ "$BENCHMARK" == "mixed_residency" || "$BENCHMARK" == "vmm_mixed_probe" ]]; then
+  PLANNED_DEVICE_MIB="$((DEVICE_MIB + 17))"
+elif [[ "$BENCHMARK" == "residency_manager" ]]; then
+  # Up to 128 MiB cache + 128 MiB pressure + 16 MiB requests + 32 MiB scratch.
+  PLANNED_DEVICE_MIB=304
+else
+  PLANNED_DEVICE_MIB="$((MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
+fi
 if (( PLANNED_DEVICE_MIB > 2048 )); then
-  echo "Refusing: planned device buffers exceed the 2048 MiB project cap; reduce MIB or CHUNK_MIB." >&2
+  echo "Refusing: planned device buffers exceed the 2048 MiB project cap." >&2
   exit 2
 fi
 MIN_GPU_FREE_MIB="$((2048 + PLANNED_DEVICE_MIB))"
 PLANNED_HOST_MIB=0
 if [[ "$BENCHMARK" == "host_latency" ]]; then
   PLANNED_HOST_MIB="$((MIB * 3))"
+elif [[ "$BENCHMARK" == "mixed_residency" || "$BENCHMARK" == "vmm_mixed_probe" ]]; then
+  PLANNED_HOST_MIB="$HOST_MIB"
+elif [[ "$BENCHMARK" == "residency_manager" ]]; then
+  PLANNED_HOST_MIB="$((MIB + 32))"
 elif [[ "$BENCHMARK" == "reuse_paths" || "$BENCHMARK" == "q4_matvec" ]]; then
   PLANNED_HOST_MIB="$((MIB * 2))"
 elif [[ "$BENCHMARK" == "managed_paths" ]]; then
@@ -110,6 +138,7 @@ elif [[ "$BENCHMARK" == "managed_paths" ]]; then
 else
   PLANNED_HOST_MIB="$MIB"
 fi
+SWAP_USED_MIB="$(awk '/SwapTotal:/ {total=$2} /SwapFree:/ {free=$2} END {print int((total-free)/1024)}' /proc/meminfo)"
 
 printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), planned device buffers=%s MiB, planned host allocations~=%s MiB, minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute clients=%s, sustained heavy GPU PIDs=%s\n' \
   "$GPU_UTIL_SAMPLES" "$GPU_MAX_UTIL" "$PLANNED_DEVICE_MIB" "$PLANNED_HOST_MIB" "$GPU_MIN_FREE_MIB" "$RAM_AVAILABLE_MIB" "$GPU_MAX_TEMP_C" \
@@ -121,6 +150,14 @@ if (( GPU_MIN_FREE_MIB < MIN_GPU_FREE_MIB )); then
 fi
 if (( RAM_AVAILABLE_MIB < 8192 )); then
   echo "Deferred: less than 8 GiB system RAM is currently available." >&2
+  exit 3
+fi
+if [[ "$BENCHMARK" == "mixed_residency" || "$BENCHMARK" == "vmm_mixed_probe" ]] && (( RAM_AVAILABLE_MIB < PLANNED_HOST_MIB + 8192 )); then
+  echo "Deferred: less than the pinned host allocation plus 8 GiB RAM headroom is available." >&2
+  exit 3
+fi
+if [[ "$BENCHMARK" == "mixed_residency" || "$BENCHMARK" == "vmm_mixed_probe" ]] && (( SWAP_USED_MIB > 0 )); then
+  echo "Deferred: system swap is already in use; pinned-host runs require zero swap use." >&2
   exit 3
 fi
 if (( GPU_MAX_TEMP_C >= MAX_TEMP_C )); then
@@ -137,7 +174,15 @@ if [[ -n "$HEAVY_GPU_PIDS" ]]; then
 fi
 
 printf 'pmon_samples_begin\n%s\npmon_samples_end\n' "$PMON_OUTPUT"
-printf 'Starting bounded benchmark at %s (benchmark=%s, buffer MiB=%s, measured repeats=%s).\n' "$(date -Is)" "$BENCHMARK" "$MIB" "$REPEATS"
+if [[ "$BENCHMARK" == "vmm_mixed_probe" ]]; then
+  printf 'Starting bounded VMM probe at %s (device MiB=%s, host MiB=%s, swap used MiB=%s).\n' \
+    "$(date -Is)" "$DEVICE_MIB" "$HOST_MIB" "$SWAP_USED_MIB"
+elif [[ "$BENCHMARK" == "mixed_residency" ]]; then
+  printf 'Starting bounded benchmark at %s (device MiB=%s, pinned host MiB=%s, repeats=%s, swap used MiB=%s).\n' \
+    "$(date -Is)" "$DEVICE_MIB" "$HOST_MIB" "$REPEATS" "$SWAP_USED_MIB"
+else
+  printf 'Starting bounded benchmark at %s (benchmark=%s, buffer MiB=%s, measured repeats=%s).\n' "$(date -Is)" "$BENCHMARK" "$MIB" "$REPEATS"
+fi
 
 if [[ "$PROFILE" == "um_faults" ]]; then
   REPORT="$ROOT/results/unified-memory-faults-${BENCHMARK}-${MIB}mib-$(date +%Y%m%d-%H%M%S)"
@@ -150,6 +195,17 @@ fi
 if [[ "$BENCHMARK" == "q4_matvec" ]]; then
   exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" \
     --chunk-mib "$CHUNK_MIB" "$@"
+fi
+if [[ "$BENCHMARK" == "mixed_residency" ]]; then
+  exec "$ROOT/benchmarks/$BENCHMARK" --device-mib "$DEVICE_MIB" \
+    --host-mib "$HOST_MIB" --repeats "$REPEATS"
+fi
+if [[ "$BENCHMARK" == "vmm_mixed_probe" ]]; then
+  exec "$ROOT/benchmarks/$BENCHMARK" --device-mib "$DEVICE_MIB" \
+    --host-mib "$HOST_MIB"
+fi
+if [[ "$BENCHMARK" == "residency_manager" ]]; then
+  exec "$ROOT/benchmarks/$BENCHMARK" --host-mib "$MIB" --repeats "$REPEATS" "$@"
 fi
 
 exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" "$@"

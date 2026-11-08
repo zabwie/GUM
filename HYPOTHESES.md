@@ -120,3 +120,20 @@
 **Results:** Across traces with two warmups and one measured sample of both managed paths, aggregate H2D/D2H migration rose from 3,823.829/1,817.969 decimal MB at one chain to 5,833.306/5,033.165 MB at 256 chains and 5,932.446/5,033.165 MB at 4,096 chains. Reported GPU page faults fell from 10,674 to 965 to 458. Timing crossovers also changed: mapped access won at 256 chains, explicit full prefetch was near a tie at 896 and faster at 1,024, and demand migration became faster between 1,024 and 1,536 chains.
 
 **Limitations:** Nsight totals aggregate both managed paths and warmups. They do not attribute bytes to individual arms, query exact per-page placement, or represent a model inference workload.
+
+
+## H15 — CUDA VMM can combine host and device backing in one GPU address range
+
+**Claim to falsify:** On this RTX 3060, a single contiguous GPU virtual range can contain adjacent host-backed and device-backed regions, both accessible through one pointer by a GPU kernel.
+
+**Result:** E024 queried VMM and host-VMM support, reserved one range, mapped 64 MiB of device physical backing and 128 MiB of host physical backing, and used one pointer for GPU initialization, transform, and validation. Both capability attributes were enabled, the minimum granularity was 2 MiB, and the error count was zero.
+
+**Limitations:** The mapping is static. It does not show automatic page migration, oversubscription, or a high-performance cache policy. Host-backed accesses still traverse the GPU interconnect.
+
+## H16 — llama.cpp managed allocations preserve small-model inference
+
+**Claim to falsify:** The existing llama.cpp CUDA allocation switch to cudaMallocManaged can run a small fitting quantized model with output matching ordinary CUDA allocation.
+
+**Result:** E025 ran Qwen3-0.6B Q4_0 in both modes. Both offloaded 29/29 layers and returned “2 + 2 = 4”. Five-repetition decode means were 383.054 tokens/s ordinary and 381.812 tokens/s managed.
+
+**Limitations:** The model fits in VRAM; the result does not validate host backing, page migration under pressure, or oversubscription. The small decode difference does not establish a performance change.

@@ -245,3 +245,43 @@ Commands were pinned to one CPU core and routed through the resource gate. Repla
 | E020 4,096-chain migration profile | `taskset -c 0 env PROFILE=um_faults BENCHMARK=host_latency MIB=960 REPEATS=1 scripts/run_when_idle.sh --steps 4096 --chains 4096` |
 | E022 migration profiles | Use the E020 command with `--chains 1` and `--chains 256` |
 | E021 Q4_0 matrices | `taskset -c 0 env BENCHMARK=q4_matvec MIB=<256,960> REPEATS=5 scripts/run_when_idle.sh` |
+
+
+## E023 — verify one GPU kernel across VRAM and mapped host RAM
+
+- Date: 2026-11-08
+- Question: Can one GPU kernel correctly operate on a 1 GiB device allocation and a 2 GiB GPU-accessible host allocation in one workload?
+- Procedure: Added benchmarks/mixed_residency.cu and extended the bounded runner. The runner preserved the existing 2 GiB device and 4 GiB host allocation limits, required zero current swap use, checked the pinned-memory limit, and reserved 8 GiB of available RAM. GPU kernels initialized, transformed, and validated all 3 GiB; CPU code read only two error counters. Five samples were collected per path.
+- Preflight: RTX 3060 reported 11,905 MiB total VRAM; minimum free VRAM was 10,945 MiB, available RAM 20,431 MiB, and swap use zero. The benchmark planned 1,041 MiB of device memory including scratch/counters and 2,048 MiB pinned host memory.
+- Results: All device-only, mapped-host-only, and mixed samples passed with zero mismatches. One-pass medians were 6.620 ms VRAM-only, 393.268 ms mapped-host-only, and 394.184 ms mixed. The four-pass medians were 27.330, 1,611.589, and 1,612.628 ms. For the mixed one-pass kernel, logical bandwidth was 16.344 GB/s total, comprising 10.896 GB/s host and 5.448 GB/s device. The 1 GiB device region added only about 0.9 ms relative to mapped-host-only because host traffic dominated.
+- PCIe and interpretation: System-wide dmon median rose from 76/15 MB/s RX/TX in the five-sample baseline to 6,341/7,102 MB/s across 37 during-run samples. Other clients were active, so this is evidence of coincident traffic, not precise attribution to the benchmark. The test demonstrates mixed GPU access, not a faster unified memory path or oversubscription.
+- Raw outputs: results/mixed-residency-1gib-device-2gib-host-20261108.txt and the two PCIe records linked in BENCHMARKS.md.
+
+## E024 — test a contiguous VMM range with device and host physical backing
+
+- Date: 2026-11-08
+- Question: Can this RTX 3060 expose device-backed and host-backed physical allocations through one contiguous GPU virtual range?
+- Procedure: Added src/unified_range.hpp and benchmarks/vmm_mixed_probe.cu. CUDA Driver API VMM allocated and mapped adjacent device and host regions. The probe queried VMM support, host-backed VMM support, and minimum allocation granularities, then used one pointer for GPU-only initialization, transform, and validation.
+- Results: VMM and host VMM support were both enabled. Minimum granularity was 2,097,152 bytes for each region. A 64 MiB device segment and 128 MiB host segment occupied one 192 MiB contiguous GPU-visible range. Every element was touched and checked by GPU kernels; mismatches were zero. One event sample measured 22.248 ms.
+- Interpretation: CUDA VMM can statically unify the GPU-visible address range while retaining distinct device and system-memory backing on this hardware. The host-backed part remains system RAM accessed over the GPU interconnect. This does not show demand migration, oversubscription, or equal access costs.
+- Raw output: results/vmm-mixed-range-64dev-128host-20261108.txt.
+- Source references: NVIDIA CUDA Driver API VMM documentation and CUDA Programming Guide VMM documentation; the Linux HMM documentation describes driver-facing page migration helpers rather than an application allocation API.
+
+## E025 — compare a fitting quantized LLM in ordinary and managed allocation modes
+
+- Date: 2026-11-08
+- Question: Does the existing llama.cpp Unified Memory switch preserve small-model output and alter throughput when the model fits in VRAM?
+- Procedure: Used the existing llama.cpp CUDA build, version 8991 / commit beb42fffa, without modifying its checkout. The Qwen3-0.6B Q4_0 file from ggml-org/Qwen3-0.6B-GGUF revision 13ac066 was 428,970,080 bytes and SHA-256 da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4. The model repository identifies Apache-2.0 licensing. A correctness prompt ran separately in both modes; llama-bench then measured five repetitions at 47 prompt tokens and 128 generated tokens, batch/ubatch 128, with all GPU layers. The local llama.cpp source at commit d775b8967a46d8beb110d444aa3b8938179e0dd8 shows that the environment switch routes CUDA allocations through cudaMallocManaged.
+- Preflight and monitoring: minimum free VRAM 11,082 MiB, available RAM 20,106 MiB, and swap use zero. All 29/29 layers were reported offloaded in each mode. The model buffer report showed 319.96 MiB on CUDA and 83.46 MiB CPU-mapped; the system-wide GPU monitor ranged from 810 to 1,428 MiB used. Short dmon output had seven samples and an 8,043 MB/s RX outlier; it cannot assign PCIe traffic to either mode.
+- Correctness: Both modes returned “2 + 2 = 4”.
+- Throughput: Ordinary versus Unified Memory decode averaged 383.054 ± 2.923 versus 381.812 ± 1.210 tokens/s. Prompt processing averaged 6,032.8 ± 1,234.7 versus 6,273.3 ± 1,364.1 tokens/s. The decode difference is about 0.3%, too small to establish an advantage. The model fits in VRAM; this is not an oversubscription test.
+- Interpretation: This validates an actual CUDA-backed LLM run and a small-model baseline. It does not demonstrate host-resident weights, page migration, improved inference, or behavior above VRAM capacity. The Unified Memory allocator's internal free-memory report uses host RAM availability on this discrete GPU and must not be read as physical VRAM free space.
+- Raw outputs: results/llama-small-conventional_gpu-bench-20261108-123905.csv, results/llama-small-unified_memory_gpu-bench-20261108-123905.csv, correctness stdout/stderr, and system-wide memory/PCIe monitors listed in BENCHMARKS.md.
+
+## E025 — page-aware residency manager (hot-page VRAM cache over pinned host backing)
+
+- Date: 2026-11-08
+- Procedure: src/residency_manager.hpp + benchmarks/residency_manager.cu via scripts/run_when_idle.sh (BENCHMARK=residency_manager MIB=256 REPEATS=5, cache 64 MiB, 4 passes, 4 Mi requests, 90% of accesses to 32 hot 2 MiB pages). Removed a failing cudaSetDeviceFlags call; the guard now supports this benchmark (304 MiB device, host+32 MiB plan).
+- Results (measured, all validation errors zero): baseline direct mapped host, 5 passes median 277.5 ms; learn+prefetch+4 cached passes median 81.8 ms (about 3.4x); cache hit rate 89.98%; 32 pages / 64 MiB promoted. Pressure test: capacity halved 32->16 frames, 23 pages evicted, shifted hot set promoted 16 pages (32 MiB), hit rate 45.1% (cache holds half the hot set, as expected).
+- Caveats: synthetic 90/10 skewed trace, 256 MiB host range, fits easily in VRAM; not true oversubscription and not yet a real model. Note: cudaMalloc/cudaFree per page is used, which is slow vs a slab allocator.
+- Raw output: results/residency-manager-256mib-20261108.txt

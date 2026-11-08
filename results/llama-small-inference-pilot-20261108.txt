@@ -1,0 +1,121 @@
+Preflight: GPU utilization=[18,30,14,14,35]% (max 35%), minimum free VRAM=11103 MiB, available RAM=20148 MiB, maximum temperature=39 C, swap used=0 MiB, sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     36     36      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      9      8      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     34     29      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+pmon_samples_end
+experiment,llama_small_qwen3_0.6b_q4_0,date=2026-11-08T12:27:58-04:00,runs_per_arm=1,model_sha256=da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4,model_bytes=428970080,llama_cli=/home/zabwie/llama.cpp/build/bin/llama-cli
+settings,device=0,gpu_layers=all,context=512,batch=128,ubatch=128,max_tokens=64,temperature=0,top_k=1,seed=42,reasoning=off
+prompt,Explain in four sentences why a GPU can read mapped system RAM but gets lower bandwidth than VRAM. Use exactly four sentences.
+pcie_log,/home/zabwie/gpu-unified-memory-research/results/llama-small-pcie-20261108-122758.txt
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 11905 MiB):
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes, VRAM: 11905 MiB
+version: 8991 (beb42fffa)
+built with GNU 13.3.0 for Linux x86_64
+run_begin,mode=conventional_gpu,run=1,time=2026-11-08T12:27:58-04:00
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 11905 MiB):
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes, VRAM: 11905 MiB
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b8991-beb42fffa
+model      : Qwen3-0.6B-Q4_0.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> Explain in four sentences why a GPU can read mapped system RAM but gets lower bandwidth than VRAM. Use exactly four sentences.
+
+1. A GPU can read mapped system RAM, which is a type of memory that is shared between the operating system and the GPU, but this is not the same as using a separate VRAM device. This means that the GPU can access the same memory as the system, but with lower bandwidth than what is available incommon_memory_breakdown_print: | memory breakdown [MiB] | total    free    self   model   context   compute    unaccounted |
+common_memory_breakdown_print: |   - CUDA0 (RTX 3060)   | 11905 = 10518 + ( 450 =   319 +      56 +      74) +         936 |
+common_memory_breakdown_print: |   - Host               |                    84 =    83 +       0 +       1                |
+
+
+[ Prompt: 2905.0 t/s | Generation: 397.1 t/s ]
+
+Exiting...
+run_end,mode=conventional_gpu,run=1,time=2026-11-08T12:27:59-04:00
+run_begin,mode=unified_memory_gpu,run=1,time=2026-11-08T12:27:59-04:00
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 11905 MiB):
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes, VRAM: 11905 MiB
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b8991-beb42fffa
+model      : Qwen3-0.6B-Q4_0.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> Explain in four sentences why a GPU can read mapped system RAM but gets lower bandwidth than VRAM. Use exactly four sentences.
+
+1. A GPU can read mapped system RAM, which is a type of memory that is shared between the operating system and the GPU, but this is not the same as using a separate VRAM device. This means that the GPU can access the same memory as the system, but with lower bandwidth than what is available incommon_memory_breakdown_print: | memory breakdown [MiB] | total    free    self   model   context   compute    unaccounted |
+common_memory_breakdown_print: |   - CUDA0 (RTX 3060)   | 11905 = 19855 + ( 450 =   319 +      56 +      74) +       -8400 |
+common_memory_breakdown_print: |   - Host               |                    84 =    83 +       0 +       1                |
+
+
+[ Prompt: 3675.8 t/s | Generation: 411.3 t/s ]
+
+Exiting...
+run_end,mode=unified_memory_gpu,run=1,time=2026-11-08T12:28:00-04:00
+postrun,available_ram_MiB=20006,swap_used_MiB=0
+804 MiB, 11103 MiB, 69 %, 44

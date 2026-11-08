@@ -1,0 +1,40 @@
+Preflight: sampled GPU utilization=[17,29,20,36,35]% (max 36%), planned device buffers=81 MiB, planned host allocations~=128 MiB, minimum free VRAM=11103 MiB, available RAM=20173 MiB, max temperature=39 C, max power=25/170 W, CUDA compute clients=165671:152MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     50     40      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     63     54      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     48     41      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0    1951316     G      -      -      -      -      -      -    zen            
+    0    1964434     G      -      -      -      -      -      -    discord --gpu-p
+pmon_samples_end
+Starting bounded VMM probe at 2026-11-08T12:18:13-04:00 (device MiB=64, host MiB=128, swap used MiB=0).
+capabilities,vmm=1,host_vmm=1,supported=yes
+vmm_range,base=0x302000000,host_segment_offset_bytes=67108864,device_granularity_bytes=2097152,host_granularity_bytes=2097152,device_mapped_MiB=64.000,host_mapped_MiB=128.000,total_mapped_MiB=192.000,one_gpu_va=yes
+execution,one_pointer_for_device_and_host=yes,all_data_math=GPU_kernels,cpu_dataset_math=none
+result,elapsed_ms=22.248129,device_mismatches=0,host_mismatches=0,valid=yes

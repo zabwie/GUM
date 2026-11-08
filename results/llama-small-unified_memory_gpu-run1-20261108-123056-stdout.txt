@@ -1,0 +1,31 @@
+
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b8991-beb42fffa
+model      : Qwen3-0.6B-Q4_0.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> Repeat these three sentences exactly twice, with no extra text: The GPU reads data from host RAM. The data travels over PCIe. PCIe bandwidth is lower than VRAM bandwidth.
+
+The GPU reads data from host RAM. The data travels over PCIe. PCIe bandwidth is lower than VRAM bandwidth.
+
+[ Prompt: 4146.8 t/s | Generation: 397.0 t/s ]
+
+Exiting...

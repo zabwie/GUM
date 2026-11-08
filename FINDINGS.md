@@ -23,12 +23,21 @@
 - Existing upstream llama.cpp CUDA support has a unified-memory mode. Its build guide documents `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`; source inspection shows it selects `cudaMallocManaged` in place of `cudaMalloc`. This is an existing inference baseline to evaluate before a custom allocator/cache.
 - The GPU link is PCIe 4.0 x16 at 16 GT/s. The approximately 31.5 GB/s one-way figure is a theoretical line-rate ceiling before overhead.
 
+## New results from the continuation
+
+- E023 verified one GPU kernel accessing a 1 GiB device allocation and 2 GiB mapped pinned-host allocation. All initialization, transforms, and validation ran on GPU. Five-sample medians were 6.620 ms for VRAM-only, 393.268 ms for mapped-host-only, and 394.184 ms for mixed. This confirms combined access, while host traffic dominates the stream.
+- E024 demonstrated one contiguous GPU virtual address range with separate device and host physical backing through CUDA VMM. The RTX 3060 reported both VMM capabilities; minimum allocation granularity was 2 MiB. One pointer kernel correctly touched the 64 MiB device and 128 MiB host regions.
+- E025 ran Qwen3-0.6B Q4_0 through llama.cpp in ordinary and managed-allocation modes. Both returned the correct answer and offloaded 29/29 layers. Five-repetition decode means were 383.054 and 381.812 tokens/s. The model fits in VRAM, so the result does not establish oversubscription or faster inference.
+- CUDA VMM explicitly provides create, reserve, map, and access-right operations; its allocation granularity must be queried and respected. The device minimum measured 2 MiB here. See the [CUDA Driver API VMM](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__VA.html) and [CUDA Programming Guide VMM](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/virtual-memory-management.html).
+- CUDA managed allocations can oversubscribe device memory when concurrent managed access is supported; migration and prefetch are controlled by the runtime and guided by usage hints. This machine reports concurrent managed access, but an over-VRAM working set has not yet been run. See the [CUDA Runtime memory API](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY.html) and [CUDA Unified Memory guide](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html).
+- Linux HMM is driver infrastructure for address-space mirroring and page migration. Its presence in nvidia-smi does not specify a user-space mixed-memory policy. See the [Linux HMM documentation](https://docs.kernel.org/mm/hmm.html).
+
 ## Interpretation and limits
 
 - The 64 MiB first-touch timing and Nsight migration records are consistent with demand-driven page migration. Explicit prefetch reduced the measured prefetch-plus-scan median from 5.201 ms to 3.108 ms in this synthetic workload, about 40% lower latency. The comparison is preliminary: the no-prefetch arm uses independent fresh allocations, the prefetch arm repeats on one allocation, and the benchmark is not a transformer kernel.
 - The near-VRAM-speed repeat scan and observed migration totals are consistent with pages becoming GPU-local after first touch. Nsight confirms transfer direction and byte totals, but this benchmark does not query exact residency for every page.
 - The cache prototype still only caches a synthetic strided float4 set. The Q4_0 tensor test uses real layer weights but synthetic vectors and a single GEMV, so it is not end-to-end model execution.
-- No local LLM inference throughput, model larger than VRAM, cache hit rate, expert-routing benefit, or end-to-end system-RAM extension has been measured. The only standalone base GGUF found in inspected model/cache locations is about 14.1 GiB, above the current 4 GiB additional-RAM budget; a full load was not attempted.
+- A small Qwen3 LLM has now been measured end to end, but no model larger than available VRAM, dynamic cache hit rate, expert-routing benefit, or full system-RAM extension has been measured. The historical 14.1 GiB base GGUF was not loaded under the prior 4 GiB host cap.
 - The 960 MiB random-load set still fits in the RTX 3060 VRAM; the latest tests do not establish oversubscription behavior. Chain-count crossover values are workload-specific and should not be used as inference thresholds.
 - No novelty claim is made.
 
@@ -41,9 +50,9 @@
 
 ## Existing inference implementation
 
-The upstream llama.cpp CUDA backend's unified-memory flag is a path to test, not evidence of speed or correctness on this machine. Compare it against ordinary offload with the same model, quantization, context, batch, prompt, and output length. Do not modify an existing user inference project or model files.
+The upstream llama.cpp CUDA backend's unified-memory flag has now been measured against ordinary allocation for a fitting 0.6B model. The run validates the small-model path but not host-backed weights or oversubscription. Use the same model and decode settings in the next approved over-VRAM comparison; do not modify the existing llama.cpp checkout.
 
 Sources inspected 2026-11-08:
 
 - [llama.cpp build guide: unified-memory runtime flag](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)
-- [llama.cpp CUDA allocator: managed vs device allocation](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-cuda/ggml-cuda.cu#L175-L200)
+- [llama.cpp CUDA allocator: managed vs device allocation](https://github.com/ggml-org/llama.cpp/blob/d775b8967a46d8beb110d444aa3b8938179e0dd8/ggml/src/ggml-cuda/ggml-cuda.cu#L135-L155)

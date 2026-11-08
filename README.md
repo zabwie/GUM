@@ -1,6 +1,6 @@
 # GPU Unified Memory Research
 
-An isolated, reproducible study of GPU access to system RAM for local inference. The benchmarks compare mapped pinned host memory, pinned H2D staging, CUDA managed memory, and VRAM paths on an RTX 3060, including synthetic Q4_0 matvecs and one bounded real model-tensor slice.
+An isolated, reproducible study of GPU access to system RAM for local inference. The work compares mapped pinned host memory, pinned H2D staging, CUDA managed memory, explicit VMM mappings, and VRAM on an RTX 3060, including synthetic Q4_0 matvecs, one real model-tensor slice, and a small quantized LLM.
 
 ## Current status
 
@@ -16,7 +16,10 @@ An isolated, reproducible study of GPU access to system RAM for local inference.
 - A compact GPU-side gather/cache path was measured: for four passes it beat both repeated mapped reads and full prefetch at 1–10% selectivity; full prefetch remained faster for 25–100% access.
 - Synthetic Q4_0 matvecs at 32–128 MiB favored managed prefetch over mapped reads and full staging. A 47.8 MiB Q4_0 tensor slice from the local model also passed CPU-reference validation; its input vectors were synthetic. Double-buffered chunk copies helped versus serialized chunks, but reloading the tensor on every pass was slower than reusing a fully prefetched copy.
 - Newer random-load and Q4_0 measurements now reach 960 MiB while remaining within the project’s 2 GiB VRAM and 4 GiB host-RAM limits. The dependent-load and 960 MiB Q4_0 tables are in [BENCHMARKS.md](BENCHMARKS.md); all test data still fit in VRAM.
-- End-to-end inference remains unmeasured. The only standalone base model found in inspected local locations is about 14.1 GiB, while the current additional host-RAM budget is 4 GiB. Read-only CUDA registration of file-backed model pages is unsupported by this device.
+- A mixed-residency GPU kernel now processes 1 GiB of VRAM and 2 GiB of mapped pinned RAM in one launch, with GPU initialization and validation. All checks pass; the host region is about 30 times slower than VRAM by logical bandwidth, and the combined path did not improve this streaming workload.
+- A small CUDA VMM library now maps device and host physical allocations into one contiguous GPU-visible range. A 64 MiB device plus 128 MiB host probe passed full-range GPU validation; the queried minimum granularity is 2 MiB.
+- End-to-end inference has now been measured on Qwen3-0.6B Q4_0. All 29 model layers were offloaded in both llama.cpp modes, and both returned the correct arithmetic answer. Five-repetition decode means were 383.1 tokens/s with ordinary GPU allocation and 381.8 with the managed-memory switch; this fitting-in-VRAM model does not test oversubscription or show a performance gain.
+- Actual working sets beyond VRAM remain untested. The 13 GiB managed-allocation experiment is prepared as a gated next step; its required resource-budget revision is listed in OVERSUBSCRIPTION_PLAN.md. Do not launch it before explicit approval.
 
 Build with the installed CUDA 13.2 toolkit:
 
@@ -67,4 +70,4 @@ The capability-only query allocates no benchmark buffers and launches no kernel:
 benchmarks/memory_paths --capabilities-only
 ```
 
-See [AGENT_STATE.md](AGENT_STATE.md) before resuming work.
+The over-VRAM run is still gated; see [OVERSUBSCRIPTION_PLAN.md](OVERSUBSCRIPTION_PLAN.md) for the exact requested budget. See [AGENT_STATE.md](AGENT_STATE.md) before resuming work.
