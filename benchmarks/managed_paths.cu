@@ -203,9 +203,30 @@ int main(int argc, char** argv) {
                                       stream, block_sums, host_sums, start, stop);
     std::printf("first_gpu_access,cpu_initialized_no_prefetch,%.6f_ms,checksum=%.9g,valid=%s\n",
                 first.milliseconds, first.checksum, first.valid ? "yes" : "no");
+    std::vector<float> cold_samples{first.milliseconds};
+    bool all_valid = first.valid;
+    for (int i = 1; i < options.repeats; ++i) {
+        float4* cold_buffer = nullptr;
+        check(cudaMallocManaged(reinterpret_cast<void**>(&cold_buffer), bytes, cudaMemAttachGlobal),
+              "allocate independent cold managed buffer");
+        double cold_expected = 0.0;
+        float* cold_scalar = reinterpret_cast<float*>(cold_buffer);
+        for (size_t element = 0; element < elements; ++element) {
+            const float value = 1.0f + static_cast<float>(element % 13) * 0.001f;
+            cold_scalar[element] = value;
+            cold_expected += value;
+        }
+        const ScanResult cold = run_scan(cold_buffer, vector_count, bytes, cold_expected, blocks,
+                                         stream, block_sums, host_sums, start, stop);
+        cold_samples.push_back(cold.milliseconds);
+        all_valid = all_valid && cold.valid;
+        std::printf("cold_trial,%d,cpu_initialized_no_prefetch,%.6f_ms,checksum=%.9g,valid=%s\n",
+                    i + 1, cold.milliseconds, cold.checksum, cold.valid ? "yes" : "no");
+        check(cudaFree(cold_buffer), "free independent cold managed buffer");
+    }
+    print_summary("cpu_initialized_no_prefetch_first_gpu_scan", cold_samples, bytes);
 
     std::vector<float> repeat_samples;
-    bool all_valid = first.valid;
     for (int i = 0; i < options.repeats; ++i) {
         const ScanResult sample = run_scan(managed, vector_count, bytes, expected, blocks,
                                            stream, block_sums, host_sums, start, stop);
