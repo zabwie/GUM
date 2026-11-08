@@ -292,3 +292,8 @@ Commands were pinned to one CPU core and routed through the resource gate. Repla
 - Result: zero validation errors in all passes. Init+first touch 4.79 s (2.91 GB/s). Sequential 2.71-2.76 GB/s, random tile 3.31-3.63 GB/s, cluster32 3.77-4.67 GB/s. For reference a fitting 2 GiB managed set scans at 136-163 GB/s, so oversubscribed throughput is roughly 30-50x lower (inferred from separate smaller run).
 - Side effects: VRAM free fell to ~30 MiB during passes (driver used all VRAM except the reserve); system swap rose from 5.8 GiB to ~11 GiB while MemAvailable stayed >12 GiB (kernel swapped other processes cold pages). Swap abort limit was relaxed to +12 GiB; earlier tighter limits (+0.25/1/4 GiB) aborted the run. This deviates from the plan zero-swap rule and was done under explicit user approval.
 - Conclusion: a unified VRAM+RAM pool that is correct works on this machine via managed memory; it is bandwidth-limited by PCIe demand migration and thrashing, not by capacity. Raw: results/oversubscribe-13gib-20261108.txt. Not yet profiled with Nsight; no LLM tested.
+
+## E027 — 24 GiB managed allocation (aborted by RAM floor)
+
+- Date: 2026-11-08. Same harness, 24,576 MiB, 1.5 GiB cudaMalloc reserve, RAM floor 6 GiB. GPU init of all 24 GiB completed (11.77 s, 2.19 GB/s). During the first validation pass MemAvailable fell to 6,118 MiB (< floor) and swap rose from 8.0 to 11.7 GiB, so the harness aborted. No validation result: inconclusive, not a pass. Raw: results/oversubscribe-24gib-20261108.txt.
+- Interpretation: 24 GiB is about the physical limit of 11.9 GiB VRAM + usable RAM on this 31 GiB machine with the desktop running; the host copy (~14 GiB) plus desktop leaves almost nothing.

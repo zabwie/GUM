@@ -1,0 +1,4 @@
+ABORT at pass: MemAvailable=6118 MiB swap_used=11658 MiB (baseline 8027)
+start,vram_total_MiB=11905,vram_free_MiB=10477,ram_avail_MiB=22632,swap_used_MiB=8027,alloc_MiB=24576
+allocated,managed_MiB=24576,exceeds_vram=1
+init_first_touch,ms=11767.1,GBps=2.19,min_ram_avail_MiB=9645

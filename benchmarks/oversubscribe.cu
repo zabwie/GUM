@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--ram-floor-mib")) ram_floor = atol(argv[i + 1]);
     }
     g_floor_ram_mib = ram_floor;
-    if (total_mib > 14336 || total_mib % 32) { fprintf(stderr, "bad --mib\n"); return 2; }
+    if (total_mib > 24576 || total_mib % 32) { fprintf(stderr, "bad --mib\n"); return 2; }
     g_swap0 = meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:");
     safety("start");
 
