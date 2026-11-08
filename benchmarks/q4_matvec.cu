@@ -40,6 +40,22 @@ void check(cudaError_t error, const char* what) {
     if (error != cudaSuccess) fail(what, error);
 }
 
+float half_to_float(uint16_t bits) {
+    const bool negative = (bits & 0x8000u) != 0;
+    const int exponent = (bits >> 10) & 0x1f;
+    const int mantissa = bits & 0x03ffu;
+    float value = 0.0f;
+    if (exponent == 0) {
+        value = std::ldexp(static_cast<float>(mantissa), -24);
+    } else if (exponent == 0x1f) {
+        value = mantissa == 0 ? std::numeric_limits<float>::infinity()
+                              : std::numeric_limits<float>::quiet_NaN();
+    } else {
+        value = std::ldexp(static_cast<float>(1024 + mantissa), exponent - 25);
+    }
+    return negative ? -value : value;
+}
+
 __global__ void q4_matvec(const BlockQ4_0* weights, const float* input,
                           float* output, int blocks_per_row, int rows) {
     __shared__ float warp_sums[kWarps];
@@ -496,11 +512,12 @@ int main(int argc, char** argv) {
             double sum = 0.0;
             for (size_t b = 0; b < blocks_per_row; ++b) {
                 const BlockQ4_0& block = host_weights[static_cast<size_t>(row) * blocks_per_row + b];
+                const float scale = half_to_float(block.d);
                 for (int lane = 0; lane < kQK; ++lane) {
                     const uint8_t packed = block.qs[lane & 15];
                     const int quant = ((lane < 16) ? (packed & 15) : (packed >> 4)) - 8;
                     const float input = host_inputs[static_cast<size_t>(input_index) * columns + b * kQK + lane];
-                    sum += static_cast<double>(quant) * (1.0 / 16.0) * input;
+                    sum += static_cast<double>(quant) * scale * input;
                 }
             }
             expected[input_index][row] = static_cast<float>(sum);
