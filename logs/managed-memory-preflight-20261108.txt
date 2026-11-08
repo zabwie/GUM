@@ -1,0 +1,1 @@
+Preflight: sampled GPU utilization=[15,34,16,17,17]% (max 34%), minimum free VRAM=10850 MiB, available RAM=19615 MiB, max temperature=41 C, max power=19/170 W, CUDA compute PIDs=165671, sustained heavy GPU PIDs=none

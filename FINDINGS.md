@@ -2,36 +2,35 @@
 
 ## Confirmed on this machine
 
-- `nvidia-smi -q` reports **Addressing Mode: HMM** on Linux kernel 7.0.0-38. This is evidence that the active NVIDIA stack selected HMM addressing; the CUDA runtime attributes still need a direct query.
-- The CUDA 13.2 runtime query reports `canMapHostMemory=1`, `unifiedAddressing=1`, `concurrentManagedAccess=1`, `pageableMemoryAccess=1`, and `pageableMemoryAccessUsesHostPageTables=0`. Per NVIDIA's capability classification, this combination indicates full unified-memory access with software coherence on this Linux setup. The query did not allocate sample buffers or launch a kernel.
-- `hostNativeAtomicSupported=0`; the initial prototype uses no host atomics.
-- Existing upstream llama.cpp CUDA support already has a unified-memory mode. Its build guide documents `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`; current CUDA backend source selects `cudaMallocManaged` for CUDA allocations when enabled and `cudaMalloc` otherwise. This is an existing managed-allocation baseline to evaluate before developing a separate allocator/cache.
-- The GPU is linked at 16.0 GT/s x16, corresponding to PCIe 4.0 x16 signaling. About 31.5 GB/s one-way is a theoretical link-rate ceiling before overhead.
-- CUDA 13.2 is installed alongside CUDA 12.0. The project benchmark is built with the installed 13.2 compiler at `/usr/local/cuda/bin/nvcc`, matching the driver-reported CUDA level.
-- At discovery, GPU use was too high for a clean benchmark; no GPU result exists yet.
+- `nvidia-smi -q` reports **Addressing Mode: HMM** on Linux kernel 7.0.0-38.
+- CUDA 13.2 reports CC 8.6, `canMapHostMemory=1`, `unifiedAddressing=1`, `concurrentManagedAccess=1`, `pageableMemoryAccess=1`, `pageableMemoryAccessUsesHostPageTables=0`, and `hostNativeAtomicSupported=0`.
+- A CUDA kernel successfully read a mapped pinned-host allocation and returned the expected checksum. H1 is functionally supported.
+- For this sequential float4 scan, five-run H2D copy-only throughput stayed near 14.7 GB/s from 16 to 128 MiB. Mapped-host reads were about 14.1 GB/s at 16 MiB, 13.3 at 24 MiB, 13.0 at 32 MiB, 11.4 at 64 MiB on the repeat, and 12.1 at 128 MiB. H2D plus the same scan was about 14.0–14.2 GB/s over 16–128 MiB. Staging was nearly tied at 16 MiB and faster at 24 MiB and above in the tested runs. This is workload-specific, not an inference break-even point.
+- The warmed VRAM scan measured about 312–337 GB/s at 16–128 MiB after three warm-ups. The first 64 MiB run had two outliers, but later samples were stable.
+- On a CPU-initialized 64 MiB managed allocation, five independent first GPU scans took a 5.201 ms median. Repeated scans after the first took 0.210 ms median. Five explicit GPU-prefetch-plus-scan trials took 3.108 ms median. Checksums passed in all trials.
+- Nsight Systems Unified Memory tracing recorded 640 MiB host-to-device and 320 MiB device-to-host migration across five CPU-first allocations and five explicit CPU↔GPU prefetch cycles, plus 960 CPU and 2,305 GPU page faults. The migration total matches the experiment's designed transfers. It establishes that migration occurs; it does not establish inference performance.
+- A `cudaMemGetInfo` snapshot showed 128 MiB less free VRAM after the first GPU access to the 64 MiB managed buffer, but free memory did not return after CPU prefetch. This global counter is inconclusive about current page placement and is not used to claim physical residency.
+- Existing upstream llama.cpp CUDA support has a unified-memory mode. Its build guide documents `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`; source inspection shows it selects `cudaMallocManaged` in place of `cudaMalloc`. This is an existing inference baseline to evaluate before a custom allocator/cache.
+- The GPU link is PCIe 4.0 x16 at 16 GT/s. The approximately 31.5 GB/s one-way figure is a theoretical line-rate ceiling before overhead.
 
-## Supported by NVIDIA documentation
+## Interpretation and limits
 
-- Mapped pinned host memory can be exposed to a GPU kernel through `cudaHostAllocMapped` and `cudaHostGetDevicePointer`; this is direct access to host memory over the CPU-GPU interconnect. NVIDIA describes its latency as higher and bandwidth as lower than device memory.
-- On Linux with HMM, ordinary system allocations may participate in CUDA unified memory. Managed-memory residency, page migration, and access behavior depend on hardware and runtime attributes. Unified addressing by itself does not mean equal physical bandwidth or a single pool of VRAM.
-- A user-visible HMM mode and successful CUDA attribute queries are separate evidence. The benchmark will print `concurrentManagedAccess`, `pageableMemoryAccess`, and `pageableMemoryAccessUsesHostPageTables` instead of inferring all behavior from the kernel version.
+- The 64 MiB first-touch timing and Nsight migration records are consistent with demand-driven page migration. Explicit prefetch reduced the measured prefetch-plus-scan median from 5.201 ms to 3.108 ms in this synthetic workload, about 40% lower latency. The comparison is preliminary: the no-prefetch arm uses independent fresh allocations, the prefetch arm repeats on one allocation, and the benchmark is not a transformer kernel.
+- The near-VRAM-speed repeat scan and observed migration totals are consistent with pages becoming GPU-local after first touch. Nsight confirms transfer direction and byte totals, but this benchmark does not query exact residency for every page.
+- Mapped host access may remain useful for sparse or low-reuse data, but no sparse/gather workload has been measured yet.
+- No local LLM inference throughput, model larger than VRAM, cache hit rate, expert-routing benefit, or end-to-end system-RAM extension has been measured.
+- No novelty claim is made.
 
-Sources:
+## NVIDIA sources
 
 - [CUDA Programming Guide: Unified and System Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html)
-- [CUDA 12.0 Programming Guide: mapped page-locked memory](https://docs.nvidia.com/cuda/archive/12.0.1/cuda-c-programming-guide/)
+- [CUDA 13.2 Programming Guide: Unified Memory and prefetching](https://docs.nvidia.com/cuda/archive/13.2.2/cuda-programming-guide/04-special-topics/unified-memory.html)
+- [CUDA Runtime API: `cudaMemPrefetchAsync` and memory management](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY.html)
 - [CUDA Runtime API: `cudaHostGetDevicePointer`](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY.html)
-
-## Not established
-
-- HMM does not establish that the RTX 3060 can keep an arbitrarily large model in host RAM and access it at VRAM-like speed.
-- The kernel has not yet successfully read the mapped pinned allocation; `canMapHostMemory=1` only establishes that the device advertises the capability.
-- No mapped-host or managed-memory bandwidth, page-fault count, inference throughput, or cache hit rate has been measured.
-- No novelty claim is made.
 
 ## Existing inference implementation
 
-The upstream llama.cpp CUDA backend has a runtime flag for unified memory. Its documented purpose is to let allocation spill into system RAM when VRAM is exhausted. Source inspection shows the switch changes the CUDA backend allocator from `cudaMalloc` to `cudaMallocManaged`; this confirms an implementation path exists, not that the current model/runtime is fast or correct on this machine. Use it as a future inference baseline after the microbenchmark, and compare enabled/disabled behavior with an identical model/workload.
+The upstream llama.cpp CUDA backend's unified-memory flag is a path to test, not evidence of speed or correctness on this machine. Compare it against ordinary offload with the same model, quantization, context, batch, prompt, and output length. Do not modify an existing user inference project or model files.
 
 Sources inspected 2026-11-08:
 

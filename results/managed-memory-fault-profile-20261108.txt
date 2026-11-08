@@ -1,0 +1,99 @@
+Preflight: sampled GPU utilization=[6,6,16,14,6]% (max 16%), minimum free VRAM=10849 MiB, available RAM=19790 MiB, max temperature=32 C, max power=11/170 W, CUDA compute clients=165671:99MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T02:27:19-04:00 (benchmark=managed_paths, buffer MiB=64, measured repeats=5).
+Profiling Unified Memory page faults and migrations to /home/zabwie/gpu-unified-memory-research/results/managed-memory-faults-64mib-20261108-022719.nsys-rep.
+WARNING: The version of the system or its configuration does not allow enabling CPU profiling:
+- CPU IP/backtrace sampling will be disabled.
+- CPU context switch tracing will be disabled.
+Try the 'nsys status --environment' command to learn more.
+
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,driver=13020,runtime=13020,managed_buffer_MiB=64,repeats=5
+device_memory,before_managed_allocation,free_MiB=10710,used_MiB=1195,total_MiB=11905
+device_memory,after_managed_allocation,free_MiB=10710,used_MiB=1195,total_MiB=11905
+host_init,CPU_first_touch,38.831_ms,expected_checksum=16877879.2
+device_memory,after_CPU_first_touch,free_MiB=10710,used_MiB=1195,total_MiB=11905
+first_gpu_access,cpu_initialized_no_prefetch,8.581344_ms,checksum=16877881.8,valid=yes
+device_memory,after_first_GPU_access,free_MiB=10582,used_MiB=1323,total_MiB=11905
+cold_trial,2,cpu_initialized_no_prefetch,8.606720_ms,checksum=16877881.8,valid=yes
+cold_trial,3,cpu_initialized_no_prefetch,8.787744_ms,checksum=16877881.8,valid=yes
+cold_trial,4,cpu_initialized_no_prefetch,8.984224_ms,checksum=16877881.8,valid=yes
+cold_trial,5,cpu_initialized_no_prefetch,8.734208_ms,checksum=16877881.8,valid=yes
+summary,cpu_initialized_no_prefetch_first_gpu_scan,n=5,median_ms=8.734208,min_ms=8.581344,max_ms=8.984224,effective_input_GB_s=7.683
+sample,cpu_initialized_no_prefetch_first_gpu_scan,1,8.581344,7.820
+sample,cpu_initialized_no_prefetch_first_gpu_scan,2,8.606720,7.797
+sample,cpu_initialized_no_prefetch_first_gpu_scan,3,8.787744,7.637
+sample,cpu_initialized_no_prefetch_first_gpu_scan,4,8.984224,7.470
+sample,cpu_initialized_no_prefetch_first_gpu_scan,5,8.734208,7.683
+checksum,repeat_after_first_gpu_access,1,16877881.8,valid
+checksum,repeat_after_first_gpu_access,2,16877881.8,valid
+checksum,repeat_after_first_gpu_access,3,16877881.8,valid
+checksum,repeat_after_first_gpu_access,4,16877881.8,valid
+checksum,repeat_after_first_gpu_access,5,16877881.8,valid
+summary,repeat_after_first_gpu_access,n=5,median_ms=0.201792,min_ms=0.201312,max_ms=0.209760,effective_input_GB_s=332.565
+sample,repeat_after_first_gpu_access,1,0.209760,319.932
+sample,repeat_after_first_gpu_access,2,0.202880,330.781
+sample,repeat_after_first_gpu_access,3,0.201504,333.040
+sample,repeat_after_first_gpu_access,4,0.201792,332.565
+sample,repeat_after_first_gpu_access,5,0.201312,333.357
+prefetch_trial,1,cpu_prefetch_ms=2.881600,gpu_prefetch_ms=3.068352,scan_ms=0.201664,total_ms=3.273568,free_after_cpu_MiB=10582,free_after_gpu_MiB=10582,checksum=16877881.8,valid=yes
+prefetch_trial,2,cpu_prefetch_ms=2.773312,gpu_prefetch_ms=3.002208,scan_ms=0.202400,total_ms=3.208128,free_after_cpu_MiB=10582,free_after_gpu_MiB=10582,checksum=16877881.8,valid=yes
+prefetch_trial,3,cpu_prefetch_ms=2.722752,gpu_prefetch_ms=2.928128,scan_ms=0.201888,total_ms=3.133504,free_after_cpu_MiB=10582,free_after_gpu_MiB=10582,checksum=16877881.8,valid=yes
+prefetch_trial,4,cpu_prefetch_ms=2.732992,gpu_prefetch_ms=2.966368,scan_ms=0.201504,total_ms=3.171392,free_after_cpu_MiB=10582,free_after_gpu_MiB=10582,checksum=16877881.8,valid=yes
+prefetch_trial,5,cpu_prefetch_ms=2.751360,gpu_prefetch_ms=2.934464,scan_ms=0.201792,total_ms=3.139744,free_after_cpu_MiB=10582,free_after_gpu_MiB=10582,checksum=16877881.8,valid=yes
+summary,prefetch_to_cpu_reset,n=5,median_ms=2.751360,min_ms=2.722752,max_ms=2.881600,effective_input_GB_s=24.391
+sample,prefetch_to_cpu_reset,1,2.881600,23.289
+sample,prefetch_to_cpu_reset,2,2.773312,24.198
+sample,prefetch_to_cpu_reset,3,2.722752,24.647
+sample,prefetch_to_cpu_reset,4,2.732992,24.555
+sample,prefetch_to_cpu_reset,5,2.751360,24.391
+summary,prefetch_to_gpu,n=5,median_ms=2.966368,min_ms=2.928128,max_ms=3.068352,effective_input_GB_s=22.623
+sample,prefetch_to_gpu,1,3.068352,21.871
+sample,prefetch_to_gpu,2,3.002208,22.353
+sample,prefetch_to_gpu,3,2.928128,22.919
+sample,prefetch_to_gpu,4,2.966368,22.623
+sample,prefetch_to_gpu,5,2.934464,22.869
+summary,scan_after_gpu_prefetch,n=5,median_ms=0.201792,min_ms=0.201504,max_ms=0.202400,effective_input_GB_s=332.565
+sample,scan_after_gpu_prefetch,1,0.201664,332.776
+sample,scan_after_gpu_prefetch,2,0.202400,331.566
+sample,scan_after_gpu_prefetch,3,0.201888,332.406
+sample,scan_after_gpu_prefetch,4,0.201504,333.040
+sample,scan_after_gpu_prefetch,5,0.201792,332.565
+summary,gpu_prefetch_plus_scan,n=5,median_ms=3.171392,min_ms=3.133504,max_ms=3.273568,effective_input_GB_s=21.161
+sample,gpu_prefetch_plus_scan,1,3.273568,20.500
+sample,gpu_prefetch_plus_scan,2,3.208128,20.918
+sample,gpu_prefetch_plus_scan,3,3.133504,21.417
+sample,gpu_prefetch_plus_scan,4,3.171392,21.161
+sample,gpu_prefetch_plus_scan,5,3.139744,21.374
+Collecting data...
+Generating '/tmp/nsys-report-bd64.qdstrm'
+[1/1] [0%                          ] managed-memory-faults-64mib-20261108-022719.nsys-rep[1/1] [0%                          ] managed-memory-faults-64mib-20261108-022719.nsys-rep[1/1] [10%                         ] managed-memory-faults-64mib-20261108-022719.nsys-rep[1/1] [==20%                       ] managed-memory-faults-64mib-20261108-022719.nsys-rep[1/1] [=============60%            ] managed-memory-faults-64mib-20261108-022719.nsys-rep[1/1] [========================100%] managed-memory-faults-64mib-20261108-022719.nsys-rep[1/1] [========================100%] managed-memory-faults-64mib-20261108-022719.nsys-rep
+Generated:
+	/home/zabwie/gpu-unified-memory-research/results/managed-memory-faults-64mib-20261108-022719.nsys-rep

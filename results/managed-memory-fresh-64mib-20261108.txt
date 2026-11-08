@@ -1,0 +1,84 @@
+Preflight: sampled GPU utilization=[46,17,17,18,45]% (max 46%), minimum free VRAM=11158 MiB, available RAM=19649 MiB, max temperature=38 C, max power=23/170 W, CUDA compute clients=165671:126MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G     21     17      -      -      -      -    Xorg           
+    0      19328     G     14     12      -      -      -      -    cinnamon       
+    0      20431     G     18     15      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     50     38      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T02:21:27-04:00 (benchmark=managed_paths, buffer MiB=64, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,driver=13020,runtime=13020,managed_buffer_MiB=64,repeats=5
+host_init,CPU_first_touch,37.620_ms,expected_checksum=16877879.2
+first_gpu_access,cpu_initialized_no_prefetch,5.285888_ms,checksum=16877881.8,valid=yes
+cold_trial,2,cpu_initialized_no_prefetch,5.172224_ms,checksum=16877881.8,valid=yes
+cold_trial,3,cpu_initialized_no_prefetch,5.201216_ms,checksum=16877881.8,valid=yes
+cold_trial,4,cpu_initialized_no_prefetch,5.285888_ms,checksum=16877881.8,valid=yes
+cold_trial,5,cpu_initialized_no_prefetch,5.200896_ms,checksum=16877881.8,valid=yes
+summary,cpu_initialized_no_prefetch_first_gpu_scan,n=5,median_ms=5.201216,min_ms=5.172224,max_ms=5.285888,effective_input_GB_s=12.903
+sample,cpu_initialized_no_prefetch_first_gpu_scan,1,5.285888,12.696
+sample,cpu_initialized_no_prefetch_first_gpu_scan,2,5.172224,12.975
+sample,cpu_initialized_no_prefetch_first_gpu_scan,3,5.201216,12.903
+sample,cpu_initialized_no_prefetch_first_gpu_scan,4,5.285888,12.696
+sample,cpu_initialized_no_prefetch_first_gpu_scan,5,5.200896,12.903
+checksum,repeat_after_first_gpu_access,1,16877881.8,valid
+checksum,repeat_after_first_gpu_access,2,16877881.8,valid
+checksum,repeat_after_first_gpu_access,3,16877881.8,valid
+checksum,repeat_after_first_gpu_access,4,16877881.8,valid
+checksum,repeat_after_first_gpu_access,5,16877881.8,valid
+summary,repeat_after_first_gpu_access,n=5,median_ms=0.209920,min_ms=0.201568,max_ms=0.220032,effective_input_GB_s=319.688
+sample,repeat_after_first_gpu_access,1,0.220032,304.996
+sample,repeat_after_first_gpu_access,2,0.218112,307.681
+sample,repeat_after_first_gpu_access,3,0.209920,319.688
+sample,repeat_after_first_gpu_access,4,0.201696,332.723
+sample,repeat_after_first_gpu_access,5,0.201568,332.934
+prefetch_trial,1,cpu_prefetch_ms=2.726912,gpu_prefetch_ms=2.923520,scan_ms=0.204800,total_ms=3.131392,checksum=16877881.8,valid=yes
+prefetch_trial,2,cpu_prefetch_ms=2.601984,gpu_prefetch_ms=2.900992,scan_ms=0.203776,total_ms=3.107840,checksum=16877881.8,valid=yes
+prefetch_trial,3,cpu_prefetch_ms=2.602784,gpu_prefetch_ms=3.101696,scan_ms=0.200704,total_ms=3.306496,checksum=16877881.8,valid=yes
+prefetch_trial,4,cpu_prefetch_ms=2.592704,gpu_prefetch_ms=2.816000,scan_ms=0.204800,total_ms=3.025568,checksum=16877881.8,valid=yes
+prefetch_trial,5,cpu_prefetch_ms=2.601792,gpu_prefetch_ms=2.814976,scan_ms=0.219136,total_ms=3.037184,checksum=16877881.8,valid=yes
+summary,prefetch_to_cpu_reset,n=5,median_ms=2.601984,min_ms=2.592704,max_ms=2.726912,effective_input_GB_s=25.791
+sample,prefetch_to_cpu_reset,1,2.726912,24.610
+sample,prefetch_to_cpu_reset,2,2.601984,25.791
+sample,prefetch_to_cpu_reset,3,2.602784,25.783
+sample,prefetch_to_cpu_reset,4,2.592704,25.884
+sample,prefetch_to_cpu_reset,5,2.601792,25.793
+summary,prefetch_to_gpu,n=5,median_ms=2.900992,min_ms=2.814976,max_ms=3.101696,effective_input_GB_s=23.133
+sample,prefetch_to_gpu,1,2.923520,22.955
+sample,prefetch_to_gpu,2,2.900992,23.133
+sample,prefetch_to_gpu,3,3.101696,21.636
+sample,prefetch_to_gpu,4,2.816000,23.831
+sample,prefetch_to_gpu,5,2.814976,23.840
+summary,scan_after_gpu_prefetch,n=5,median_ms=0.204800,min_ms=0.200704,max_ms=0.219136,effective_input_GB_s=327.680
+sample,scan_after_gpu_prefetch,1,0.204800,327.680
+sample,scan_after_gpu_prefetch,2,0.203776,329.327
+sample,scan_after_gpu_prefetch,3,0.200704,334.367
+sample,scan_after_gpu_prefetch,4,0.204800,327.680
+sample,scan_after_gpu_prefetch,5,0.219136,306.243
+summary,gpu_prefetch_plus_scan,n=5,median_ms=3.107840,min_ms=3.025568,max_ms=3.306496,effective_input_GB_s=21.593
+sample,gpu_prefetch_plus_scan,1,3.131392,21.431
+sample,gpu_prefetch_plus_scan,2,3.107840,21.593
+sample,gpu_prefetch_plus_scan,3,3.306496,20.296
+sample,gpu_prefetch_plus_scan,4,3.025568,22.181
+sample,gpu_prefetch_plus_scan,5,3.037184,22.096

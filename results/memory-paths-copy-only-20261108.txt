@@ -1,0 +1,58 @@
+Preflight: sampled GPU utilization=[7,27,28,42,11]% (max 42%), minimum free VRAM=11063 MiB, available RAM=19859 MiB, max temperature=50 C, max power=32/170 W, CUDA compute PIDs=none, sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      8      5      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0      18911     G     17     15      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     30     24      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0      18911     G     11     10      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G     33     28      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     25     27      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T02:12:30-04:00 (host pinned MiB=64, VRAM MiB=64, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,VRAM_MiB=11905,driver=13020,runtime=13020,buffer_MiB=64,repeats=5
+capability,canMapHostMemory,1
+capability,unifiedAddressing,1
+capability,concurrentManagedAccess,1
+capability,pageableMemoryAccess,1
+capability,pageableMemoryAccessUsesHostPageTables,0
+capability,hostNativeAtomicSupported,0
+result_format,sample,path,run,elapsed_ms,effective_input_GB_s
+summary,mapped_host,n=5,median_ms=5.892864,min_ms=5.445440,effective_input_GB_s=11.388,checksum=16877881.8,valid=yes
+sample,mapped_host,1,6.396096,10.492
+sample,mapped_host,2,5.684352,11.806
+sample,mapped_host,3,5.445440,12.324
+sample,mapped_host,4,5.892864,11.388
+sample,mapped_host,5,6.657408,10.080
+summary,h2d_copy_only,n=5,median_ms=4.559328,min_ms=4.548544,effective_input_GB_s=14.719,checksum=16877881.8,valid=yes
+sample,h2d_copy_only,1,4.559328,14.719
+sample,h2d_copy_only,2,4.558496,14.722
+sample,h2d_copy_only,3,4.581792,14.647
+sample,h2d_copy_only,4,4.566272,14.697
+sample,h2d_copy_only,5,4.548544,14.754
+summary,staged_h2d_plus_scan,n=5,median_ms=4.914208,min_ms=4.870528,effective_input_GB_s=13.656,checksum=16877881.8,valid=yes
+sample,staged_h2d_plus_scan,1,4.870528,13.779
+sample,staged_h2d_plus_scan,2,4.914208,13.656
+sample,staged_h2d_plus_scan,3,5.061472,13.259
+sample,staged_h2d_plus_scan,4,5.613728,11.954
+sample,staged_h2d_plus_scan,5,4.888288,13.729
+summary,vram_resident,n=5,median_ms=0.201760,min_ms=0.200832,effective_input_GB_s=332.617,checksum=16877881.8,valid=yes
+sample,vram_resident,1,0.201920,332.354
+sample,vram_resident,2,0.201760,332.617
+sample,vram_resident,3,0.201504,333.040
+sample,vram_resident,4,0.200832,334.154
+sample,vram_resident,5,0.202112,332.038

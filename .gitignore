@@ -1,3 +1,5 @@
 /benchmarks/memory_paths
+/benchmarks/managed_paths
 /results/*.csv
+/results/*.sqlite
 /logs/*.log

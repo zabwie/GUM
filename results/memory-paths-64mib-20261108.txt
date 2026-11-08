@@ -1,0 +1,59 @@
+Experiment: E003, 64 MiB mapped-host/staged/VRAM streaming comparison
+Date: 2026-11-08
+Benchmark source revision: 39b107e
+Resource-gate source revision: ae76c01
+Command: scripts/run_when_idle.sh (64 MiB, 5 measured repetitions per path, one warm-up per path)
+System: RTX 3060 CC 8.6, driver/runtime API 13.2; pinned host allocation 64 MiB; device allocation 64 MiB
+
+Preflight: sampled GPU utilization=[46,10,43,10,39]% (max 46%), minimum free VRAM=11131 MiB, available RAM=20222 MiB, max temperature=50 C, max power=41/170 W, CUDA compute PIDs=none, sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      4      1      -      -      -      -    Xorg           
+    0      19328     G     13      3      -      -      -      -    cinnamon       
+    0      20431     G      5      1      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G     13      4      -      -      -      -    cinnamon       
+    0      20431     G     10      3      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0      18911     G      2      0      -      -      -      -    Xorg           
+    0      19328     G     15      4      -      -      -      -    cinnamon       
+    0      20431     G      2      1      -      -      -      -    Codex --change-
+    0      30282     G      1      0      -      -      -      -    zen            
+    0      18911     G      4      1      -      -      -      -    Xorg           
+    0      19328     G     11      2      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      5      1      -      -      -      -    zen            
+    0      18911     G      3      1      -      -      -      -    Xorg           
+    0      19328     G      8      1      -      -      -      -    cinnamon       
+    0      20431     G      2      0      -      -      -      -    Codex --change-
+    0      30282     G     12      2      -      -      -      -    zen            
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T02:09:32-04:00 (host pinned MiB=64, VRAM MiB=64, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,VRAM_MiB=11905,driver=13020,runtime=13020,buffer_MiB=64,repeats=5
+capability,canMapHostMemory,1
+capability,unifiedAddressing,1
+capability,concurrentManagedAccess,1
+capability,pageableMemoryAccess,1
+capability,pageableMemoryAccessUsesHostPageTables,0
+capability,hostNativeAtomicSupported,0
+result_format,sample,path,run,elapsed_ms,effective_input_GB_s
+summary,mapped_host,n=5,median_ms=6.705152,min_ms=6.378400,effective_input_GB_s=10.009,checksum=16877881.8,valid=yes
+sample,mapped_host,1,7.043680,9.528
+sample,mapped_host,2,6.378400,10.521
+sample,mapped_host,3,6.705152,10.009
+sample,mapped_host,4,7.175840,9.352
+sample,mapped_host,5,6.633440,10.117
+summary,staged_h2d_plus_scan,n=5,median_ms=4.900992,min_ms=4.849152,effective_input_GB_s=13.693,checksum=16877881.8,valid=yes
+sample,staged_h2d_plus_scan,1,4.868352,13.785
+sample,staged_h2d_plus_scan,2,4.900992,13.693
+sample,staged_h2d_plus_scan,3,4.849152,13.839
+sample,staged_h2d_plus_scan,4,4.942656,13.577
+sample,staged_h2d_plus_scan,5,4.944928,13.571
+summary,vram_resident,n=5,median_ms=0.205408,min_ms=0.202496,effective_input_GB_s=326.710,checksum=16877881.8,valid=yes
+sample,vram_resident,1,0.528000,127.100
+sample,vram_resident,2,0.796320,84.274
+sample,vram_resident,3,0.202496,331.408
+sample,vram_resident,4,0.203200,330.260
+sample,vram_resident,5,0.205408,326.710

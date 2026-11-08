@@ -1,0 +1,30 @@
+
+NOTICE: Existing SQLite export found: results/managed-memory-faults-64mib-20261108-022719.sqlite
+        It is assumed file was previously exported from: results/managed-memory-faults-64mib-20261108-022719.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [results/managed-memory-faults-64mib-20261108-022719.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_sum.py]... 
+
+ ** Unified Memory Analysis Summary (um_sum):
+
+ Virtual Address  HtoD Migration size (MB)  DtoH Migration size (MB)  CPU Page Faults   GPU Page Faults  Migration Throughput (MB/s)
+ ---------------  ------------------------  ------------------------  ---------------  ----------------  ---------------------------
+ 0x79AC21C00000                     10.531                    10.486                1                                      25451.074
+ 0x79AC20400000                     10.494                    10.486                1                                      25448.391
+ 0x79AC23400000                     10.494                    10.486                1                                      25448.391
+ 0x79AC20A00000                     10.490                    10.486                1                 2                    25443.422
+ 0x79AC21200000                     10.490                    10.486                1                 4                    25443.422
+ 0x79AC21A00000                     10.490                    10.486                1                                      25443.422
+ 0x79AC22000000                     10.490                    10.486                1                                      25443.422
+ 0x79AC22A00000                     10.490                    10.486                1                                      25443.422
+ 0x79AC23000000                     10.490                    10.486                1                                      25443.422
+ 0x79AC21400000                     10.506                    10.486                1                                      25442.304
+
+Processing [results/managed-memory-faults-64mib-20261108-022719.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_total_sum.py]... 
+
+ ** Unified Memory Totals Summary (um_total_sum):
+
+ Total HtoD Migration Size (MB)  Total DtoH Migration Size (MB)  Total CPU Page Faults  Total GPU PageFaults  Minimum Virtual Address  Maximum Virtual Address
+ ------------------------------  ------------------------------  ---------------------  --------------------  -----------------------  -----------------------
+                        671.089                         335.544                    960                  2305  0x79AC1C000000           0x79AC23F59000         
+

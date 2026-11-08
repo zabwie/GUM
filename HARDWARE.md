@@ -25,16 +25,17 @@ Observed 2026-11-08 before any GPU benchmark. Values are machine observations; t
 | Swap | 43 GiB configured, 0 used at discovery | `free -h` |
 | Locked-memory limit | 3,977 MiB (`ulimit -l`) | shell limit |
 
-The initial GPU snapshot showed 826 MiB used, 54% utilization, 50 °C, and graphics processes for Xorg, Cinnamon, ChatGPT, a browser, and OBS. The first resource-gate snapshot showed 53% utilization, 11,213 MiB free VRAM, 20,038 MiB available RAM; a later attempt showed 32% utilization, 11,202 MiB free VRAM, and 20,178 MiB available RAM. Both reported no CUDA compute processes. The gate deferred the benchmark at both utilization levels.
+The first resource-gate snapshots showed 53% and 32% global utilization with ample RAM/VRAM; those runs were deferred by an overly strict 15% utilization rule. Later bounded runs proceeded when sampled load, per-process activity, thermals, and headroom indicated low interference risk. An unrelated desktop app held a CUDA context using 98–126 MiB but had no measurable SM use in the sampled intervals; the guard records such clients and does not treat an idle context alone as active GPU load.
 
 The CUDA 13.2 runtime capability-only query completed without allocating benchmark buffers or launching a kernel. It reported driver/runtime API level 13.2, compute capability 8.6, mapped-host support, unified addressing, concurrent managed access, pageable access, and software-coherent pageable access. It reported no host-native atomic support.
 
 ### Still to establish
 
-- Actual CUDA device attributes (`canMapHostMemory`, unified addressing, concurrent managed access, pageable-memory access, and host page-table use).
 - Effective host DRAM configuration/speed; no DIMM SPD or privileged firmware query was used.
 - Current operating-system distribution string and precise driver/kernel module feature support beyond the reported HMM mode.
-- Measured PCIe, mapped-host, managed-memory, and staging bandwidth/latency.
+- Inference throughput, model-scale oversubscription behavior, and cache/prefetch benefit for real tensor access patterns.
+
+Mapped-host and H2D streaming rates, managed-memory first-touch/prefetch timings, and Nsight migration totals are now measured; see [BENCHMARKS.md](BENCHMARKS.md) and [EXPERIMENTS.md](EXPERIMENTS.md).
 
 ### Capacity ceiling
 

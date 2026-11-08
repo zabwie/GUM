@@ -2,39 +2,38 @@
 
 ## Objective
 
-Measure and improve GPU inference throughput when model state exceeds 12 GiB VRAM, using system RAM only through mechanisms that are supported and measured on this machine.
+Measure and improve local LLM inference throughput when model state exceeds the RTX 3060's 12 GiB VRAM, using supported system-memory mechanisms and reproducible evidence.
 
-## Current verified baseline
+## Verified platform
 
-- RTX 3060, 12 GiB, GA106; i7-12700K; 31 GiB RAM, about 19 GiB available at discovery.
-- PCIe link 16 GT/s x16; Linux kernel 7.0.0-38; NVIDIA 595.99.02.
-- CUDA 12.0 and 13.2 installed; HMM addressing mode reported.
-- CUDA 13.2 reports CC 8.6, `canMapHostMemory=1`, `concurrentManagedAccess=1`, `pageableMemoryAccess=1`, and software-coherent HMM (`pageableMemoryAccessUsesHostPageTables=0`). The capability-only query ran no benchmark kernel.
-- GPU utilization was 54%, 53%, then 32% across observations with desktop/browser/OBS graphics processes and no CUDA compute process. The guarded GPU experiment was deferred each time.
-- Raw capability output and the guard refusal are recorded in `results/capabilities-20261108.txt` and `logs/preflight-20261108.txt`. Probe source revision: `39b107e`.
-- A second guarded attempt at 32% utilization also deferred without launching a kernel; see `logs/benchmark-attempt-20261108.txt`.
+- RTX 3060 12 GiB, CC 8.6 / 28 SMs; Intel i7-12700K; 31 GiB RAM.
+- PCIe 4.0 x16 at 16 GT/s; Linux kernel 7.0.0-38; NVIDIA driver 595.99.02; CUDA 12.0 and 13.2 installed.
+- `nvidia-smi -q` reports HMM. CUDA 13.2 reports mapped-host support, UVA, concurrent managed access, pageable memory access, and software-coherent pageable HMM. Host-native atomics are not supported.
+- See [HARDWARE.md](HARDWARE.md) for evidence and remaining hardware questions.
 
-## Current implementation
+## Completed measurements
 
-- Initial CUDA streaming benchmark source: `benchmarks/memory_paths.cu`.
-- Guarded runner: `scripts/run_when_idle.sh`.
-- Intended comparison: mapped pinned host read, pinned H2D staging plus scan, and VRAM-resident scan.
-- Git history on `main` records the implementation, capability-only query, both deferred benchmark attempts, and llama.cpp managed-memory source review.
+- E003/E004 prove mapped pinned host memory is kernel-readable and checksum-correct. For a sequential float4 scan, pinned H2D copy is about 14.7 GB/s; staging is near mapped access at 16 MiB and faster from 24 to 128 MiB in the tested sizes. VRAM reads are about 312–337 GB/s after warm-up. Results and ranges are in [BENCHMARKS.md](BENCHMARKS.md).
+- E005/E006 measured 64 MiB managed memory. Five fresh CPU-initialized first GPU reads: 5.201 ms median; five repeated scans: 0.210 ms; explicit GPU prefetch plus scan: 3.108 ms.
+- E008 Nsight trace confirmed 640 MiB H2D and 320 MiB D2H migration, plus 960 CPU and 2,305 GPU page faults, across five cold first-touch allocations and five prefetch round trips. Profiled timings are not used.
+- Raw outputs are in `results/`; chronology, source revisions, procedures, and interpretation are in [EXPERIMENTS.md](EXPERIMENTS.md).
 
-## Results
+## Implementation
 
-- No benchmark has run; there are no measured bandwidth or latency values.
-- Capability query is verified. The mapped pinned-host kernel and its checksum are not yet verified.
-- The benchmark is capped at 256 MiB and defaults to 64 MiB pinned host memory plus 64 MiB device memory.
+- `benchmarks/memory_paths.cu`: mapped-host, H2D-only, H2D-plus-scan, VRAM scan; 1–256 MiB input.
+- `benchmarks/managed_paths.cu`: managed CPU-first reads, independent cold allocations, repeated scans, CPU/GPU prefetch, checksum validation, and device-free-memory snapshots.
+- `scripts/run_when_idle.sh`: sampled resource gate. It records CUDA clients and their memory but judges contention using sustained per-process SM activity, global utilization, temperature, and RAM/VRAM headroom. `PROFILE=um_faults` enables bounded Nsight Unified Memory tracing for `managed_paths`.
+- Source revisions: H2D measurement `d47260b`; managed benchmark `2a4d9a9`; latest guard/profile support `67da456`.
 
-## Active hypothesis
+## Active conclusions and limits
 
-Mapped pinned host memory is kernel-accessible, but explicit staging will likely deliver higher effective bandwidth for a contiguous one-pass scan. Both are untested on this runtime.
+- H1 is supported: mapped pinned host memory is directly readable by a GPU kernel on this machine.
+- H2 is supported for the tested contiguous stream at 24 MiB and above; 16 MiB was near a tie. This is not an inference threshold.
+- H4 is supported in this microbenchmark: explicit prefetch plus scan was about 40% lower in median elapsed time than demand first access. The arms differ in allocation/reuse pattern, so repeat with inference-like access before selecting an architecture.
+- Managed pages demonstrably migrate, but model-scale residency, local LLM throughput, cache hit rate, and sparse accesses remain unmeasured.
+- `cudaMemGetInfo` changed by 128 MiB after first access and did not return after CPU prefetch; this global counter does not prove current placement.
+- llama.cpp's existing `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` path is the future inference baseline; no model was run.
 
-## Existing implementation found
+## Next executable experiment
 
-Upstream llama.cpp already offers `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`, and its CUDA allocator switches to `cudaMallocManaged` under that flag. Treat this as the inference baseline after the microbenchmark; do not write a separate allocator before comparing it.
-
-## Immediate action
-
-Run the mapped/staged/VRAM benchmark only via the resource-gated script when the GPU is sufficiently idle.
+Build a bounded reuse/selectivity test over a 64 MiB host tensor: compare mapped-host reads against explicit prefetch followed by 1, 2, and 4 GPU passes, with full scan and sparse 1%, 10%, and 25% access patterns. Report useful bytes, migration bytes, and total elapsed time. This will test when direct access or staging is worthwhile before adding a cache or attempting model inference.

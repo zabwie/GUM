@@ -1,0 +1,63 @@
+Preflight: sampled GPU utilization=[0,0,0,0,0]% (max 0%), minimum free VRAM=10837 MiB, available RAM=19873 MiB, max temperature=35 C, max power=11/170 W, CUDA compute clients=165671:98MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+    0      18911     G      -      -      -      -      -      -    Xorg           
+    0      19328     G      -      -      -      -      -      -    cinnamon       
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen            
+    0     165671   C+G      -      -      -      -      -      -    python         
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T02:23:40-04:00 (benchmark=memory_paths, buffer MiB=24, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,VRAM_MiB=11905,driver=13020,runtime=13020,buffer_MiB=24,repeats=5
+capability,canMapHostMemory,1
+capability,unifiedAddressing,1
+capability,concurrentManagedAccess,1
+capability,pageableMemoryAccess,1
+capability,pageableMemoryAccessUsesHostPageTables,0
+capability,hostNativeAtomicSupported,0
+result_format,sample,path,run,elapsed_ms,effective_input_GB_s
+summary,mapped_host,n=5,median_ms=1.893184,min_ms=1.883360,effective_input_GB_s=13.293,checksum=6329204.95,valid=yes
+sample,mapped_host,1,1.886720,13.338
+sample,mapped_host,2,1.893184,13.293
+sample,mapped_host,3,1.883360,13.362
+sample,mapped_host,4,1.915904,13.135
+sample,mapped_host,5,1.897408,13.263
+summary,h2d_copy_only,n=5,median_ms=1.706848,min_ms=1.696416,effective_input_GB_s=14.744,checksum=6329204.95,valid=yes
+sample,h2d_copy_only,1,1.696416,14.835
+sample,h2d_copy_only,2,1.706848,14.744
+sample,h2d_copy_only,3,1.701472,14.791
+sample,h2d_copy_only,4,1.708928,14.726
+sample,h2d_copy_only,5,1.708288,14.732
+summary,staged_h2d_plus_scan,n=5,median_ms=1.792992,min_ms=1.779648,effective_input_GB_s=14.036,checksum=6329204.95,valid=yes
+sample,staged_h2d_plus_scan,1,1.779648,14.141
+sample,staged_h2d_plus_scan,2,1.864672,13.496
+sample,staged_h2d_plus_scan,3,1.830112,13.751
+sample,staged_h2d_plus_scan,4,1.792992,14.036
+sample,staged_h2d_plus_scan,5,1.790240,14.057
+summary,vram_resident,n=5,median_ms=0.078624,min_ms=0.078240,effective_input_GB_s=320.078,checksum=6329204.95,valid=yes
+sample,vram_resident,1,0.078624,320.078
+sample,vram_resident,2,0.079392,316.982
+sample,vram_resident,3,0.078560,320.339
+sample,vram_resident,4,0.078240,321.649
+sample,vram_resident,5,0.078944,318.781
