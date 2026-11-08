@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIB="${MIB:-64}"
 REPEATS="${REPEATS:-5}"
 BENCHMARK="${BENCHMARK:-memory_paths}"
+PROFILE="${PROFILE:-none}"
 SAMPLES=5
 MAX_TEMP_C=80
 
@@ -12,6 +13,14 @@ case "$BENCHMARK" in
   memory_paths|managed_paths) ;;
   *) echo "Refusing: BENCHMARK must be memory_paths or managed_paths." >&2; exit 2 ;;
 esac
+case "$PROFILE" in
+  none|um_faults) ;;
+  *) echo "Refusing: PROFILE must be none or um_faults." >&2; exit 2 ;;
+esac
+if [[ "$PROFILE" == "um_faults" && "$BENCHMARK" != "managed_paths" ]]; then
+  echo "Refusing: PROFILE=um_faults requires BENCHMARK=managed_paths." >&2
+  exit 2
+fi
 
 if (( MIB < 1 || MIB > 256 )); then
   echo "Refusing: MIB must be between 1 and 256 (the project resource cap)." >&2
@@ -88,5 +97,13 @@ fi
 
 printf 'pmon_samples_begin\n%s\npmon_samples_end\n' "$PMON_OUTPUT"
 printf 'Starting bounded benchmark at %s (benchmark=%s, buffer MiB=%s, measured repeats=%s).\n' "$(date -Is)" "$BENCHMARK" "$MIB" "$REPEATS"
+
+if [[ "$PROFILE" == "um_faults" ]]; then
+  REPORT="$ROOT/results/managed-memory-faults-${MIB}mib-$(date +%Y%m%d-%H%M%S)"
+  printf 'Profiling Unified Memory page faults and migrations to %s.nsys-rep.\n' "$REPORT"
+  exec nsys profile --trace=cuda --cuda-um-cpu-page-faults=true \
+    --cuda-um-gpu-page-faults=true --output="$REPORT" \
+    "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS"
+fi
 
 exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS"
