@@ -21,6 +21,7 @@ constexpr int kMaxMiB = 256;
 constexpr int kRepeatsMax = 10;
 constexpr int kPasses[] = {1, 2, 4};
 constexpr size_t kEvictionMiB = 16;
+constexpr size_t kChunkMiB = 16;
 
 struct BlockQ4_0 {
     uint16_t d;
@@ -38,9 +39,10 @@ void check(cudaError_t error, const char* what) {
 }
 
 __global__ void q4_matvec(const BlockQ4_0* weights, const float* input,
-                          float* output, int blocks_per_row) {
+                          float* output, int blocks_per_row, int rows) {
     __shared__ float warp_sums[kWarps];
     const int row = blockIdx.x;
+    if (row >= rows) return;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
     float sum = 0.0f;
@@ -191,7 +193,7 @@ TimedResult run_sample(Mode mode, int passes, int sample,
     for (int pass = 0; pass < passes; ++pass) {
         q4_matvec<<<kRows, kThreads, 0, stream>>>(weights,
             device_inputs + static_cast<size_t>(pass) * columns,
-            device_output, blocks_per_row);
+            device_output, blocks_per_row, kRows);
         check(cudaGetLastError(), "launch Q4_0 matvec");
     }
     check(cudaEventRecord(stop, stream), "record trial stop");
@@ -207,6 +209,87 @@ TimedResult run_sample(Mode mode, int passes, int sample,
         std::fprintf(stderr,
             "Q4_0 output mismatch mode=%s passes=%d sample=%d max_abs_error=%.8g\n",
             mode_name(mode), passes, sample, result.max_abs_error);
+    }
+    return result;
+}
+
+TimedResult run_chunked_sample(bool overlap, int passes, int sample,
+                       const BlockQ4_0* host_weights, BlockQ4_0** chunk_buffers,
+                       size_t row_bytes, int chunk_rows, int blocks_per_row,
+                       const float* device_inputs, int columns, float* device_output,
+                       const float* expected, std::vector<float>& host_output,
+                       const float4* eviction, size_t eviction_vectors, float* eviction_sink,
+                       int eviction_blocks, cudaStream_t serial_stream,
+                       cudaStream_t copy_stream, cudaStream_t compute_stream,
+                       cudaEvent_t start, cudaEvent_t stop,
+                       cudaEvent_t* copy_ready, cudaEvent_t* compute_done) {
+    const int num_chunks = (kRows + chunk_rows - 1) / chunk_rows;
+    flush_l2(eviction, eviction_vectors, eviction_sink, serial_stream, eviction_blocks);
+
+    if (!overlap) {
+        check(cudaEventRecord(start, serial_stream), "record serial chunk start");
+        for (int pass = 0; pass < passes; ++pass) {
+            for (int chunk = 0; chunk < num_chunks; ++chunk) {
+                const int first_row = chunk * chunk_rows;
+                const int rows = std::min(chunk_rows, kRows - first_row);
+                const size_t bytes = static_cast<size_t>(rows) * row_bytes;
+                const int slot = chunk & 1;
+                check(cudaMemcpyAsync(chunk_buffers[slot],
+                        host_weights + static_cast<size_t>(first_row) * blocks_per_row,
+                        bytes, cudaMemcpyHostToDevice, serial_stream),
+                      "copy serial Q4_0 chunk");
+                q4_matvec<<<rows, kThreads, 0, serial_stream>>>(chunk_buffers[slot],
+                    device_inputs + static_cast<size_t>(pass) * columns,
+                    device_output + first_row, blocks_per_row, rows);
+                check(cudaGetLastError(), "launch serial chunk matvec");
+            }
+        }
+        check(cudaEventRecord(stop, serial_stream), "record serial chunk stop");
+    } else {
+        check(cudaEventRecord(start, copy_stream), "record pipelined chunk start");
+        check(cudaStreamWaitEvent(compute_stream, start, 0),
+              "start compute stream after pipeline timer");
+        for (int pass = 0; pass < passes; ++pass) {
+            for (int chunk = 0; chunk < num_chunks; ++chunk) {
+                const int first_row = chunk * chunk_rows;
+                const int rows = std::min(chunk_rows, kRows - first_row);
+                const size_t bytes = static_cast<size_t>(rows) * row_bytes;
+                const int slot = chunk & 1;
+                if (chunk >= 2 || pass > 0) {
+                    check(cudaStreamWaitEvent(copy_stream, compute_done[slot], 0),
+                          "wait until chunk buffer is free");
+                }
+                check(cudaMemcpyAsync(chunk_buffers[slot],
+                        host_weights + static_cast<size_t>(first_row) * blocks_per_row,
+                        bytes, cudaMemcpyHostToDevice, copy_stream),
+                      "copy pipelined Q4_0 chunk");
+                check(cudaEventRecord(copy_ready[slot], copy_stream),
+                      "record copied Q4_0 chunk");
+                check(cudaStreamWaitEvent(compute_stream, copy_ready[slot], 0),
+                      "wait for copied Q4_0 chunk");
+                q4_matvec<<<rows, kThreads, 0, compute_stream>>>(chunk_buffers[slot],
+                    device_inputs + static_cast<size_t>(pass) * columns,
+                    device_output + first_row, blocks_per_row, rows);
+                check(cudaGetLastError(), "launch pipelined chunk matvec");
+                check(cudaEventRecord(compute_done[slot], compute_stream),
+                      "record completed chunk matvec");
+            }
+        }
+        check(cudaEventRecord(stop, compute_stream), "record pipelined chunk stop");
+    }
+    check(cudaEventSynchronize(stop), "wait for chunked Q4_0 trial");
+
+    TimedResult result;
+    check(cudaEventElapsedTime(&result.milliseconds, start, stop),
+          "measure chunked Q4_0 trial");
+    check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
+                     cudaMemcpyDeviceToHost), "copy chunked outputs for validation");
+    result.valid = validate_output(expected, host_output, result.max_abs_error,
+                                   result.checksum);
+    if (!result.valid) {
+        std::fprintf(stderr,
+            "Q4_0 chunk output mismatch overlap=%s passes=%d sample=%d max_abs_error=%.8g\n",
+            overlap ? "yes" : "no", passes, sample, result.max_abs_error);
     }
     return result;
 }
@@ -242,6 +325,10 @@ int main(int argc, char** argv) {
         (target_bytes / sizeof(BlockQ4_0)) / kRows);
     const size_t block_count = static_cast<size_t>(kRows) * blocks_per_row;
     const size_t weight_bytes = block_count * sizeof(BlockQ4_0);
+    const size_t row_bytes = blocks_per_row * sizeof(BlockQ4_0);
+    const int chunk_rows = static_cast<int>(std::min<size_t>(kRows,
+        std::max<size_t>(1, (kChunkMiB * 1024 * 1024) / row_bytes)));
+    const size_t chunk_bytes = static_cast<size_t>(chunk_rows) * row_bytes;
     const int columns = static_cast<int>(blocks_per_row * kQK);
     const size_t max_input_bytes = static_cast<size_t>(columns) * 4 * sizeof(float);
 
@@ -254,7 +341,8 @@ int main(int argc, char** argv) {
     check(cudaGetDeviceProperties(&prop, 0), "query GPU properties");
     const size_t eviction_bytes = kEvictionMiB * 1024 * 1024;
     const int eviction_blocks = prop.multiProcessorCount * 8;
-    const size_t device_buffers = 2 * weight_bytes + eviction_bytes + max_input_bytes +
+    const size_t chunk_buffer_bytes = options.mib >= 32 ? 2 * chunk_bytes : 0;
+    const size_t device_buffers = 2 * weight_bytes + chunk_buffer_bytes + eviction_bytes + max_input_bytes +
                                   kRows * sizeof(float) +
                                   static_cast<size_t>(eviction_blocks * 256) * sizeof(float);
 
@@ -264,13 +352,22 @@ int main(int argc, char** argv) {
                 device_buffers / (1024.0 * 1024.0),
                 static_cast<size_t>(prop.l2CacheSize) / (1024 * 1024));
     std::printf("format,Q4_0,block_values=32,block_bytes=18,packed_layout=low_nibble_values_0_to_15_high_nibble_values_16_to_31,scale_half_bits=0x2c00\n");
+    if (options.mib >= 32) {
+        std::printf("chunking,chunk_MiB=16,chunk_rows=%d,chunk_bytes=%zu,num_chunks=%d,buffer_count=2\n",
+                    chunk_rows, chunk_bytes, (kRows + chunk_rows - 1) / chunk_rows);
+    }
 
     cudaStream_t stream{};
+    cudaStream_t copy_stream{};
+    cudaStream_t compute_stream{};
     check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    check(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking), "create copy stream");
+    check(cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking), "create compute stream");
     BlockQ4_0* host_weights = nullptr;
     BlockQ4_0* mapped_weights = nullptr;
     BlockQ4_0* managed_weights = nullptr;
     BlockQ4_0* staged_weights = nullptr;
+    BlockQ4_0* chunk_buffers[2] = {nullptr, nullptr};
     float* device_inputs = nullptr;
     float* device_output = nullptr;
     float4* eviction = nullptr;
@@ -283,6 +380,12 @@ int main(int argc, char** argv) {
                             cudaMemAttachGlobal), "allocate managed Q4_0 weights");
     check(cudaMalloc(reinterpret_cast<void**>(&staged_weights), weight_bytes),
           "allocate staged Q4_0 weights");
+    if (options.mib >= 32) {
+        check(cudaMalloc(reinterpret_cast<void**>(&chunk_buffers[0]), chunk_bytes),
+              "allocate first Q4_0 chunk buffer");
+        check(cudaMalloc(reinterpret_cast<void**>(&chunk_buffers[1]), chunk_bytes),
+              "allocate second Q4_0 chunk buffer");
+    }
     check(cudaMalloc(reinterpret_cast<void**>(&device_inputs), max_input_bytes),
           "allocate input vectors");
     check(cudaMalloc(reinterpret_cast<void**>(&device_output), kRows * sizeof(float)),
@@ -420,7 +523,7 @@ int main(int argc, char** argv) {
                 ? managed_weights : staged_weights;
             q4_matvec<<<kRows, kThreads, 0, stream>>>(validation_weights,
                 device_inputs + static_cast<size_t>(3) * columns,
-                device_output, static_cast<int>(blocks_per_row));
+                device_output, static_cast<int>(blocks_per_row), kRows);
             check(cudaGetLastError(), "launch transfer-only validation matvec");
             check(cudaStreamSynchronize(stream), "wait for transfer-only validation matvec");
             check(cudaMemcpy(host_output.data(), device_output, kRows * sizeof(float),
@@ -456,6 +559,61 @@ int main(int argc, char** argv) {
             sorted.front(), sorted.back(), gbps);
     }
 
+    if (options.mib >= 32) {
+        cudaEvent_t copy_ready[2]{}, compute_done[2]{};
+        for (int slot = 0; slot < 2; ++slot) {
+            check(cudaEventCreateWithFlags(&copy_ready[slot], cudaEventDisableTiming),
+                  "create chunk-ready event");
+            check(cudaEventCreateWithFlags(&compute_done[slot], cudaEventDisableTiming),
+                  "create chunk-complete event");
+        }
+        const bool overlap_modes[] = {false, true};
+        const char* chunk_names[] = {"chunk_serial_h2d", "chunk_double_buffer_h2d"};
+        const int chunk_passes[] = {1, 4};
+        std::printf("chunked_format,summary_or_sample,path,passes,n_or_trial,elapsed_ms,logical_weight_GB_s,valid\n");
+        for (int passes : chunk_passes) {
+            std::vector<float> chunk_samples[2];
+            for (int sample = -1; sample < options.repeats; ++sample) {
+                const int first_path = sample < 0 ? (passes % 2) : (sample % 2);
+                for (int order = 0; order < 2; ++order) {
+                    const int path = (first_path + order) % 2;
+                    const TimedResult result = run_chunked_sample(overlap_modes[path],
+                        passes, sample + 1, host_weights, chunk_buffers,
+                        row_bytes, chunk_rows, static_cast<int>(blocks_per_row),
+                        device_inputs, columns, device_output,
+                        expected[passes - 1].data(), host_output, eviction,
+                        eviction_vectors, eviction_sink, eviction_blocks, stream,
+                        copy_stream, compute_stream, start, stop, copy_ready, compute_done);
+                    all_valid = all_valid && result.valid;
+                    if (sample >= 0) {
+                        chunk_samples[path].push_back(result.milliseconds);
+                        const double gbps = weight_bytes * static_cast<double>(passes) /
+                            (static_cast<double>(result.milliseconds) * 1.0e6);
+                        std::printf("chunked_sample,%s,%d,%d,%.6f,%.3f,%s;max_abs_error=%.8g,checksum=%.9g\n",
+                            chunk_names[path], passes, sample + 1, result.milliseconds,
+                            gbps, result.valid ? "yes" : "no",
+                            result.max_abs_error, result.checksum);
+                    }
+                }
+            }
+            for (int path = 0; path < 2; ++path) {
+                std::vector<float> sorted = chunk_samples[path];
+                std::sort(sorted.begin(), sorted.end());
+                const float median = sorted[sorted.size() / 2];
+                const double gbps = weight_bytes * static_cast<double>(passes) /
+                    (static_cast<double>(median) * 1.0e6);
+                std::printf("chunked_summary,%s,passes=%d,n=%zu,median_ms=%.6f,min_ms=%.6f,max_ms=%.6f,logical_weight_GB_s=%.3f,explicit_weight_move_MiB=%.3f\n",
+                    chunk_names[path], passes, sorted.size(), median, sorted.front(),
+                    sorted.back(), gbps, static_cast<double>(weight_bytes) * passes /
+                    (1024.0 * 1024.0));
+            }
+        }
+        for (int slot = 0; slot < 2; ++slot) {
+            check(cudaEventDestroy(copy_ready[slot]), "destroy chunk-ready event");
+            check(cudaEventDestroy(compute_done[slot]), "destroy chunk-complete event");
+        }
+    }
+
     check(cudaEventDestroy(start), "destroy start event");
     check(cudaEventDestroy(stop), "destroy stop event");
     check(cudaFree(eviction_sink), "free L2 eviction sink");
@@ -463,8 +621,14 @@ int main(int argc, char** argv) {
     check(cudaFree(device_output), "free output vector");
     check(cudaFree(device_inputs), "free input vectors");
     check(cudaFree(staged_weights), "free staged weights");
+    if (options.mib >= 32) {
+        check(cudaFree(chunk_buffers[1]), "free second Q4_0 chunk buffer");
+        check(cudaFree(chunk_buffers[0]), "free first Q4_0 chunk buffer");
+    }
     check(cudaFree(managed_weights), "free managed weights");
     check(cudaFreeHost(host_weights), "free mapped pinned weights");
     check(cudaStreamDestroy(stream), "destroy stream");
+    check(cudaStreamDestroy(copy_stream), "destroy copy stream");
+    check(cudaStreamDestroy(compute_stream), "destroy compute stream");
     return all_valid ? 0 : 1;
 }
