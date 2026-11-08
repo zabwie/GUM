@@ -8,9 +8,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <limits>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -109,6 +113,7 @@ struct Options {
     std::string weights_file;
     bool rows_set = false;
     bool blocks_set = false;
+    bool mmap_readonly = false;
 };
 
 int parse_positive(const char* value, const char* option) {
@@ -138,6 +143,8 @@ Options parse_options(int argc, char** argv) {
             options.blocks_set = true;
         } else if (std::strcmp(argv[i], "--weights-file") == 0 && i + 1 < argc) {
             options.weights_file = argv[++i];
+        } else if (std::strcmp(argv[i], "--mmap-readonly") == 0) {
+            options.mmap_readonly = true;
         } else if (std::strcmp(argv[i], "--weights-offset") == 0 && i + 1 < argc) {
             const char* offset_text = argv[++i];
             char* end = nullptr;
@@ -149,7 +156,7 @@ Options parse_options(int argc, char** argv) {
             }
             options.weights_offset = static_cast<size_t>(parsed);
         } else {
-            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10] [--chunk-mib 4..64] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE]\n", argv[0]);
+            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10] [--chunk-mib 4..64] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE --mmap-readonly]\n", argv[0]);
             std::exit(2);
         }
     }
@@ -160,6 +167,7 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.rows > 32768 || (!options.weights_file.empty() &&
         (!options.rows_set || !options.blocks_set)) ||
+        (options.mmap_readonly && options.weights_file.empty()) ||
         options.chunk_mib < 4 || options.chunk_mib > 64) {
         std::fprintf(stderr, "Invalid dimensions or model-weight input options\n");
         std::exit(2);
@@ -380,9 +388,12 @@ int main(int argc, char** argv) {
     }
     const size_t block_count = static_cast<size_t>(rows) * blocks_per_row;
     const size_t weight_bytes = block_count * sizeof(BlockQ4_0);
-    if (weight_bytes > static_cast<size_t>(kMaxMiB) * 1024 * 1024 ||
-        options.weights_offset > std::numeric_limits<size_t>::max() - weight_bytes) {
+    if (weight_bytes > static_cast<size_t>(kMaxMiB) * 1024 * 1024) {
         std::fprintf(stderr, "Q4_0 weight allocation exceeds %d MiB\n", kMaxMiB);
+        return 2;
+    }
+    if (options.weights_offset > std::numeric_limits<size_t>::max() - weight_bytes) {
+        std::fprintf(stderr, "Q4_0 file range offset overflows size_t\n");
         return 2;
     }
     const int columns = static_cast<int>(blocks_per_row * kQK);
@@ -395,10 +406,23 @@ int main(int argc, char** argv) {
     check(cudaSetDevice(0), "select GPU 0");
     int driver_version = 0;
     int runtime_version = 0;
+    int host_register_supported = 0;
+    int host_register_readonly_supported = 0;
     check(cudaDriverGetVersion(&driver_version), "query driver version");
     check(cudaRuntimeGetVersion(&runtime_version), "query runtime version");
+    check(cudaDeviceGetAttribute(&host_register_supported,
+          cudaDevAttrHostRegisterSupported, 0), "query host registration support");
+    check(cudaDeviceGetAttribute(&host_register_readonly_supported,
+          cudaDevAttrHostRegisterReadOnlySupported, 0), "query read-only host registration support");
     cudaDeviceProp prop{};
     check(cudaGetDeviceProperties(&prop, 0), "query GPU properties");
+    if (options.mmap_readonly &&
+        (!host_register_supported || !host_register_readonly_supported)) {
+        std::fprintf(stderr,
+            "GPU does not support read-only host registration (host_register=%d read_only=%d)\n",
+            host_register_supported, host_register_readonly_supported);
+        return 2;
+    }
     const size_t eviction_bytes = kEvictionMiB * 1024 * 1024;
     const int eviction_blocks = prop.multiProcessorCount * 8;
     const bool enable_chunking = weight_bytes >= 32 * 1024 * 1024;
@@ -412,10 +436,13 @@ int main(int argc, char** argv) {
                 options.mib, weight_bytes, rows, columns, blocks_per_row, options.repeats,
                 device_buffers / (1024.0 * 1024.0),
                 static_cast<size_t>(prop.l2CacheSize) / (1024 * 1024));
+    std::printf("host_registration,host_register=%d,read_only=%d\n",
+                host_register_supported, host_register_readonly_supported);
     if (!options.weights_file.empty()) {
-        std::printf("weight_source,gguf_tensor_slice,path=%s,offset=%zu,bytes=%zu\n",
+        std::printf("weight_source,%s,path=%s,offset=%zu,bytes=%zu\n",
+                    options.mmap_readonly ? "gguf_file_mmap_registered_readonly" : "gguf_tensor_slice",
                     options.weights_file.c_str(), options.weights_offset, weight_bytes);
-    } else {
+    } else if (options.weights_file.empty()) {
         std::printf("weight_source,synthetic\n");
     }
     std::printf("format,Q4_0,block_values=32,block_bytes=18,packed_layout=low_nibble_values_0_to_15_high_nibble_values_16_to_31,scale_half_bits=0x2c00\n");
@@ -436,14 +463,58 @@ int main(int argc, char** argv) {
     BlockQ4_0* managed_weights = nullptr;
     BlockQ4_0* staged_weights = nullptr;
     BlockQ4_0* chunk_buffers[2] = {nullptr, nullptr};
+    void* file_mapping = nullptr;
+    void* device_file_mapping = nullptr;
+    size_t file_mapping_bytes = 0;
+    size_t file_data_delta = 0;
+    int weights_fd = -1;
     float* device_inputs = nullptr;
     float* device_output = nullptr;
     float4* eviction = nullptr;
     float* eviction_sink = nullptr;
-    check(cudaHostAlloc(reinterpret_cast<void**>(&host_weights), weight_bytes,
-                        cudaHostAllocMapped), "allocate mapped pinned Q4_0 weights");
-    check(cudaHostGetDevicePointer(reinterpret_cast<void**>(&mapped_weights), host_weights, 0),
-          "get mapped Q4_0 weight pointer");
+    if (options.mmap_readonly) {
+        const long page_size = sysconf(_SC_PAGE_SIZE);
+        if (page_size <= 0) {
+            std::fprintf(stderr, "Could not query system page size\n");
+            return 1;
+        }
+        const size_t page = static_cast<size_t>(page_size);
+        const size_t aligned_offset = options.weights_offset - options.weights_offset % page;
+        file_data_delta = options.weights_offset - aligned_offset;
+        file_mapping_bytes = ((file_data_delta + weight_bytes + page - 1) / page) * page;
+        weights_fd = open(options.weights_file.c_str(), O_RDONLY | O_CLOEXEC);
+        if (weights_fd < 0) {
+            std::perror("open Q4_0 model file");
+            return 1;
+        }
+        struct stat file_status{};
+        if (fstat(weights_fd, &file_status) != 0 ||
+            options.weights_offset + weight_bytes > static_cast<size_t>(file_status.st_size)) {
+            std::fprintf(stderr, "Requested Q4_0 tensor range is outside the model file\n");
+            return 1;
+        }
+        file_mapping = mmap(nullptr, file_mapping_bytes, PROT_READ, MAP_PRIVATE,
+                            weights_fd, static_cast<off_t>(aligned_offset));
+        if (file_mapping == MAP_FAILED) {
+            file_mapping = nullptr;
+            std::perror("mmap Q4_0 model tensor");
+            return 1;
+        }
+        check(cudaHostRegister(file_mapping, file_mapping_bytes,
+              cudaHostRegisterMapped | cudaHostRegisterReadOnly),
+              "register read-only mapped Q4_0 tensor pages");
+        check(cudaHostGetDevicePointer(&device_file_mapping, file_mapping, 0),
+              "get device pointer for model file mapping");
+        host_weights = reinterpret_cast<BlockQ4_0*>(
+            static_cast<unsigned char*>(file_mapping) + file_data_delta);
+        mapped_weights = reinterpret_cast<BlockQ4_0*>(
+            static_cast<unsigned char*>(device_file_mapping) + file_data_delta);
+    } else {
+        check(cudaHostAlloc(reinterpret_cast<void**>(&host_weights), weight_bytes,
+                            cudaHostAllocMapped), "allocate mapped pinned Q4_0 weights");
+        check(cudaHostGetDevicePointer(reinterpret_cast<void**>(&mapped_weights), host_weights, 0),
+              "get mapped Q4_0 weight pointer");
+    }
     check(cudaMallocManaged(reinterpret_cast<void**>(&managed_weights), weight_bytes,
                             cudaMemAttachGlobal), "allocate managed Q4_0 weights");
     check(cudaMalloc(reinterpret_cast<void**>(&staged_weights), weight_bytes),
@@ -464,7 +535,7 @@ int main(int argc, char** argv) {
                      static_cast<size_t>(eviction_blocks * 256) * sizeof(float)),
           "allocate L2 eviction sink");
 
-    if (!options.weights_file.empty()) {
+    if (!options.weights_file.empty() && !options.mmap_readonly) {
         std::ifstream input_file(options.weights_file, std::ios::binary);
         if (!input_file) {
             std::fprintf(stderr, "Could not open Q4_0 weights file: %s\n",
@@ -478,7 +549,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Q4_0 weights file range is shorter than requested\n");
             return 1;
         }
-    } else {
+    } else if (options.weights_file.empty()) {
         constexpr uint16_t kScaleHalf = 0x2c00;  // exactly 1/16
         for (size_t index = 0; index < block_count; ++index) {
             BlockQ4_0& block = host_weights[index];
@@ -711,7 +782,16 @@ int main(int argc, char** argv) {
         check(cudaFree(chunk_buffers[0]), "free first Q4_0 chunk buffer");
     }
     check(cudaFree(managed_weights), "free managed weights");
-    check(cudaFreeHost(host_weights), "free mapped pinned weights");
+    if (options.mmap_readonly) {
+        check(cudaHostUnregister(file_mapping), "unregister read-only model pages");
+        if (munmap(file_mapping, file_mapping_bytes) != 0) {
+            std::perror("munmap Q4_0 model tensor");
+            return 1;
+        }
+        close(weights_fd);
+    } else {
+        check(cudaFreeHost(host_weights), "free mapped pinned weights");
+    }
     check(cudaStreamDestroy(stream), "destroy stream");
     check(cudaStreamDestroy(copy_stream), "destroy copy stream");
     check(cudaStreamDestroy(compute_stream), "destroy compute stream");
