@@ -1,0 +1,16 @@
+Experiment: E001 CUDA runtime capability query
+Date: 2026-11-08
+Source revision: 39b107e
+Build: /usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_86 benchmarks/memory_paths.cu -o benchmarks/memory_paths
+Run: benchmarks/memory_paths --capabilities-only
+
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,VRAM_MiB=11905,driver=13020,runtime=13020,buffer_MiB=64,repeats=5
+capability,canMapHostMemory,1
+capability,unifiedAddressing,1
+capability,concurrentManagedAccess,1
+capability,pageableMemoryAccess,1
+capability,pageableMemoryAccessUsesHostPageTables,0
+capability,hostNativeAtomicSupported,0
+exit_status=0
+
+This mode queries CUDA properties only. It allocated no benchmark buffers, launched no benchmark kernel, and produced no timing sample.

@@ -1,0 +1,10 @@
+Experiment: guarded launch attempt for the 64 MiB memory-path benchmark
+Date: 2026-11-08
+Source revision: 39b107e
+Command: scripts/run_when_idle.sh
+
+Preflight: GPU utilization=53%, free VRAM=11213 MiB, available RAM=20038 MiB, CUDA compute PIDs=none
+Deferred: GPU utilization exceeds 15%.
+guard_exit=3
+
+No benchmark kernel was launched.
