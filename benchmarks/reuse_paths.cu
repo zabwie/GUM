@@ -46,6 +46,15 @@ __global__ void scan_selected(const float4* input, size_t selected_vectors,
     if (lane == 0) block_sums[blockIdx.x] = sums[0];
 }
 
+__global__ void gather_selected(const float4* input, size_t selected_vectors,
+                                size_t stride_vectors, float4* compact_cache) {
+    const size_t first = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    for (size_t selected = first; selected < selected_vectors; selected += stride) {
+        compact_cache[selected] = input[selected * stride_vectors];
+    }
+}
+
 struct Options {
     int mib = 64;
     int repeats = 5;
@@ -120,7 +129,7 @@ void evict_l2(const float4* eviction_buffer, size_t eviction_vectors,
 
 void print_summary(const char* path, int selected_pct, int passes,
                    const std::vector<float>& samples, size_t useful_bytes_per_pass,
-                   size_t explicit_copy_bytes) {
+                   size_t explicit_copy_bytes, size_t gathered_payload_bytes = 0) {
     std::vector<float> sorted = samples;
     std::sort(sorted.begin(), sorted.end());
     const float median = sorted.empty() ? 0.0f : sorted[sorted.size() / 2];
@@ -129,9 +138,10 @@ void print_summary(const char* path, int selected_pct, int passes,
     const size_t useful_total = useful_bytes_per_pass * static_cast<size_t>(passes);
     const size_t transfer_total = explicit_copy_bytes * static_cast<size_t>(passes > 0 ? 1 : 0);
     const double useful_gbps = median > 0.0f ? useful_total / (static_cast<double>(median) * 1.0e6) : 0.0;
-    std::printf("summary,%s,selectivity_pct=%d,passes=%d,n=%zu,median_ms=%.6f,min_ms=%.6f,max_ms=%.6f,useful_GB_s=%.3f,explicit_copy_MiB=%.3f\n",
+    std::printf("summary,%s,selectivity_pct=%d,passes=%d,n=%zu,median_ms=%.6f,min_ms=%.6f,max_ms=%.6f,useful_GB_s=%.3f,explicit_copy_MiB=%.3f,gathered_payload_MiB=%.3f\n",
                 path, selected_pct, passes, sorted.size(), median, minimum, maximum,
-                useful_gbps, transfer_total / (1024.0 * 1024.0));
+                useful_gbps, transfer_total / (1024.0 * 1024.0),
+                gathered_payload_bytes / (1024.0 * 1024.0));
     for (size_t i = 0; i < samples.size(); ++i) {
         const double gbps = samples[i] > 0.0f ? useful_total / (static_cast<double>(samples[i]) * 1.0e6) : 0.0;
         std::printf("sample,%s,selectivity_pct=%d,passes=%d,%zu,%.6f,useful_GB_s=%.3f\n",
@@ -175,7 +185,7 @@ int main(int argc, char** argv) {
     std::printf("device,%s,cc=%d.%d,driver=%d,runtime=%d,buffer_MiB=%d,repeats=%d,device_buffers_MiB=%zu,L2_MiB=%zu\n",
                 prop.name, prop.major, prop.minor, driver_version, runtime_version,
                 options.mib, options.repeats,
-                options.mib * 2 + eviction_bytes / (1024 * 1024),
+                options.mib * 3 + eviction_bytes / (1024 * 1024),
                 static_cast<size_t>(prop.l2CacheSize) / (1024 * 1024));
 
     cudaStream_t stream{};
@@ -184,6 +194,7 @@ int main(int argc, char** argv) {
     float4* mapped_device = nullptr;
     float* staged_device = nullptr;
     float4* managed = nullptr;
+    float4* compact_cache = nullptr;
     float4* eviction_buffer = nullptr;
     float* block_sums = nullptr;
     check(cudaHostAlloc(reinterpret_cast<void**>(&host), bytes, cudaHostAllocMapped),
@@ -193,6 +204,7 @@ int main(int argc, char** argv) {
     check(cudaMalloc(reinterpret_cast<void**>(&staged_device), bytes), "allocate staging buffer");
     check(cudaMallocManaged(reinterpret_cast<void**>(&managed), bytes, cudaMemAttachGlobal),
           "allocate managed input");
+    check(cudaMalloc(reinterpret_cast<void**>(&compact_cache), bytes), "allocate compact cache buffer");
     check(cudaMalloc(reinterpret_cast<void**>(&eviction_buffer), eviction_bytes),
           "allocate L2 eviction buffer");
     check(cudaMemset(eviction_buffer, 0, eviction_bytes), "initialize L2 eviction buffer");
@@ -230,6 +242,7 @@ int main(int argc, char** argv) {
             std::vector<float> mapped_samples;
             std::vector<float> staged_samples;
             std::vector<float> managed_samples;
+            std::vector<float> cache_samples;
 
             for (int trial = 0; trial < options.repeats; ++trial) {
                 evict_l2(eviction_buffer, eviction_bytes / sizeof(float4), blocks,
@@ -318,12 +331,45 @@ int main(int argc, char** argv) {
             }
             print_summary("managed_prefetch", percentages[pattern], passes, managed_samples,
                           useful_bytes, bytes);
+
+            for (int trial = 0; trial < options.repeats; ++trial) {
+                evict_l2(eviction_buffer, eviction_bytes / sizeof(float4), blocks,
+                         stream, block_sums);
+                check(cudaEventRecord(start, stream), "record GPU-cache path start");
+                gather_selected<<<blocks, kThreads, 0, stream>>>(mapped_device,
+                    selected_vectors, stride_vectors, compact_cache);
+                check(cudaGetLastError(), "launch GPU-cache gather");
+                for (int pass = 0; pass < passes; ++pass) {
+                    scan_selected<<<blocks, kThreads, 0, stream>>>(compact_cache,
+                        selected_vectors, 1, block_sums);
+                    check(cudaGetLastError(), "launch GPU-cache reuse scan");
+                }
+                check(cudaEventRecord(stop, stream), "record GPU-cache path stop");
+                check(cudaEventSynchronize(stop), "wait for GPU-cache path");
+                TimedResult result;
+                check(cudaEventElapsedTime(&result.milliseconds, start, stop),
+                      "measure GPU-cache path");
+                check(cudaMemcpy(host_sums.data(), block_sums, blocks * sizeof(float), cudaMemcpyDeviceToHost),
+                      "copy GPU-cache checksum");
+                for (int block = 0; block < blocks; ++block) result.checksum += host_sums[block];
+                result.valid = std::abs(result.checksum - expected) / expected < 1.0e-4;
+                cache_samples.push_back(result.milliseconds);
+                all_valid = all_valid && result.valid;
+                const double useful_gbps = useful_bytes * static_cast<size_t>(passes) /
+                    (static_cast<double>(result.milliseconds) * 1.0e6);
+                std::printf("sample,gpu_side_cache,%d,%d,%d,%.6f,%.3f,%s\n", percentages[pattern],
+                            passes, trial + 1, result.milliseconds, useful_gbps,
+                            result.valid ? "yes" : "no");
+            }
+            print_summary("gpu_side_cache", percentages[pattern], passes, cache_samples,
+                          useful_bytes, 0, useful_bytes);
         }
     }
 
     check(cudaEventDestroy(start), "destroy start event");
     check(cudaEventDestroy(stop), "destroy stop event");
     check(cudaFree(block_sums), "free checksum buffer");
+    check(cudaFree(compact_cache), "free compact cache buffer");
     check(cudaFree(eviction_buffer), "free L2 eviction buffer");
     check(cudaFree(managed), "free managed buffer");
     check(cudaFree(staged_device), "free staging buffer");
