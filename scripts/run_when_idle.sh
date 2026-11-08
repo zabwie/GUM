@@ -9,22 +9,30 @@ BENCHMARK="${BENCHMARK:-memory_paths}"
 PROFILE="${PROFILE:-none}"
 SAMPLES=5
 MAX_TEMP_C=80
+MAX_MIB=256
+
+if [[ "$BENCHMARK" == "host_latency" ]]; then
+  MAX_MIB=960
+fi
+if [[ "$BENCHMARK" == "q4_matvec" ]]; then
+  MAX_MIB=960
+fi
 
 case "$BENCHMARK" in
-  memory_paths|managed_paths|reuse_paths|q4_matvec) ;;
-  *) echo "Refusing: BENCHMARK must be memory_paths, managed_paths, reuse_paths, or q4_matvec." >&2; exit 2 ;;
+  memory_paths|managed_paths|reuse_paths|q4_matvec|host_latency) ;;
+  *) echo "Refusing: BENCHMARK must be memory_paths, managed_paths, reuse_paths, q4_matvec, or host_latency." >&2; exit 2 ;;
 esac
 case "$PROFILE" in
   none|um_faults) ;;
   *) echo "Refusing: PROFILE must be none or um_faults." >&2; exit 2 ;;
 esac
-if [[ "$PROFILE" == "um_faults" && "$BENCHMARK" != "managed_paths" ]]; then
-  echo "Refusing: PROFILE=um_faults requires BENCHMARK=managed_paths." >&2
+if [[ "$PROFILE" == "um_faults" && "$BENCHMARK" != "managed_paths" && "$BENCHMARK" != "host_latency" ]]; then
+  echo "Refusing: PROFILE=um_faults requires BENCHMARK=managed_paths or host_latency." >&2
   exit 2
 fi
 
-if (( MIB < 1 || MIB > 256 )); then
-  echo "Refusing: MIB must be between 1 and 256 (the project resource cap)." >&2
+if (( MIB < 1 || MIB > MAX_MIB )); then
+  echo "Refusing: MIB must be between 1 and ${MAX_MIB} for this benchmark." >&2
   exit 2
 fi
 if (( REPEATS < 1 || REPEATS > 10 )); then
@@ -80,12 +88,22 @@ if [[ "$BENCHMARK" == "reuse_paths" ]]; then
   VRAM_FIXED_MIB=16
 elif [[ "$BENCHMARK" == "q4_matvec" ]]; then
   VRAM_BUFFER_COUNT=2
-  VRAM_FIXED_MIB="$((16 + 2 * CHUNK_MIB))"
+  # Add 8 MiB for input/output scratch beyond the eviction and two chunk buffers.
+  VRAM_FIXED_MIB="$((24 + 2 * CHUNK_MIB))"
+elif [[ "$BENCHMARK" == "host_latency" ]]; then
+  VRAM_BUFFER_COUNT=2
+  VRAM_FIXED_MIB=17
 fi
-MIN_GPU_FREE_MIB="$((2048 + MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
 PLANNED_DEVICE_MIB="$((MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
+if (( PLANNED_DEVICE_MIB > 2048 )); then
+  echo "Refusing: planned device buffers exceed the 2048 MiB project cap; reduce MIB or CHUNK_MIB." >&2
+  exit 2
+fi
+MIN_GPU_FREE_MIB="$((2048 + PLANNED_DEVICE_MIB))"
 PLANNED_HOST_MIB=0
-if [[ "$BENCHMARK" == "reuse_paths" || "$BENCHMARK" == "q4_matvec" ]]; then
+if [[ "$BENCHMARK" == "host_latency" ]]; then
+  PLANNED_HOST_MIB="$((MIB * 3))"
+elif [[ "$BENCHMARK" == "reuse_paths" || "$BENCHMARK" == "q4_matvec" ]]; then
   PLANNED_HOST_MIB="$((MIB * 2))"
 elif [[ "$BENCHMARK" == "managed_paths" ]]; then
   PLANNED_HOST_MIB="$((MIB * 3))"
@@ -122,7 +140,7 @@ printf 'pmon_samples_begin\n%s\npmon_samples_end\n' "$PMON_OUTPUT"
 printf 'Starting bounded benchmark at %s (benchmark=%s, buffer MiB=%s, measured repeats=%s).\n' "$(date -Is)" "$BENCHMARK" "$MIB" "$REPEATS"
 
 if [[ "$PROFILE" == "um_faults" ]]; then
-  REPORT="$ROOT/results/managed-memory-faults-${MIB}mib-$(date +%Y%m%d-%H%M%S)"
+  REPORT="$ROOT/results/unified-memory-faults-${BENCHMARK}-${MIB}mib-$(date +%Y%m%d-%H%M%S)"
   printf 'Profiling Unified Memory page faults and migrations to %s.nsys-rep.\n' "$REPORT"
   exec nsys profile --trace=cuda --cuda-um-cpu-page-faults=true \
     --cuda-um-gpu-page-faults=true --output="$REPORT" \

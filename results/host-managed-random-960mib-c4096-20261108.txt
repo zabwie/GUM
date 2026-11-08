@@ -1,0 +1,52 @@
+Preflight: sampled GPU utilization=[0,23,7,0,13]% (max 23%), planned device buffers=1936 MiB, planned host allocations~=2880 MiB, minimum free VRAM=11279 MiB, available RAM=22875 MiB, max temperature=46 C, max power=26/170 W, CUDA compute clients=165671:139MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G     34     28      -      -      -      -    cinnamon
+    0      20431     G     26     23      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G     31     30      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G     38     33      -      -      -      -    cinnamon
+    0      20431     G     11     10      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T10:44:38-04:00 (benchmark=host_latency, buffer MiB=960, measured repeats=5).
+host_latency_meta,device=NVIDIA GeForce RTX 3060,bytes=1006632960,nodes=251658240,steps_per_chain=4096,chains=4096,total_loads=16777216,repeats=5,host_allocation_mib=1920,vram_allocation_mib=1920,eviction_mib=16
+host_latency_format,summary_or_sample,path,sample,elapsed_ms,ns_per_load,million_loads_per_s,valid
+host_latency_sample,mapped_host,1,220.927994,13.17,75.940,yes
+host_latency_sample,managed_demand,1,66.783234,3.98,251.219,yes
+host_latency_sample,managed_prefetch_plus_kernel,1,47.821823,2.85,350.828,yes
+host_latency_sample,vram_resident,1,5.141632,0.31,3263.014,yes
+host_latency_sample,managed_demand,2,66.444260,3.96,252.501,yes
+host_latency_sample,managed_prefetch_plus_kernel,2,47.273983,2.82,354.893,yes
+host_latency_sample,vram_resident,2,5.492736,0.33,3054.437,yes
+host_latency_sample,mapped_host,2,210.737152,12.56,79.612,yes
+host_latency_sample,managed_prefetch_plus_kernel,3,46.910465,2.80,357.643,yes
+host_latency_sample,vram_resident,3,5.170176,0.31,3244.999,yes
+host_latency_sample,mapped_host,3,202.848068,12.09,82.708,yes
+host_latency_sample,managed_demand,3,63.173634,3.77,265.573,yes
+host_latency_sample,vram_resident,4,5.171200,0.31,3244.357,yes
+host_latency_sample,mapped_host,4,198.379517,11.82,84.571,yes
+host_latency_sample,managed_demand,4,65.796097,3.92,254.988,yes
+host_latency_sample,managed_prefetch_plus_kernel,4,47.766335,2.85,351.235,yes
+host_latency_sample,mapped_host,5,234.716324,13.99,71.479,yes
+host_latency_sample,managed_demand,5,68.111618,4.06,246.319,yes
+host_latency_sample,managed_prefetch_plus_kernel,5,47.304512,2.82,354.664,yes
+host_latency_sample,vram_resident,5,5.174080,0.31,3242.551,yes
+host_latency_summary,mapped_host,n=5,median_ns_per_load=12.56,million_loads_per_s=79.612,min=11.82,max=13.99
+host_latency_summary,managed_demand,n=5,median_ns_per_load=3.96,million_loads_per_s=252.501,min=3.77,max=4.06
+host_latency_summary,managed_prefetch_plus_kernel,n=5,median_ns_per_load=2.82,million_loads_per_s=354.664,min=2.80,max=2.85
+host_latency_summary,vram_resident,n=5,median_ns_per_load=0.31,million_loads_per_s=3244.357,min=0.31,max=0.33

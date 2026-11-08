@@ -11,9 +11,11 @@ Find the best reproducible way for local inference to use system RAM with the RT
 3. Measure a bounded streaming read from mapped pinned host RAM against pinned H2D staging plus a VRAM scan and a VRAM-only scan.
 4. Add separate managed-memory cold-touch and steady-state experiments, with migration behavior recorded.
 5. Measure latency and bandwidth at useful tensor sizes and access patterns; compare with PCIe and DRAM ceilings.
-6. Prototype a bounded GPU-side cache and a simple prefetch/staging pipeline only after measurements identify a useful reuse opportunity.
-7. Before inventing an allocator, evaluate llama.cpp's existing Linux CUDA path (`GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`, which switches CUDA allocations to `cudaMallocManaged`) against its ordinary CUDA allocation/offload baseline. Do this only after microbenchmarks establish the transfer behavior and the run can respect resource limits.
-8. Integrate an available local inference workload only after the preceding baseline is reproducible; add a GPU-side cache/prefetch prototype only if the evidence identifies a useful reuse opportunity.
+   - **Completed:** Add randomized dependent-load tests from 1 to 960 MiB and measure independent-chain scaling, managed demand faults, full prefetch, and a migration trace.
+6. **Completed:** Measure a compact GPU-side cache, synthetic Q4_0 matvec paths, and a bounded Q4_0 tensor GEMV. Add serialized and double-buffered chunk pipelines; chunk reuse remains slower than one-time staging/prefetch for the tested working sets.
+   - **Completed:** Extend the synthetic Q4_0 matrix benchmark through 960 MiB. Managed prefetch remains the fastest tested host-backed path for this matrix workload.
+7. **Pending a suitable model under the current resource cap:** Compare llama.cpp's existing Linux CUDA path (`GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`, which switches CUDA allocations to `cudaMallocManaged`) against ordinary CUDA allocation/offload using identical settings. The only standalone local base model found is about 14.1 GiB, above the 4 GiB additional-RAM budget.
+8. **Next:** Run end-to-end inference only with a standalone model whose actual incremental host and device use can remain within the stated budgets. Record output correctness, prefill/decode rates, time to first token, and memory use.
 
 ## Guardrails
 

@@ -1,0 +1,47 @@
+Preflight: sampled GPU utilization=[0,0,18,0,0]% (max 18%), planned device buffers=1936 MiB, planned host allocations~=2880 MiB, minimum free VRAM=11303 MiB, available RAM=22858 MiB, max temperature=35 C, max power=18/170 W, CUDA compute clients=165671:142MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G     20     18      -      -      -      -    Xorg
+    0      19328     G     21     18      -      -      -      -    cinnamon
+    0      20431     G     13     19      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G     20     18      -      -      -      -    Xorg
+    0      19328     G     21     18      -      -      -      -    cinnamon
+    0      20431     G     13     19      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G     31     27      -      -      -      -    cinnamon
+    0      20431     G     30     27      -      -      -      -    Codex --change-
+    0     165671   C+G      -      -      -      -      -      -    python
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T11:05:06-04:00 (benchmark=host_latency, buffer MiB=960, measured repeats=1).
+Profiling Unified Memory page faults and migrations to /home/zabwie/gpu-unified-memory-research/results/unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep.
+WARNING: The version of the system or its configuration does not allow enabling CPU profiling:
+- CPU IP/backtrace sampling will be disabled.
+- CPU context switch tracing will be disabled.
+Try the 'nsys status --environment' command to learn more.
+
+host_latency_meta,device=NVIDIA GeForce RTX 3060,bytes=1006632960,nodes=251658240,steps_per_chain=4096,chains=256,total_loads=1048576,repeats=1,host_allocation_mib=1920,vram_allocation_mib=1920,eviction_mib=16
+host_latency_format,summary_or_sample,path,sample,elapsed_ms,ns_per_load,million_loads_per_s,valid
+host_latency_sample,mapped_host,1,12.348320,11.78,84.916,yes
+host_latency_sample,managed_demand,1,90.972862,86.76,11.526,yes
+host_latency_sample,managed_prefetch_plus_kernel,1,43.798752,41.77,23.941,yes
+host_latency_sample,vram_resident,1,1.553824,1.48,674.836,yes
+host_latency_summary,mapped_host,n=1,median_ns_per_load=11.78,million_loads_per_s=84.916,min=11.78,max=11.78
+host_latency_summary,managed_demand,n=1,median_ns_per_load=86.76,million_loads_per_s=11.526,min=86.76,max=86.76
+host_latency_summary,managed_prefetch_plus_kernel,n=1,median_ns_per_load=41.77,million_loads_per_s=23.941,min=41.77,max=41.77
+host_latency_summary,vram_resident,n=1,median_ns_per_load=1.48,million_loads_per_s=674.836,min=1.48,max=1.48
+Collecting data...
+Generating '/tmp/nsys-report-b7a8.qdstrm'
+[1/1] [0%                          ] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [0%                          ] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [=16%                        ] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [====28%                     ] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [========40%                 ] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [===========52%              ] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [========================100%] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep[1/1] [========================100%] unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep
+Generated:
+	/home/zabwie/gpu-unified-memory-research/results/unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep

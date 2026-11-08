@@ -1,0 +1,51 @@
+Preflight: sampled GPU utilization=[41,37,38,39,42]% (max 42%), planned device buffers=80 MiB, planned host allocations~=128 MiB, minimum free VRAM=10690 MiB, available RAM=20043 MiB, max temperature=52 C, max power=59/170 W, CUDA compute clients=165671:138MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     39      8      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      5      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     32      6      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      5      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     32      6      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      5      1      -      -      -      -    Xorg
+    0      19328     G      5      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     27      6      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      5      1      -      -      -      -    Xorg
+    0      19328     G      5      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     29      6      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T10:33:23-04:00 (benchmark=host_latency, buffer MiB=64, measured repeats=5).
+host_latency_meta,device=NVIDIA GeForce RTX 3060,bytes=67108864,nodes=16777216,steps_per_chain=4096,chains=256,total_loads=1048576,repeats=5,host_allocation_mib=64,vram_allocation_mib=64,eviction_mib=16
+host_latency_format,summary_or_sample,path,sample,elapsed_ms,ns_per_load,million_loads_per_s,valid
+host_latency_sample,mapped_host,1,9.000960,8.58,116.496,yes
+host_latency_sample,vram_resident,1,1.549312,1.48,676.801,yes
+host_latency_sample,vram_resident,2,1.556064,1.48,673.864,yes
+host_latency_sample,mapped_host,2,9.047008,8.63,115.903,yes
+host_latency_sample,mapped_host,3,9.012160,8.59,116.351,yes
+host_latency_sample,vram_resident,3,1.540096,1.47,680.851,yes
+host_latency_sample,vram_resident,4,1.542144,1.47,679.947,yes
+host_latency_sample,mapped_host,4,9.019136,8.60,116.261,yes
+host_latency_sample,mapped_host,5,13.094272,12.49,80.079,yes
+host_latency_sample,vram_resident,5,1.551040,1.48,676.047,yes
+host_latency_summary,mapped_host,n=5,median_ns_per_load=8.60,million_loads_per_s=116.261,min=8.58,max=12.49
+host_latency_summary,vram_resident,n=5,median_ns_per_load=1.48,million_loads_per_s=676.801,min=1.47,max=1.48
+host_latency_ratio,mapped_over_vram=5.82

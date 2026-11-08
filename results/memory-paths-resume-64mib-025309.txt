@@ -1,0 +1,68 @@
+Experiment: resumed E003/E004 baseline
+Date: 2026-11-08T02:53:09-04:00
+Source revision: 6907233
+Command: scripts/run_when_idle.sh (default 64 MiB, 5 repeats)
+Build: /usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_86 benchmarks/memory_paths.cu -o benchmarks/memory_paths
+Preflight: sampled GPU utilization=[0,0,0,0,0]% (max 0%), minimum free VRAM=11161 MiB, available RAM=18991 MiB, max temperature=28 C, max power=11/170 W, CUDA compute clients=165671:103MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T02:53:19-04:00 (benchmark=memory_paths, buffer MiB=64, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,SMs=28,VRAM_MiB=11905,driver=13020,runtime=13020,buffer_MiB=64,repeats=5
+capability,canMapHostMemory,1
+capability,unifiedAddressing,1
+capability,concurrentManagedAccess,1
+capability,pageableMemoryAccess,1
+capability,pageableMemoryAccessUsesHostPageTables,0
+capability,hostNativeAtomicSupported,0
+result_format,sample,path,run,elapsed_ms,effective_input_GB_s
+summary,mapped_host,n=5,median_ms=5.383776,min_ms=5.368448,effective_input_GB_s=12.465,checksum=16877881.8,valid=yes
+sample,mapped_host,1,5.393376,12.443
+sample,mapped_host,2,5.588768,12.008
+sample,mapped_host,3,5.377440,12.480
+sample,mapped_host,4,5.368448,12.501
+sample,mapped_host,5,5.383776,12.465
+summary,h2d_copy_only,n=5,median_ms=4.596032,min_ms=4.574624,effective_input_GB_s=14.601,checksum=16877881.8,valid=yes
+sample,h2d_copy_only,1,4.574624,14.670
+sample,h2d_copy_only,2,4.587136,14.630
+sample,h2d_copy_only,3,4.596032,14.601
+sample,h2d_copy_only,4,4.629536,14.496
+sample,h2d_copy_only,5,4.786688,14.020
+summary,staged_h2d_plus_scan,n=5,median_ms=4.766784,min_ms=4.755520,effective_input_GB_s=14.078,checksum=16877881.8,valid=yes
+sample,staged_h2d_plus_scan,1,4.755520,14.112
+sample,staged_h2d_plus_scan,2,4.798112,13.987
+sample,staged_h2d_plus_scan,3,4.763776,14.087
+sample,staged_h2d_plus_scan,4,4.768768,14.073
+sample,staged_h2d_plus_scan,5,4.766784,14.078
+summary,vram_resident,n=5,median_ms=0.202400,min_ms=0.201536,effective_input_GB_s=331.566,checksum=16877881.8,valid=yes
+sample,vram_resident,1,0.202976,330.625
+sample,vram_resident,2,0.201536,332.987
+sample,vram_resident,3,0.202464,331.461
+sample,vram_resident,4,0.202400,331.566
+sample,vram_resident,5,0.202176,331.933

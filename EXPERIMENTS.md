@@ -105,3 +105,143 @@
 - **Interpretation:** In this workload, direct mapped access wins for very sparse one-off reads; full managed prefetch wins as the selected fraction or reuse grows. Full H2D staging has the same broad crossover but was slower than managed prefetch on most cases. This supports selective data movement and motivates a compact GPU-side cache test; it does not establish an LLM policy.
 - **Correctness and raw output:** All tested checksums passed. Full five-sample ranges are in `results/reuse-selectivity-cold-64mib-20261108.txt`.
 - **Retained preliminary attempt:** `results/reuse-selectivity-64mib-20261108.txt` was produced by source revision `c36a3a5` before the L2 eviction control was added. Because the 100% scan ran before the sparse cases, it could warm the same mapped-host lines. Do not use that run for sparse-path conclusions; E009's reported results use the corrected `4de4c5f` run.
+
+## E010 — gather sparse values into a compact GPU-side cache
+
+- **Date:** 2026-11-08
+- **Question:** Can one GPU gather of selected mapped-host values, followed by local reuse, beat repeated remote reads or full-buffer movement?
+- **Procedure:** Source revision `6907233`, same 64 MiB buffer, selectivity, pass counts, five-sample repetitions, and 16 MiB L2 eviction scan as E009. Added a GPU gather kernel that reads selected float4 values through the mapped pinned pointer into a compact VRAM buffer, then performs 1, 2, or 4 local scans. Other paths remained direct mapped reads, full pinned H2D copy, and full managed prefetch. The run used at most 208 MiB of device buffers and about 128 MiB of host allocations.
+- **Preflight:** Global utilization `[0,0,0,0,0]%`; minimum free VRAM 11,150 MiB; available RAM 19,293 MiB; maximum temperature 28 C; maximum power 11/170 W; an unrelated CUDA client held 102 MiB with no sampled SM use; no sustained heavy GPU process.
+- **At 1% selectivity:** One-pass gather+scan was 0.297 ms (mapped direct 0.295 ms); four-pass gather+cache was 0.302 ms vs 1.172 ms direct mapped and 2.957 ms full managed prefetch.
+- **At 10% selectivity:** One-pass gather+scan was 2.048 ms (mapped direct 2.038 ms); four-pass gather+cache was 2.123 ms vs 8.167 ms direct mapped, 4.680 ms full H2D staging, and 2.985 ms managed prefetch.
+- **At 25–100%:** Full managed prefetch remained fastest. For example, at 25%/four passes it took 3.357 ms vs 4.500 ms compact cache; at 100%/four passes it took 3.685 ms vs 6.067 ms compact cache.
+- **Interpretation:** A compact GPU-side cache clearly amortized repeated sparse mapped reads at 1–10%; one-pass gathering was roughly tied with direct access, and full-range prefetch remained better for denser data. This validates the cache mechanism in a synthetic gather, not in an inference kernel.
+- **Correctness and raw output:** Every tested checksum passed. Full sample data and preflight are in `results/reuse-cache-64mib-20261108.txt`.
+
+## E011 — repeat the 64 MiB streaming baseline
+
+- **Date:** 2026-11-08
+- **Question:** Do the initial mapped, staged, and VRAM scan results repeat under a quiet preflight?
+- **Procedure:** Source `6907233`; default `scripts/run_when_idle.sh`, 64 MiB, five samples per path. The process used one CPU core.
+- **Preflight:** GPU utilization `[0,0,0,0,0]%`; minimum free VRAM 11,161 MiB; available RAM 18,991 MiB; maximum temperature 28 C; maximum power 11 W; no sustained heavy GPU process.
+- **Results:** Mapped median 5.384 ms (12.465 GB/s), H2D-only 4.596 ms (14.601 GB/s), H2D plus scan 4.767 ms (14.078 GB/s), and VRAM scan 0.202 ms (331.566 GB/s). Every checksum passed.
+- **Raw output:** `results/memory-paths-resume-64mib-025309.txt`.
+
+## E012 — Q4_0 synthetic matrix-vector paths and transfer isolation
+
+- **Date:** 2026-11-08
+- **Question:** Do mapped, staged, managed-prefetch, and VRAM paths behave differently on a quantized matrix-vector access pattern?
+- **Procedure:** Source `554861f`, CUDA 13.2, 4,096 rows, Q4_0 18-byte blocks, 1/2/4 input vectors, five measured samples per mode. Runs used 32, 64, and 128 MiB matrices; each weight block uses a half scale and packed low/high nibbles. Outputs were compared against a CPU reference. All weights fit in VRAM.
+- **Results:** Every output passed. Across all sizes and pass counts, managed prefetch was faster than mapped and staged paths. At 64 MiB/four passes, medians were 25.603 ms mapped, 6.462 ms staged, 4.778 ms managed-prefetch, and 1.860 ms VRAM resident. Staging/prefetch moved the matrix once per trial; mapped access reread it on each pass.
+- **Transfer-only:** Pinned H2D measured 14.6–14.8 GB/s at 32–128 MiB; managed prefetch measured 22.1–23.3 GB/s under this procedure.
+- **Interpretation:** This is synthetic Q4_0 GEMV-style work, not a real model layer or inference. The managed-prefetch advantage is specific to this allocation and access pattern.
+- **Raw outputs:** `results/q4-transfer-isolation-32mib-20261108-030402.txt`, `results/q4-transfer-isolation-64mib-20261108-030311.txt`, and `results/q4-matvec-128mib-20261108-030701.txt`.
+
+## E013 — inspect the local inference path and model sizes
+
+- **Date:** 2026-11-08
+- **Question:** Is a full local inference comparison possible within the current 4 GiB additional host-RAM limit?
+- **Procedure:** Read-only inspection of the existing llama.cpp checkout, available model filenames and sizes, and GGUF metadata. No inference process was started and no model file or external checkout was modified.
+- **Observation:** The local standalone Qwen3.8-27B Q4_0 GGUF is 15,149,087,168 bytes (about 14.1 GiB). The other GGUF files found in the inspected model/cache locations are named MTP or mmproj companions. No standalone base model within the 4 GiB additional-RAM budget was found.
+- **Decision:** Do not load the full model under the current cap. Continue with bounded slices of its actual Q4_0 weights and synthetic inputs; a smaller standalone model or a changed resource limit is needed for end-to-end inference.
+
+## E014 — double-buffered 16 MiB chunk pipeline on synthetic Q4_0
+
+- **Date:** 2026-11-08
+- **Question:** Can an asynchronous copy stream overlap 16 MiB Q4_0 chunk transfers with a separate matvec stream?
+- **Procedure:** Source `e5534ce`, 128 MiB matrix, eight 16 MiB chunks, two device buffers, serialized chunk copy+compute control, and double-buffered two-stream pipeline. Five measured samples at one and four passes; all outputs passed. The benchmark was pinned to one CPU core.
+- **Preflight:** Sampled GPU utilization `[67,69,69,69,69]%`; minimum free VRAM 10,771 MiB; available RAM 19,854 MiB; maximum temperature 62 C; planned device allocation 304 MiB and host allocations about 256 MiB; no sustained heavy per-process GPU PID.
+- **Results:** Double buffering reduced median time from 17.766 to 12.620 ms for one pass and from 69.912 to 49.743 ms for four passes, about 29% lower in each comparison. The four-pass chunk arm transferred the matrix four times (511.875 MiB); full staged/managed arms transferred it once and were faster.
+- **Interpretation:** The overlap path helped versus serialized chunking, but this run had substantial desktop GPU activity and the same-sized full-buffer paths performed better. Treat absolute rates as provisional, not inference throughput.
+- **Raw output:** `results/q4-chunked-128mib-20261108.txt`.
+
+## E015 — validate GEMV against an actual Q4_0 model tensor
+
+- **Date:** 2026-11-08
+- **Question:** Do the access-path comparisons hold for packed weights from a real model layer?
+- **Procedure:** Read only `blk.0.ffn_down.weight` (5,120 rows × 17,408 values; 50,135,040 bytes) from the local GGUF at byte offset 1,488,544,192 into the bounded benchmark allocation. Input vectors were synthetic. The model file was not changed; the trial used 64 MiB planned size, five samples, and one CPU core.
+- **Diagnostic failure:** Source `c6f8bc0` compared the real Q4_0 values against a CPU reference that assumed the synthetic 1/16 scale. Every GPU arm failed validation with the same mismatch. Those timings are invalid and excluded. The first log is retained as `results/q4-model-tensor-20261108.txt`.
+- **Correction and rerun:** Source `898e1df` decodes each block's half-precision scale in the CPU reference. Preflight GPU utilization was `[24,36,31,17,41]%`; minimum free VRAM 10,957 MiB; available RAM 20,127 MiB; maximum temperature 39 C. All mapped, staged, managed, VRAM, and chunked outputs passed.
+- **Results:** For one pass, medians were 4.168 ms mapped, 3.833 ms full H2D staging, 2.532 ms managed prefetch, 0.351 ms VRAM resident, and 3.568 ms double-buffered 16 MiB chunks. At four passes, corresponding medians were 17.324, 4.765, 3.473, 1.303, and 14.286 ms. The chunked four-pass path reloaded the 47.812 MiB tensor on every pass.
+- **Raw output:** `results/q4-model-tensor-rerun-20261108.txt`.
+
+## E016 — sweep chunk size on the same model tensor
+
+- **Date:** 2026-11-08
+- **Question:** How does the number of chunks affect overlap on the same layer-weight slice?
+- **Procedure:** Source `893db0c`, same 50,135,040-byte model tensor, 4/8/16/32/64 MiB double buffers, one and four passes, five samples per path, CPU output validation. Separate guarded invocations sampled maximum GPU utilization between 18% and 51%; all runs passed validation.
+- **Results:** 8 MiB (six chunks) had the lowest observed double-buffered medians: 3.472 ms for one pass and 13.788 ms for four. The 4 MiB, 16 MiB, 32 MiB, and 64 MiB medians and ranges are in `BENCHMARKS.md` and the linked raw logs.
+- **Interpretation:** Smaller chunks yielded a lower observed median in these runs, but separate-run resource variation and noisy larger-chunk ranges prevent claiming an optimal size. At four passes the chunk path moves the tensor four times, so it remains slower than full staging or prefetch, which move it once.
+- **Raw outputs:** `results/q4-model-tensor-chunk4-20261108.txt`, `results/q4-model-tensor-chunk8-20261108.txt`, `results/q4-model-tensor-chunk16-20261108.txt`, `results/q4-model-tensor-chunk32-20261108.txt`, and `results/q4-model-tensor-chunk64-20261108.txt`.
+
+## E017 — check read-only registration of file-backed model pages
+
+- **Date:** 2026-11-08
+- **Question:** Can CUDA register a bounded read-only mmap of the model tensor so kernels access the file-backed host pages directly?
+- **Procedure:** Source `f194fbe`; the resource gate passed for the 50 MiB tensor slice. Before mapping or registering any model pages, the program queried CUDA device attributes.
+- **Observation:** `cudaDevAttrHostRegisterSupported=1`, but `cudaDevAttrHostRegisterReadOnlySupported=0`. Because this system reports `pageableMemoryAccessUsesHostPageTables=0`, the [CUDA Runtime API](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY.html) requires read-only registration for this read-only host mapping. The registration attempt was skipped; no model mapping or GPU work occurred.
+- **Conclusion:** File-backed read-only direct access is unavailable through this API on the current device. The bounded pinned-copy model-tensor path remains the usable measurement baseline.
+- **Raw output:** `results/q4-model-tensor-mmap-20261108.txt`.
+
+## E018 — measure dependent random-load latency
+
+- **Date:** 2026-11-08
+- **Question:** How does a single dependent pointer chase compare between mapped pinned host memory and a VRAM-resident copy?
+- **Procedure:** Added `benchmarks/host_latency.cu`. It builds a deterministic randomized pointer cycle, performs one dependent chain of 32,768 loads, evicts prior L2 contents with a 16 MiB scan before each timed trial, and checks the final node against a CPU reference. Five samples were collected at 1, 4, 32, and 64 MiB. Each size compared mapped pinned host memory with the same chain resident in VRAM.
+- **Results:** Mapped-host medians were 586.47 ns/load at 1 MiB, 726.37 ns/load at 4 MiB, 749.37 ns/load at 32 MiB, and 753.81 ns/load at 64 MiB. VRAM medians were 217.94, 257.25, 269.99, and 273.78 ns/load respectively. All measured outputs passed validation.
+- **Interpretation:** In this single-chain dependent workload, mapped-host accesses took about 2.7–2.8× the VRAM time at 1–64 MiB. This is a dependent random-access latency measurement, not streaming bandwidth or model inference.
+- **Raw outputs:** `results/host-latency-1mib-20261108.txt`, `results/host-latency-4mib-20261108.txt`, `results/host-latency-32mib-20261108.txt`, and `results/host-latency-64mib-20261108.txt`.
+
+## E019 — scale independent chains and managed-memory working sets
+
+- **Date:** 2026-11-08
+- **Question:** How many independent chains hide mapped-host latency, and how do mapped, managed, and VRAM paths change as a randomized working set grows?
+- **Procedure:** The chain starts were spaced evenly around the randomized cycle and each chain was constrained to a disjoint segment. At 64 MiB, tests used 4,096 steps per chain and 1, 32, 256, 1,024, or 4,096 chains, with five measured samples per path. At 64, 256, and 960 MiB, a 4,096-chain workload was also compared across mapped host, managed demand migration, full-allocation managed prefetch plus kernel, and VRAM. The managed allocation was moved back to host before each trial; the demand arm timed the kernel faults/migrations, while explicit prefetch plus kernel timed migration of the whole allocation. Two warmups preceded samples. All samples validated.
+- **64 MiB parallel-chain results:** Mapped-host throughput rose from 1.316 million loads/s at one chain to about 120–125 million loads/s at 256–4,096 chains. It plateaued in this range. The VRAM path continued to rise, reaching 3,408 million loads/s at 4,096 chains.
+- **Working-set results at 4,096 chains:** Mapped-host medians were 8.27 ns/load (120.98 million loads/s) at 64 MiB, 8.45 ns/load (118.33 million loads/s) at 256 MiB, and 12.56 ns/load (79.61 million loads/s) at 960 MiB. Managed demand elapsed times were 9.07, 21.75, and 66.44 ms; full-allocation prefetch plus kernel took 9.85, 16.69, and 47.31 ms. VRAM resident times were 4.93, 5.12, and 5.17 ms. Demand and prefetch medians overlap at 64 MiB; at 256 and 960 MiB the explicit prefetch arm was faster in these runs.
+- **960 MiB chain-count results:** Mapped access was faster than full managed prefetch at 256, 512, and 896 chains; the 896-chain result was close (43.24 vs 43.87 ms). Full prefetch was faster by 1,024 chains (44.07 vs 55.40 ms). Demand migration was still slower than mapped access at 1,024 chains (66.91 vs 55.40 ms), but faster by 1,536 chains (62.29 vs 72.15 ms). At 2,048 chains both managed paths beat mapped access (64.00 ms demand, 44.85 ms prefetch, 97.53 ms mapped). These are observed crossover brackets for this workload, not general thresholds.
+- **Resource observations:** The 960 MiB runner planned 1,936 MiB of device memory and about 2,880 MiB of host memory, within the project’s 2 GiB VRAM and 4 GiB host-RAM limits. Preflights retained per-run GPU, temperature, power, RAM, and VRAM observations; no sustained heavy per-process GPU use was detected.
+- **Excluded diagnostic:** The first 64 MiB multi-chain logs (`host-latency-parallel-64mib-c1/c32/c256-20261108.txt`) used overlapping chain starts and are excluded from conclusions. The corrected `host-latency-spaced-*` runs use disjoint chain segments.
+- **Raw outputs:** Corrected 64 MiB runs are `results/host-latency-spaced-64mib-c1-20261108.txt`, `results/host-latency-spaced-64mib-c32-20261108.txt`, `results/host-latency-spaced-64mib-c256-20261108.txt`, `results/host-latency-spaced-64mib-c1024-20261108.txt`, and `results/host-latency-spaced-64mib-c4096-20261108.txt`. The 960 MiB chain-count sweep and other size comparisons are linked in `BENCHMARKS.md`.
+
+## E020 — trace 960 MiB managed-memory migration
+
+- **Date:** 2026-11-08
+- **Question:** How much of the large managed allocation migrates during the distributed random-chain workload?
+- **Procedure:** Ran the 960 MiB, 4,096-chain benchmark under Nsight Systems with two warmups and one measured sample. The trace includes both managed demand and full-prefetch paths; profiled timings are excluded.
+- **Observation:** Nsight reported 5,932.446 decimal MB H2D migration, 5,033.165 MB D2H migration, 2,880 CPU page faults, and 458 GPU page faults. The D2H total is essentially five 960 MiB allocation movements; the H2D total is close to six. This aggregate is consistent with page faults across the distributed chains moving nearly the full allocation, alongside explicit full-allocation prefetches; it does not attribute each byte to an individual arm.
+- **Interpretation:** The managed path’s migration cost is substantial for this 960 MiB footprint. At 4,096 chains the explicit full prefetch was faster than demand migration, but both moved nearly the full set and remained slower than VRAM-resident access. This dataset fits in VRAM and does not demonstrate oversubscription or inference performance.
+- **Raw output and trace:** `results/host-managed-random-profile-960mib-20261108.txt`, `results/host-managed-random-profile-stats-960mib-20261108.txt`, and `results/unified-memory-faults-host_latency-960mib-20261108-105120.nsys-rep`.
+
+## E021 — extend Q4_0 matrix access through 960 MiB
+
+- **Date:** 2026-11-08
+- **Question:** Does the managed-prefetch advantage observed for smaller Q4_0 matrices persist at the largest synthetic matrix that fits within the project’s per-run allocation limits?
+- **Procedure:** Extended `benchmarks/q4_matvec.cu` and the guarded runner from a 256 MiB to a 960 MiB maximum. Ran synthetic Q4_0 matrices with 4,096 rows at 256 and 960 MiB, five samples, and 1/2/4 input-vector passes. Compared mapped, pinned H2D staging, managed prefetch, VRAM resident, and serialized/double-buffered 16 MiB chunk paths. All outputs were checked against the CPU reference.
+- **Resource observations:** The 256 MiB run planned 560 MiB device and 512 MiB host memory, with at least 11,278 MiB free VRAM and 22,839 MiB available RAM. The 960 MiB run planned 1,968 MiB device and 1,920 MiB host; the benchmark reported 1,974.728 MiB actual device buffers. Preflight saw at least 11,296 MiB free VRAM and 22,831 MiB available RAM, maximum sampled GPU utilization 6%, and no sustained heavy per-process GPU use.
+- **Results:** At 960 MiB, one-pass medians were 108.887 ms mapped, 77.317 ms H2D-staged, 51.965 ms managed-prefetch, and 8.604 ms VRAM-resident. Four-pass medians were 440.832, 103.612, 76.531, and 38.655 ms. Managed prefetch transfer-only measured 41.978 ms (23.980 GB/s), compared with 68.300 ms (14.738 GB/s) pinned H2D. Every output passed CPU-reference validation.
+- **Chunking:** Double buffering reduced chunk-path medians from 81.818 to 69.527 ms for one pass and 321.219 to 278.928 ms for four passes. The four-pass path moved the 960 MiB matrix four times and remained much slower than full managed prefetch.
+- **Interpretation:** Managed prefetch remained the fastest host-backed path for this Q4_0 matvec through 960 MiB. These matrices still fit in VRAM; this supports the fitting-in-VRAM reuse result and says nothing about an oversized model.
+- **Raw outputs:** `results/q4-matvec-256mib-20261108.txt` and `results/q4-matvec-960mib-20261108.txt`.
+
+## E022 — compare managed migration traces across chain fanout
+
+- **Date:** 2026-11-08
+- **Question:** Does increasing independent-chain fanout change aggregate managed-memory migration volume and page-fault count for the same 960 MiB allocation?
+- **Procedure:** Captured additional Nsight traces at 1 and 256 chains, using the same 4,096 steps, two warmups, one measured sample, and both managed demand and full-prefetch paths. The existing 4,096-chain trace provides the high-fanout reference. Profiler timings are excluded.
+- **Results:** Aggregate H2D/D2H migration was 3,823.829/1,817.969 decimal MB at 1 chain, 5,833.306/5,033.165 MB at 256 chains, and 5,932.446/5,033.165 MB at 4,096 chains. GPU page-fault counts were 10,674, 965, and 458 respectively; CPU page-fault totals were 2,880 in each trace.
+- **Interpretation:** Higher fanout is associated with near-full-allocation migration and fewer reported GPU faults; the one-chain run moved less in aggregate but generated more faults. This is consistent with sparse serialized faults versus broad page coverage under many chains. Each Nsight total aggregates both managed paths and warmups, so it cannot identify demand-only bytes or establish a general migration granularity.
+- **Raw outputs:** 1-chain [profile](results/host-managed-random-profile-960mib-c1-20261108.txt), [statistics](results/host-managed-random-profile-stats-960mib-c1-20261108.txt), and [trace](results/unified-memory-faults-host_latency-960mib-20261108-110358.nsys-rep); 256-chain [profile](results/host-managed-random-profile-960mib-c256-20261108.txt), [statistics](results/host-managed-random-profile-stats-960mib-c256-20261108.txt), and [trace](results/unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep). The 4,096-chain trace is recorded in E020.
+
+
+## Reproduction command templates for E018–E022
+
+Commands were pinned to one CPU core and routed through the resource gate. Replace angle-bracketed values with the stated experiment settings.
+
+| Experiment | Command |
+|---|---|
+| E018 serial latency | `taskset -c 0 env BENCHMARK=host_latency MIB=<1,4,32,64> REPEATS=5 scripts/run_when_idle.sh --steps 32768 --chains 1` |
+| E019 chain sweeps | `taskset -c 0 env BENCHMARK=host_latency MIB=<64,960> REPEATS=5 scripts/run_when_idle.sh --steps 4096 --chains <chain-count>`; the 64 MiB managed comparison used `REPEATS=10` |
+| E020 4,096-chain migration profile | `taskset -c 0 env PROFILE=um_faults BENCHMARK=host_latency MIB=960 REPEATS=1 scripts/run_when_idle.sh --steps 4096 --chains 4096` |
+| E022 migration profiles | Use the E020 command with `--chains 1` and `--chains 256` |
+| E021 Q4_0 matrices | `taskset -c 0 env BENCHMARK=q4_matvec MIB=<256,960> REPEATS=5 scripts/run_when_idle.sh` |

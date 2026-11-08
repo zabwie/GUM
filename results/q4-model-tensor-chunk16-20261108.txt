@@ -1,0 +1,221 @@
+experiment=E016-chunk-size-16mib
+source_revision=893db0c
+model=Qwen3.8-27B-STRICT-Q4_0.gguf
+tensor=blk.0.ffn_down.weight
+tensor_type=Q4_0
+rows=5120
+columns=17408
+range_offset_bytes=1488544192
+range_size_bytes=50135040
+command=taskset -c 0 env CHUNK_MIB=16 BENCHMARK=q4_matvec MIB=64 REPEATS=5 scripts/run_when_idle.sh --rows 5120 --blocks-per-row 544 --weights-file /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf --weights-offset 1488544192
+Preflight: sampled GPU utilization=[39,44,38,38,39]% (max 44%), planned device buffers=176 MiB, planned host allocations~=128 MiB, minimum free VRAM=10519 MiB, available RAM=20001 MiB, max temperature=49 C, max power=59/170 W, CUDA compute clients=165671:134MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G     17      3      -      -      -      -    Xorg
+    0      19328     G      5      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G     17      3      -      -      -      -    obs
+    0      18911     G     22      4      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G     16      3      -      -      -      -    obs
+    0      18911     G     28      5      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      9      1      -      -      -      -    obs
+    0      18911     G     39      7      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G     25      5      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G     15      3      -      -      -      -    Codex --change-
+    0      30282     G      -      -      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T10:11:11-04:00 (benchmark=q4_matvec, buffer MiB=64, measured repeats=5).
+device,NVIDIA GeForce RTX 3060,cc=8.6,driver=13020,runtime=13020,target_MiB=64,weight_bytes=50135040,rows=5120,columns=17408,blocks_per_row=544,repeats=5,device_buffers_MiB=144.122,L2_MiB=2
+weight_source,gguf_tensor_slice,path=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,offset=1488544192,bytes=50135040
+format,Q4_0,block_values=32,block_bytes=18,packed_layout=low_nibble_values_0_to_15_high_nibble_values_16_to_31,scale_half_bits=0x2c00
+chunking,chunk_MiB=16,chunk_rows=1713,chunk_bytes=16773696,num_chunks=3,buffer_count=2
+result_format,summary_or_sample,mode,passes,n_or_trial,median_or_elapsed_ms,logical_weight_GB_s,valid_or_explicit_weight_move_MiB
+sample,mapped_host,1,1,6.596608,7.600,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,staged_h2d,1,1,6.738944,7.440,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,managed_prefetch,1,1,3.163136,15.850,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,vram_resident,1,1,0.327424,153.120,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,staged_h2d,1,2,4.328000,11.584,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,managed_prefetch,1,2,3.959296,12.663,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,vram_resident,1,2,0.326656,153.480,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,mapped_host,1,2,4.882432,10.268,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,managed_prefetch,1,3,3.056224,16.404,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,vram_resident,1,3,0.338944,147.915,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,mapped_host,1,3,5.436416,9.222,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,staged_h2d,1,3,4.368384,11.477,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,vram_resident,1,4,0.326656,153.480,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,mapped_host,1,4,5.417568,9.254,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,staged_h2d,1,4,4.555520,11.005,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,managed_prefetch,1,4,3.853824,13.009,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,mapped_host,1,5,4.213760,11.898,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+sample,staged_h2d,1,5,5.539136,9.051,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,managed_prefetch,1,5,4.009632,12.504,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=11.5059385
+sample,vram_resident,1,5,0.326656,153.480,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=11.5059385
+summary,mapped_host,passes=1,n=5,median_ms=5.417568,min_ms=4.213760,max_ms=6.596608,logical_weight_GB_s=9.254,explicit_weight_move_MiB=0.000
+sample,mapped_host,1,1,6.596608,logical_weight_GB_s=7.600
+sample,mapped_host,1,2,4.882432,logical_weight_GB_s=10.268
+sample,mapped_host,1,3,5.436416,logical_weight_GB_s=9.222
+sample,mapped_host,1,4,5.417568,logical_weight_GB_s=9.254
+sample,mapped_host,1,5,4.213760,logical_weight_GB_s=11.898
+summary,staged_h2d,passes=1,n=5,median_ms=4.555520,min_ms=4.328000,max_ms=6.738944,logical_weight_GB_s=11.005,explicit_weight_move_MiB=47.812
+sample,staged_h2d,1,1,6.738944,logical_weight_GB_s=7.440
+sample,staged_h2d,1,2,4.328000,logical_weight_GB_s=11.584
+sample,staged_h2d,1,3,4.368384,logical_weight_GB_s=11.477
+sample,staged_h2d,1,4,4.555520,logical_weight_GB_s=11.005
+sample,staged_h2d,1,5,5.539136,logical_weight_GB_s=9.051
+summary,managed_prefetch,passes=1,n=5,median_ms=3.853824,min_ms=3.056224,max_ms=4.009632,logical_weight_GB_s=13.009,explicit_weight_move_MiB=47.812
+sample,managed_prefetch,1,1,3.163136,logical_weight_GB_s=15.850
+sample,managed_prefetch,1,2,3.959296,logical_weight_GB_s=12.663
+sample,managed_prefetch,1,3,3.056224,logical_weight_GB_s=16.404
+sample,managed_prefetch,1,4,3.853824,logical_weight_GB_s=13.009
+sample,managed_prefetch,1,5,4.009632,logical_weight_GB_s=12.504
+summary,vram_resident,passes=1,n=5,median_ms=0.326656,min_ms=0.326656,max_ms=0.338944,logical_weight_GB_s=153.480,explicit_weight_move_MiB=0.000
+sample,vram_resident,1,1,0.327424,logical_weight_GB_s=153.120
+sample,vram_resident,1,2,0.326656,logical_weight_GB_s=153.480
+sample,vram_resident,1,3,0.338944,logical_weight_GB_s=147.915
+sample,vram_resident,1,4,0.326656,logical_weight_GB_s=153.480
+sample,vram_resident,1,5,0.326656,logical_weight_GB_s=153.480
+sample,mapped_host,2,1,14.533984,6.899,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,staged_h2d,2,1,4.491264,22.326,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,managed_prefetch,2,1,3.171840,31.613,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,vram_resident,2,1,0.677888,147.915,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,staged_h2d,2,2,4.831232,20.755,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,managed_prefetch,2,2,3.679232,27.253,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,vram_resident,2,2,0.647168,154.937,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,mapped_host,2,2,11.669472,8.593,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,managed_prefetch,2,3,2.932736,34.190,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,vram_resident,2,3,0.656832,152.657,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,mapped_host,2,3,11.364256,8.823,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,staged_h2d,2,3,4.731136,21.194,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,vram_resident,2,4,0.654336,153.239,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,mapped_host,2,4,11.657024,8.602,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,staged_h2d,2,4,6.722240,14.916,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,managed_prefetch,2,4,3.800064,26.386,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,mapped_host,2,5,12.569600,7.977,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+sample,staged_h2d,2,5,4.546560,22.054,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,managed_prefetch,2,5,4.715520,21.264,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=-16.5613437
+sample,vram_resident,2,5,0.650208,154.212,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=-16.5613437
+summary,mapped_host,passes=2,n=5,median_ms=11.669472,min_ms=11.364256,max_ms=14.533984,logical_weight_GB_s=8.593,explicit_weight_move_MiB=0.000
+sample,mapped_host,2,1,14.533984,logical_weight_GB_s=6.899
+sample,mapped_host,2,2,11.669472,logical_weight_GB_s=8.593
+sample,mapped_host,2,3,11.364256,logical_weight_GB_s=8.823
+sample,mapped_host,2,4,11.657024,logical_weight_GB_s=8.602
+sample,mapped_host,2,5,12.569600,logical_weight_GB_s=7.977
+summary,staged_h2d,passes=2,n=5,median_ms=4.731136,min_ms=4.491264,max_ms=6.722240,logical_weight_GB_s=21.194,explicit_weight_move_MiB=47.812
+sample,staged_h2d,2,1,4.491264,logical_weight_GB_s=22.326
+sample,staged_h2d,2,2,4.831232,logical_weight_GB_s=20.755
+sample,staged_h2d,2,3,4.731136,logical_weight_GB_s=21.194
+sample,staged_h2d,2,4,6.722240,logical_weight_GB_s=14.916
+sample,staged_h2d,2,5,4.546560,logical_weight_GB_s=22.054
+summary,managed_prefetch,passes=2,n=5,median_ms=3.679232,min_ms=2.932736,max_ms=4.715520,logical_weight_GB_s=27.253,explicit_weight_move_MiB=47.812
+sample,managed_prefetch,2,1,3.171840,logical_weight_GB_s=31.613
+sample,managed_prefetch,2,2,3.679232,logical_weight_GB_s=27.253
+sample,managed_prefetch,2,3,2.932736,logical_weight_GB_s=34.190
+sample,managed_prefetch,2,4,3.800064,logical_weight_GB_s=26.386
+sample,managed_prefetch,2,5,4.715520,logical_weight_GB_s=21.264
+summary,vram_resident,passes=2,n=5,median_ms=0.654336,min_ms=0.647168,max_ms=0.677888,logical_weight_GB_s=153.239,explicit_weight_move_MiB=0.000
+sample,vram_resident,2,1,0.677888,logical_weight_GB_s=147.915
+sample,vram_resident,2,2,0.647168,logical_weight_GB_s=154.937
+sample,vram_resident,2,3,0.656832,logical_weight_GB_s=152.657
+sample,vram_resident,2,4,0.654336,logical_weight_GB_s=153.239
+sample,vram_resident,2,5,0.650208,logical_weight_GB_s=154.212
+sample,mapped_host,4,1,22.027264,9.104,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,staged_h2d,4,1,7.321664,27.390,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,managed_prefetch,4,1,4.829056,41.528,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,vram_resident,4,1,1.307040,153.431,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,staged_h2d,4,2,5.308416,37.778,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,managed_prefetch,4,2,6.000096,33.423,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,vram_resident,4,2,1.307648,153.359,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,mapped_host,4,2,25.747808,7.789,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,managed_prefetch,4,3,4.977664,40.288,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,vram_resident,4,3,1.308672,153.239,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,mapped_host,4,3,24.155584,8.302,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,staged_h2d,4,3,7.508992,26.707,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,vram_resident,4,4,1.304576,153.721,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,mapped_host,4,4,23.556736,8.513,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,staged_h2d,4,4,7.633920,26.270,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,managed_prefetch,4,4,4.952064,40.496,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,mapped_host,4,5,20.060160,9.997,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+sample,staged_h2d,4,5,7.129920,28.127,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,managed_prefetch,4,5,4.528128,44.288,yes;explicit_weight_move_MiB=47.812,max_abs_error=0,checksum=45.0585546
+sample,vram_resident,4,5,1.308672,153.239,yes;explicit_weight_move_MiB=0.000,max_abs_error=0,checksum=45.0585546
+summary,mapped_host,passes=4,n=5,median_ms=23.556736,min_ms=20.060160,max_ms=25.747808,logical_weight_GB_s=8.513,explicit_weight_move_MiB=0.000
+sample,mapped_host,4,1,22.027264,logical_weight_GB_s=9.104
+sample,mapped_host,4,2,25.747808,logical_weight_GB_s=7.789
+sample,mapped_host,4,3,24.155584,logical_weight_GB_s=8.302
+sample,mapped_host,4,4,23.556736,logical_weight_GB_s=8.513
+sample,mapped_host,4,5,20.060160,logical_weight_GB_s=9.997
+summary,staged_h2d,passes=4,n=5,median_ms=7.321664,min_ms=5.308416,max_ms=7.633920,logical_weight_GB_s=27.390,explicit_weight_move_MiB=47.812
+sample,staged_h2d,4,1,7.321664,logical_weight_GB_s=27.390
+sample,staged_h2d,4,2,5.308416,logical_weight_GB_s=37.778
+sample,staged_h2d,4,3,7.508992,logical_weight_GB_s=26.707
+sample,staged_h2d,4,4,7.633920,logical_weight_GB_s=26.270
+sample,staged_h2d,4,5,7.129920,logical_weight_GB_s=28.127
+summary,managed_prefetch,passes=4,n=5,median_ms=4.952064,min_ms=4.528128,max_ms=6.000096,logical_weight_GB_s=40.496,explicit_weight_move_MiB=47.812
+sample,managed_prefetch,4,1,4.829056,logical_weight_GB_s=41.528
+sample,managed_prefetch,4,2,6.000096,logical_weight_GB_s=33.423
+sample,managed_prefetch,4,3,4.977664,logical_weight_GB_s=40.288
+sample,managed_prefetch,4,4,4.952064,logical_weight_GB_s=40.496
+sample,managed_prefetch,4,5,4.528128,logical_weight_GB_s=44.288
+summary,vram_resident,passes=4,n=5,median_ms=1.307648,min_ms=1.304576,max_ms=1.308672,logical_weight_GB_s=153.359,explicit_weight_move_MiB=0.000
+sample,vram_resident,4,1,1.307040,logical_weight_GB_s=153.431
+sample,vram_resident,4,2,1.307648,logical_weight_GB_s=153.359
+sample,vram_resident,4,3,1.308672,logical_weight_GB_s=153.239
+sample,vram_resident,4,4,1.304576,logical_weight_GB_s=153.721
+sample,vram_resident,4,5,1.308672,logical_weight_GB_s=153.239
+transfer_only_format,summary_or_sample,path,n_or_trial,elapsed_ms,effective_GB_s,valid
+transfer_sample,staged_h2d,1,3.512384,14.274,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,managed_prefetch,1,2.283584,21.955,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,managed_prefetch,2,2.912256,17.215,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,staged_h2d,2,3.836320,13.069,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,staged_h2d,3,3.865152,12.971,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,managed_prefetch,3,2.276896,22.019,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,managed_prefetch,4,3.487360,14.376,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,staged_h2d,4,3.731616,13.435,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,staged_h2d,5,3.825632,13.105,yes;max_abs_error=0,checksum=45.0585546
+transfer_sample,managed_prefetch,5,2.800640,17.901,yes;max_abs_error=0,checksum=45.0585546
+transfer_summary,staged_h2d,n=5,median_ms=3.825632,min_ms=3.512384,max_ms=3.865152,effective_GB_s=13.105
+transfer_summary,managed_prefetch,n=5,median_ms=2.800640,min_ms=2.276896,max_ms=3.487360,effective_GB_s=17.901
+chunked_format,summary_or_sample,path,passes,n_or_trial,elapsed_ms,logical_weight_GB_s,valid
+chunked_sample,chunk_serial_h2d,1,1,6.878528,7.289,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_double_buffer_h2d,1,1,4.697376,10.673,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_double_buffer_h2d,1,2,4.057728,12.355,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_serial_h2d,1,2,6.852480,7.316,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_serial_h2d,1,3,4.283392,11.705,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_double_buffer_h2d,1,3,4.268096,11.746,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_double_buffer_h2d,1,4,5.945568,8.432,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_serial_h2d,1,4,5.135360,9.763,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_serial_h2d,1,5,4.905984,10.219,yes;max_abs_error=0,checksum=11.5059385
+chunked_sample,chunk_double_buffer_h2d,1,5,4.717760,10.627,yes;max_abs_error=0,checksum=11.5059385
+chunked_summary,chunk_serial_h2d,passes=1,n=5,median_ms=5.135360,min_ms=4.283392,max_ms=6.878528,logical_weight_GB_s=9.763,explicit_weight_move_MiB=47.812
+chunked_summary,chunk_double_buffer_h2d,passes=1,n=5,median_ms=4.697376,min_ms=4.057728,max_ms=5.945568,logical_weight_GB_s=10.673,explicit_weight_move_MiB=47.812
+chunked_sample,chunk_serial_h2d,4,1,24.353792,8.234,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_double_buffer_h2d,4,1,21.248993,9.438,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_double_buffer_h2d,4,2,20.314016,9.872,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_serial_h2d,4,2,24.199200,8.287,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_serial_h2d,4,3,22.371328,8.964,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_double_buffer_h2d,4,3,17.275553,11.608,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_double_buffer_h2d,4,4,19.166592,10.463,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_serial_h2d,4,4,23.307264,8.604,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_serial_h2d,4,5,20.261889,9.897,yes;max_abs_error=0,checksum=45.0585546
+chunked_sample,chunk_double_buffer_h2d,4,5,19.387360,10.344,yes;max_abs_error=0,checksum=45.0585546
+chunked_summary,chunk_serial_h2d,passes=4,n=5,median_ms=23.307264,min_ms=20.261889,max_ms=24.353792,logical_weight_GB_s=8.604,explicit_weight_move_MiB=191.250
+chunked_summary,chunk_double_buffer_h2d,passes=4,n=5,median_ms=19.387360,min_ms=17.275553,max_ms=21.248993,logical_weight_GB_s=10.344,explicit_weight_move_MiB=191.250

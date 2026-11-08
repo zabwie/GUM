@@ -1,0 +1,25 @@
+Generating SQLite file results/unified-memory-faults-host_latency-960mib-20261108-110506.sqlite from results/unified-memory-faults-host_latency-960mib-20261108-110506.nsys-rep
+Processing [results/unified-memory-faults-host_latency-960mib-20261108-110506.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_total_sum.py]...
+
+ ** Unified Memory Totals Summary (um_total_sum):
+
+ Total HtoD Migration Size (MB)  Total DtoH Migration Size (MB)  Total CPU Page Faults  Total GPU PageFaults  Minimum Virtual Address  Maximum Virtual Address
+ ------------------------------  ------------------------------  ---------------------  --------------------  -----------------------  -----------------------
+                       5833.306                        5033.165                   2880                   965  0x705ADC000000           0x705B17FE0000
+
+Processing [results/unified-memory-faults-host_latency-960mib-20261108-110506.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_sum.py]...
+
+ ** Unified Memory Analysis Summary (um_sum):
+
+ Virtual Address  HtoD Migration size (MB)  DtoH Migration size (MB)  CPU Page Faults   GPU Page Faults  Migration Throughput (MB/s)
+ ---------------  ------------------------  ------------------------  ---------------  ----------------  ---------------------------
+ 0x705ADFC00000                      6.357                    10.486                1                                      25398.870
+ 0x705AE1000000                      6.332                    10.486                1                                      25395.446
+ 0x705B14000000                      6.296                    10.486                1                                      25390.125
+ 0x705ADFE00000                      6.382                    10.486                1                                      25385.329
+ 0x705AF3E00000                      6.316                    10.486                1                                      25370.706
+ 0x705AEF000000                      6.324                    10.486                1                                      25366.266
+ 0x705AE5800000                      6.357                    10.486                1                                      25365.185
+ 0x705B01000000                      6.357                    10.486                1                                      25365.185
+ 0x705AE8800000                      6.345                    10.486                1                                      25363.509
+ 0x705AE2400000                      6.554                    10.486                1                                      25354.568

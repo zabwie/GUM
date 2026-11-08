@@ -1,0 +1,25 @@
+Generating SQLite file results/unified-memory-faults-host_latency-64mib-20261108-104048.sqlite from results/unified-memory-faults-host_latency-64mib-20261108-104048.nsys-rep
+Processing [results/unified-memory-faults-host_latency-64mib-20261108-104048.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_sum.py]...
+
+ ** Unified Memory Analysis Summary (um_sum):
+
+ Virtual Address  HtoD Migration size (MB)  DtoH Migration size (MB)  CPU Page Faults   GPU Page Faults  Migration Throughput (MB/s)
+ ---------------  ------------------------  ------------------------  ---------------  ----------------  ---------------------------
+ 0x758E19800000                      6.439                    10.486                1                                      25623.953
+ 0x758E19C00000                      6.312                    10.486                1                                      25599.689
+ 0x758E18000000                      6.455                    10.486                1                                      25547.112
+ 0x758E18800000                      6.492                    10.486                1                                      25534.792
+ 0x758E19400000                      6.312                    10.486                1                                      25532.498
+ 0x758E18C00000                      6.357                    10.486                1                                      25499.927
+ 0x758E19600000                      6.697                    10.486                1                                      25464.791
+ 0x758E19A00000                      6.332                    10.486                1                                      25109.537
+ 0x758E18200000                      6.582                    10.486                1                                      25004.667
+ 0x758E17600000                      6.545                    10.486                1                                      24882.536
+
+Processing [results/unified-memory-faults-host_latency-64mib-20261108-104048.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_total_sum.py]...
+
+ ** Unified Memory Totals Summary (um_total_sum):
+
+ Total HtoD Migration Size (MB)  Total DtoH Migration Size (MB)  Total CPU Page Faults  Total GPU PageFaults  Minimum Virtual Address  Maximum Virtual Address
+ ------------------------------  ------------------------------  ---------------------  --------------------  -----------------------  -----------------------
+                        402.653                         335.544                    192                    18  0x758E16000000           0x758E19FF9000

@@ -23,10 +23,11 @@ constexpr int kDefaultRows = 4096;
 constexpr int kQK = 32;
 constexpr int kThreads = 256;
 constexpr int kWarps = kThreads / 32;
-constexpr int kMaxMiB = 256;
+constexpr int kMaxMiB = 960;
 constexpr int kRepeatsMax = 10;
 constexpr int kPasses[] = {1, 2, 4};
 constexpr size_t kEvictionMiB = 16;
+constexpr size_t kMaxDeviceAllocationBytes = 2048ULL * 1024 * 1024;
 
 struct BlockQ4_0 {
     uint16_t d;
@@ -156,7 +157,7 @@ Options parse_options(int argc, char** argv) {
             }
             options.weights_offset = static_cast<size_t>(parsed);
         } else {
-            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10] [--chunk-mib 4..64] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE --mmap-readonly]\n", argv[0]);
+            std::fprintf(stderr, "Usage: %s [--mib 1..960] [--repeats 1..10] [--chunk-mib 4..64] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE --mmap-readonly]\n", argv[0]);
             std::exit(2);
         }
     }
@@ -430,6 +431,11 @@ int main(int argc, char** argv) {
     const size_t device_buffers = 2 * weight_bytes + chunk_buffer_bytes + eviction_bytes + max_input_bytes +
                                   static_cast<size_t>(rows) * sizeof(float) +
                                   static_cast<size_t>(eviction_blocks * 256) * sizeof(float);
+    if (device_buffers > kMaxDeviceAllocationBytes) {
+        std::fprintf(stderr,
+                     "planned device buffers exceed the 2048 MiB project cap; reduce --mib or --chunk-mib\n");
+        return 2;
+    }
 
     std::printf("device,%s,cc=%d.%d,driver=%d,runtime=%d,target_MiB=%d,weight_bytes=%zu,rows=%d,columns=%d,blocks_per_row=%zu,repeats=%d,device_buffers_MiB=%.3f,L2_MiB=%zu\n",
                 prop.name, prop.major, prop.minor, driver_version, runtime_version,

@@ -1,0 +1,48 @@
+experiment=E017-readonly-mapped-model-tensor
+source_revision=f194fbe
+model=Qwen3.8-27B-STRICT-Q4_0.gguf
+tensor=blk.0.ffn_down.weight
+tensor_type=Q4_0
+rows=5120
+columns=17408
+range_offset_bytes=1488544192
+range_size_bytes=50135040
+chunk_mib=8
+command=taskset -c 0 env CHUNK_MIB=8 BENCHMARK=q4_matvec MIB=64 REPEATS=5 scripts/run_when_idle.sh --rows 5120 --blocks-per-row 544 --weights-file /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf --weights-offset 1488544192 --mmap-readonly
+Preflight: sampled GPU utilization=[39,40,45,40,40]% (max 45%), planned device buffers=160 MiB, planned host allocations~=128 MiB, minimum free VRAM=10643 MiB, available RAM=20146 MiB, max temperature=51 C, max power=59/170 W, CUDA compute clients=165671:135MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      6      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     31      6      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      6      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     32      6      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      7      1      -      -      -      -    Codex --change-
+    0      30282     G     34      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     38      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     38      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T10:15:55-04:00 (benchmark=q4_matvec, buffer MiB=64, measured repeats=5).
+GPU does not support read-only host registration (host_register=1 read_only=0)

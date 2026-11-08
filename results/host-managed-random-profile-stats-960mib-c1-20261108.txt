@@ -1,0 +1,25 @@
+Generating SQLite file results/unified-memory-faults-host_latency-960mib-20261108-110358.sqlite from results/unified-memory-faults-host_latency-960mib-20261108-110358.nsys-rep
+Processing [results/unified-memory-faults-host_latency-960mib-20261108-110358.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_total_sum.py]...
+
+ ** Unified Memory Totals Summary (um_total_sum):
+
+ Total HtoD Migration Size (MB)  Total DtoH Migration Size (MB)  Total CPU Page Faults  Total GPU PageFaults  Minimum Virtual Address  Maximum Virtual Address
+ ------------------------------  ------------------------------  ---------------------  --------------------  -----------------------  -----------------------
+                       3823.829                        1817.969                   2880                 10674  0x7366C4000000           0x7366FFF79000
+
+Processing [results/unified-memory-faults-host_latency-960mib-20261108-110358.sqlite] with [/opt/nvidia/nsight-systems/2025.6.3/host-linux-x64/reports/um_sum.py]...
+
+ ** Unified Memory Analysis Summary (um_sum):
+
+ Virtual Address  HtoD Migration size (MB)  DtoH Migration size (MB)  CPU Page Faults   GPU Page Faults  Migration Throughput (MB/s)
+ ---------------  ------------------------  ------------------------  ---------------  ----------------  ---------------------------
+ 0x7366DF600000                      6.537                     8.389                1                                      25164.939
+ 0x7366D4C00000                      6.304                     8.389                1                                      25138.614
+ 0x7366E6800000                      6.353                     8.389                1                                      25134.264
+ 0x7366E3A00000                      6.623                     8.389                1                                      25129.820
+ 0x7366FBC00000                      6.685                     8.389                1                                      25127.158
+ 0x7366C6E00000                      6.291                     4.194                1                                      25113.395
+ 0x7366C5800000                      6.291                     4.194                1                                      25102.909
+ 0x7366C5200000                      6.291                     4.194                1                                      25092.424
+ 0x7366C5E00000                      6.291                     4.194                1                                      25092.424
+ 0x7366C7000000                      6.291                     4.194                1                                      25092.424

@@ -6,10 +6,17 @@
 4. **Completed:** Compare managed CPU-first access, repeated GPU access, and explicit prefetch; repeat first access across five fresh allocations.
 5. **Completed:** Use Nsight Systems to confirm host-to-device and device-to-host managed-memory migrations. Do not use profiler-inflated times as performance results.
 6. **Completed:** Compare mapped reads, full H2D staging, and managed prefetch for 1%, 10%, 25%, and 100% strided access with 1, 2, and 4 passes. Evict L2 before every timed trial; all checksums passed.
-7. **Next:** Add a bounded GPU-side cache path that gathers selected mapped-host values into compact VRAM, then reuses the compact set. Compare it with direct access and full prefetch for the same selectivity/reuse matrix.
-8. **Then:** Inspect project-local llama.cpp and authorized model availability. Compare its unified-memory flag with ordinary offload using the same workload only when the model and run fit the resource limits.
-9. Build an overlapped chunk-prefetch pipeline only if the cache and reuse measurements show a useful region.
+7. **Completed:** Gather selected mapped-host values into compact VRAM and compare against mapped reads, full H2D, and managed prefetch across selectivity and reuse. The cache helped at 1–10% with repeated passes in the synthetic gather.
+8. **Completed:** Measure synthetic Q4_0 matvecs at 32, 64, and 128 MiB, then validate a bounded GEMV on a real 47.812 MiB model tensor slice. Managed prefetch won among host-backed paths when the matrix fit in VRAM.
+9. **Completed:** Add serialized and double-buffered chunk copies, then sweep 4–64 MiB chunks on the same real tensor. Double buffering helped versus serialized chunks, but reloading weights each pass lost to one-time staging/prefetch; no stable chunk-size optimum was established.
+10. **Completed:** Check whether CUDA can register read-only file-backed model pages. The device reports `cudaDevAttrHostRegisterReadOnlySupported=0`; the test skipped mapping before touching the model file.
+11. **Blocked on model availability under the current cap:** Compare llama.cpp ordinary offload with `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` using the same standalone model and generation settings. No standalone local model was found that can be verified within the 4 GiB additional-RAM budget; do not load the 14.1 GiB base GGUF under this cap.
+12. **Completed:** Add dependent random pointer chasing, with single-chain latency and disjoint multi-chain comparisons at 1–960 MiB; validate every output.
+13. **Completed:** Measure the 960 MiB managed-memory chain-count crossover and profile 1, 256, and 4,096 chain migration traffic. At high chain counts, demand migration touches pages across nearly the full allocation.
+14. **Completed:** Extend synthetic Q4_0 GEMV comparisons to 256 and 960 MiB. Managed prefetch remains faster than mapped or full H2D for these fitting-in-VRAM workloads; all CPU-reference checks passed.
+15. **Next:** Compare prefetching only pages reached by the pointer chains against direct mapping, demand migration, and full-allocation prefetch at sparse and dense chain counts. Use the current results to test whether reduced migration bytes can also avoid the observed GPU-fault overhead.
 
 ## Guard behavior
 
-Moderate desktop activity and an idle CUDA context do not automatically block a short bounded run. The guard defers on sustained heavy per-process GPU activity, repeated global utilization at or above 85%, temperature at or above 80 C, insufficient RAM/VRAM headroom, or invalid input limits. It never stops unrelated processes.
+Moderate desktop activity and an idle CUDA context do not automatically block a short bounded run. The guard defers on sustained heavy per-process GPU activity, repeated global utilization at or above 85%, temperature at or above 80 C, insufficient RAM/VRAM headroom, or invalid input limits. Q4_0 runs account for the full matrix, two configured chunk buffers, and scratch allowance; `CHUNK_MIB` is bounded to 4–64, and combinations above 2 GiB are rejected. The runner never stops unrelated processes.
+For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate and Q4 executable enforce the 2 GiB VRAM cap, with host-RAM plans within the 4 GiB project limit.

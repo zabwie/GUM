@@ -1,0 +1,51 @@
+Preflight: sampled GPU utilization=[42,39,39,39,41]% (max 42%), planned device buffers=48 MiB, planned host allocations~=64 MiB, minimum free VRAM=10689 MiB, available RAM=20121 MiB, max temperature=57 C, max power=61/170 W, CUDA compute clients=165671:137MiB , sustained heavy GPU PIDs=none
+pmon_samples_begin
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     40      8      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     38      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     37      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      -      -      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     39      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+    0      18911     G      -      -      -      -      -      -    Xorg
+    0      19328     G      6      1      -      -      -      -    cinnamon
+    0      20431     G      -      -      -      -      -      -    Codex --change-
+    0      30282     G     34      7      -      -      -      -    zen
+    0     165671   C+G      -      -      -      -      -      -    python
+    0    1639983     G      -      -      -      -      -      -    obs
+pmon_samples_end
+Starting bounded benchmark at 2026-11-08T10:27:24-04:00 (benchmark=host_latency, buffer MiB=32, measured repeats=5).
+host_latency_meta,device=NVIDIA GeForce RTX 3060,bytes=33554432,nodes=8388608,steps=32768,repeats=5,host_allocation_mib=32,vram_allocation_mib=32,eviction_mib=16
+host_latency_format,summary_or_sample,path,sample,elapsed_ms,ns_per_dependent_load,result,valid
+host_latency_sample,mapped_host,1,24.564352,749.64,6279024,yes
+host_latency_sample,vram_resident,1,10.626048,324.28,6279024,yes
+host_latency_sample,vram_resident,2,8.847136,269.99,6279024,yes
+host_latency_sample,mapped_host,2,24.555519,749.37,6279024,yes
+host_latency_sample,mapped_host,3,24.520576,748.31,6279024,yes
+host_latency_sample,vram_resident,3,8.838144,269.72,6279024,yes
+host_latency_sample,vram_resident,4,8.844288,269.91,6279024,yes
+host_latency_sample,mapped_host,4,28.109888,857.85,6279024,yes
+host_latency_sample,mapped_host,5,24.525248,748.45,6279024,yes
+host_latency_sample,vram_resident,5,8.850432,270.09,6279024,yes
+host_latency_summary,mapped_host,n=5,median_ns_per_load=749.37,min=748.31,max=857.85
+host_latency_summary,vram_resident,n=5,median_ns_per_load=269.99,min=269.72,max=324.28
+host_latency_ratio,mapped_over_vram=2.78
