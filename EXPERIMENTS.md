@@ -285,3 +285,10 @@ Commands were pinned to one CPU core and routed through the resource gate. Repla
 - Results (measured, all validation errors zero): baseline direct mapped host, 5 passes median 277.5 ms; learn+prefetch+4 cached passes median 81.8 ms (about 3.4x); cache hit rate 89.98%; 32 pages / 64 MiB promoted. Pressure test: capacity halved 32->16 frames, 23 pages evicted, shifted hot set promoted 16 pages (32 MiB), hit rate 45.1% (cache holds half the hot set, as expected).
 - Caveats: synthetic 90/10 skewed trace, 256 MiB host range, fits easily in VRAM; not true oversubscription and not yet a real model. Note: cudaMalloc/cudaFree per page is used, which is slow vs a slab allocator.
 - Raw output: results/residency-manager-256mib-20261108.txt
+
+## E026 — 13 GiB single managed allocation (oversubscription, measured)
+
+- Date: 2026-11-08. benchmarks/oversubscribe.cu: one cudaMallocManaged of 13,312 MiB (> 11,905 MiB VRAM), 2 GiB cudaMalloc reserve, GPU init + full validation of every element (sequential, random 2 MiB tile, 32 MiB cluster order), 2 repeats each.
+- Result: zero validation errors in all passes. Init+first touch 4.79 s (2.91 GB/s). Sequential 2.71-2.76 GB/s, random tile 3.31-3.63 GB/s, cluster32 3.77-4.67 GB/s. For reference a fitting 2 GiB managed set scans at 136-163 GB/s, so oversubscribed throughput is roughly 30-50x lower (inferred from separate smaller run).
+- Side effects: VRAM free fell to ~30 MiB during passes (driver used all VRAM except the reserve); system swap rose from 5.8 GiB to ~11 GiB while MemAvailable stayed >12 GiB (kernel swapped other processes cold pages). Swap abort limit was relaxed to +12 GiB; earlier tighter limits (+0.25/1/4 GiB) aborted the run. This deviates from the plan zero-swap rule and was done under explicit user approval.
+- Conclusion: a unified VRAM+RAM pool that is correct works on this machine via managed memory; it is bandwidth-limited by PCIe demand migration and thrashing, not by capacity. Raw: results/oversubscribe-13gib-20261108.txt. Not yet profiled with Nsight; no LLM tested.

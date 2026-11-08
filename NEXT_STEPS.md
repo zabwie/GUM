@@ -19,7 +19,7 @@
 16. **Completed:** Verify 1 GiB device plus 2 GiB mapped-host access in one GPU kernel and record PCIe activity with attribution limits.
 17. **Completed:** Verify a contiguous mixed-backed CUDA VMM range on the RTX 3060 with zero GPU validation errors.
 18. **Completed:** Run an actual small quantized LLM and compare ordinary CUDA allocation with the llama.cpp managed-memory switch.
-19. **Prepared, awaiting explicit budget approval:** Run the 13 GiB single-managed-allocation oversubscription experiment using the resource caps in OVERSUBSCRIPTION_PLAN.md. Do not execute before approval.
+19. **Completed (E026, user-approved):** Run the 13 GiB single-managed-allocation oversubscription experiment using the resource caps in OVERSUBSCRIPTION_PLAN.md. Do not execute before approval.
 20. **Completed (synthetic, E025):** Page-aware residency manager with GPU access counters, hot-page prefetch, eviction under VRAM pressure and correctness checks; 3.4x vs direct mapped access on a 90/10 skewed trace, zero errors. Next: slab allocator instead of per-page cudaMalloc, then apply to a real over-VRAM workload.
 
 ## Guard behavior

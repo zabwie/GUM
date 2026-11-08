@@ -1,0 +1,10 @@
+start,vram_total_MiB=11905,vram_free_MiB=10375,ram_avail_MiB=21328,swap_used_MiB=5768,alloc_MiB=13312
+allocated,managed_MiB=13312,exceeds_vram=1
+init_first_touch,ms=4791.5,GBps=2.91,min_ram_avail_MiB=18042
+pass,pattern=sequential,repeat=0,ms=5153.6,GBps=2.71,errors=0,vram_free_MiB=30,ram_avail_MiB=17370,swap_used_MiB=8791
+pass,pattern=sequential,repeat=1,ms=5062.8,GBps=2.76,errors=0,vram_free_MiB=24,ram_avail_MiB=16478,swap_used_MiB=9867
+pass,pattern=random_tile,repeat=0,ms=4217.6,GBps=3.31,errors=0,vram_free_MiB=21,ram_avail_MiB=15135,swap_used_MiB=10640
+pass,pattern=random_tile,repeat=1,ms=3840.4,GBps=3.63,errors=0,vram_free_MiB=28,ram_avail_MiB=14188,swap_used_MiB=11367
+pass,pattern=cluster32,repeat=0,ms=3704.7,GBps=3.77,errors=0,vram_free_MiB=36,ram_avail_MiB=12641,swap_used_MiB=11400
+pass,pattern=cluster32,repeat=1,ms=2987.9,GBps=4.67,errors=0,vram_free_MiB=28,ram_avail_MiB=12083,swap_used_MiB=10951
+summary,total_errors=0,min_ram_avail_MiB=12083,final_swap_used_MiB=10951
