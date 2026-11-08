@@ -20,6 +20,8 @@ Build with the installed CUDA 13.2 toolkit:
   benchmarks/memory_paths.cu -o benchmarks/memory_paths
 /usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_86 \
   benchmarks/managed_paths.cu -o benchmarks/managed_paths
+/usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_86 \
+  benchmarks/reuse_paths.cu -o benchmarks/reuse_paths
 ```
 
 Run only through the idle/resource gate:
@@ -28,6 +30,7 @@ Run only through the idle/resource gate:
 scripts/run_when_idle.sh                         # mapped/staged/VRAM paths, 64 MiB
 MIB=128 REPEATS=5 scripts/run_when_idle.sh      # select another bounded size
 BENCHMARK=managed_paths scripts/run_when_idle.sh # managed first-touch/prefetch
+BENCHMARK=reuse_paths scripts/run_when_idle.sh   # selectivity/reuse comparison
 ```
 
 The benchmarks default to a 64 MiB buffer and five measured repetitions, capped at 256 MiB. The resource guard samples GPU utilization, temperature, power, free VRAM, available RAM, compute-client memory, and per-process SM activity. It permits idle CUDA contexts and moderate desktop activity, and defers sustained heavy GPU use, temperature at or above 80 C, or insufficient headroom. It never stops unrelated processes.

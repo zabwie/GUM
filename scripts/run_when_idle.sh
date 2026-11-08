@@ -10,8 +10,8 @@ SAMPLES=5
 MAX_TEMP_C=80
 
 case "$BENCHMARK" in
-  memory_paths|managed_paths) ;;
-  *) echo "Refusing: BENCHMARK must be memory_paths or managed_paths." >&2; exit 2 ;;
+  memory_paths|managed_paths|reuse_paths) ;;
+  *) echo "Refusing: BENCHMARK must be memory_paths, managed_paths, or reuse_paths." >&2; exit 2 ;;
 esac
 case "$PROFILE" in
   none|um_faults) ;;
@@ -68,7 +68,9 @@ HEAVY_GPU_PIDS="$(printf '%s\n' "$PMON_OUTPUT" | awk '
   $1 !~ /^#/ && NF >= 9 && $2 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $4 >= 50 { hits[$2]++ }
   END { for (pid in hits) if (hits[pid] >= 3) printf "%s:%d ", pid, hits[pid] }
 ')"
-MIN_GPU_FREE_MIB="$((2048 + MIB))"
+VRAM_BUFFER_COUNT=1
+if [[ "$BENCHMARK" == "reuse_paths" ]]; then VRAM_BUFFER_COUNT=2; fi
+MIN_GPU_FREE_MIB="$((2048 + MIB * VRAM_BUFFER_COUNT))"
 
 printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute clients=%s, sustained heavy GPU PIDs=%s\n' \
   "$GPU_UTIL_SAMPLES" "$GPU_MAX_UTIL" "$GPU_MIN_FREE_MIB" "$RAM_AVAILABLE_MIB" "$GPU_MAX_TEMP_C" \
