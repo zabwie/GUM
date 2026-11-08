@@ -31,6 +31,10 @@ Measure and improve GPU inference throughput when model state exceeds 12 GiB VRA
 
 Mapped pinned host memory is kernel-accessible, but explicit staging will likely deliver higher effective bandwidth for a contiguous one-pass scan. Both are untested on this runtime.
 
+## Existing implementation found
+
+Upstream llama.cpp already offers `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`, and its CUDA allocator switches to `cudaMallocManaged` under that flag. Treat this as the inference baseline after the microbenchmark; do not write a separate allocator before comparing it.
+
 ## Immediate action
 
 Run the mapped/staged/VRAM benchmark only via the resource-gated script when the GPU is sufficiently idle.
