@@ -24,7 +24,7 @@ Run only through the idle/resource gate:
 scripts/run_when_idle.sh
 ```
 
-The benchmark defaults to a 64 MiB buffer, five measured repetitions, and about 64 MiB of pinned RAM plus 64 MiB of VRAM. It caps buffer size at 256 MiB. The guard requires low GPU utilization, no CUDA compute process, at least 8 GiB available system RAM, and at least 2 GiB of free VRAM after the benchmark allocation.
+The benchmark defaults to a 64 MiB buffer and five measured repetitions, using about 64 MiB of pinned RAM plus 64 MiB of VRAM. It caps buffer size at 256 MiB. The guard samples GPU utilization, temperature, power, and per-process SM activity; it allows moderate display activity but defers sustained heavy GPU use, an active CUDA compute process, temperature at or above 80 C, or insufficient RAM/VRAM headroom.
 
 The capability-only query allocates no benchmark buffers and launches no kernel:
 
