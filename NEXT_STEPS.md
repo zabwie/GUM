@@ -21,6 +21,8 @@
 18. **Completed:** Run an actual small quantized LLM and compare ordinary CUDA allocation with the llama.cpp managed-memory switch.
 19. **Completed (E026, user-approved):** Run the 13 GiB single-managed-allocation oversubscription experiment using the resource caps in OVERSUBSCRIPTION_PLAN.md. Do not execute before approval.
 20. **Completed (synthetic, E025):** Page-aware residency manager with GPU access counters, hot-page prefetch, eviction under VRAM pressure and correctness checks; 3.4x vs direct mapped access on a 90/10 skewed trace, zero errors. Next: slab allocator instead of per-page cudaMalloc, then apply to a real over-VRAM workload.
+21. **Completed (E031, measured):** Streamed decode proxy on the 13.42 GiB Qwen3.8-27B STRICT Q4_0 GGUF (497 tensors, per-token Q4_0 GEMV over every weight, CPU-reference validated, 3,976 rows, zero mismatches in every config). Steady state: 0.721 tok/s all-cold host-resident (3.57 GiB pinned mapped + 1.85 GiB managed), 0.744 tok/s with a 4.5 GiB RAM cache + 0.93 GiB NVMe per token, 1.021 tok/s with a 5.55 GiB RAM cache covering every cold weight (zero NVMe in steady state). The full-cache rate's 14.7 GB/s effective bandwidth matches the pinned H2D rate from E021 (14.738 GB/s), consistent with the H2D copy of the cold set being the dominant serialized cost; copy and GEMV run on one CUDA stream and cannot overlap in the current pipeline.
+22. **Next:** Test copy/compute overlap in the streamed decode proxy (H2D on one stream, GEMV on another) to see whether the 1.02 tok/s full-cache rate is H2D-bound or GEMV-bound; then run the same 27B model through llama.cpp (managed allocation) for the real-inference comparison.
 
 ## Guard behavior
 

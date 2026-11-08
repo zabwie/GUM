@@ -38,6 +38,9 @@ Measure and improve local LLM inference throughput when model state exceeds the 
 - `benchmarks/reuse_paths.cu`: mapped, full H2D, or managed-prefetch paths across 1/10/25/100% strided access and 1/2/4 reuse passes, with a pre-trial L2 eviction scan.
 - `benchmarks/q4_matvec.cu`: mapped, staged, managed-prefetch, and VRAM Q4_0 GEMV-style paths; optional read-only model-file input, CPU reference validation, and serialized/double-buffered chunk copies.
 - `benchmarks/host_latency.cu`: deterministic dependent random-load chains across mapped host, managed demand/prefetch, and VRAM; supports 1–960 MiB under the project allocation limits.
+- `benchmarks/oversubscribe.cu`: single large cudaMallocManaged allocation with GPU init/validation passes (E026/E027).
+- `benchmarks/tiered_stream.cu`: NVMe (O_DIRECT) -> pinned staging ring -> RAM cache -> VRAM hot arena streaming pool with GPU validation (E028-E030).
+- `benchmarks/streamed_decode.cu`: per-token Q4_0 GEMV over every 2-D Q4_0 tensor of a real GGUF model (embedding excluded), tiered VRAM/RAM/NVMe residency, CPU-reference validation (E031). `scripts/gguf_manifest.py` emits the tensor manifest; `scripts/inspect_gguf.py` inspects model layout.
 - `scripts/run_when_idle.sh`: sampled resource gate; q4 chunk size is selectable with `CHUNK_MIB=4..64`. The gate accounts for chunk buffers and scratch, rejects planned device buffers above 2 GiB, and records CUDA clients, GPU activity, temperature, and RAM/VRAM headroom. It never stops unrelated processes.
 - Q4_0 and host_latency inputs are capped at 960 MiB; the Q4 executable also rejects exact device-buffer plans above 2 GiB. The maximum measured Q4_0 device footprint was 1,974.728 MiB.
 - Prior implementation milestones: Q4 transfer isolation `554861f`; synthetic chunk pipeline `e5534ce`; GGUF tensor support `c6f8bc0`; real-scale CPU reference `898e1df`; chunk-size parameter `893db0c`. The current work extends Q4 and random-load inputs to 960 MiB.
@@ -57,8 +60,6 @@ Measure and improve local LLM inference throughput when model state exceeds the 
 
 ## Next executable experiments
 
-The 13 GiB managed-allocation experiment is prepared in OVERSUBSCRIPTION_PLAN.md. Do not launch it until the user approves the revised budget stated there. The existing 2 GiB device and 4 GiB host limits remain in force.
+The 13 GiB managed-allocation experiment (E026) and the page-aware residency manager (E025) are complete. The 24 GiB attempt (E027) aborted at the RAM floor; the tiered NVMe/RAM/VRAM pool (E028-E030) streams 24-48 GiB at 6-7 GB/s with flat RAM/swap. E031 ran a streamed decode proxy on the 13.42 GiB Qwen3.8-27B STRICT Q4_0 model: 1.021 tok/s with a full 5.55 GiB RAM cache (zero NVMe in steady state), 0.721 tok/s with all cold weights host-resident.
 
-The next safe implementation is a page-aware residency manager under the existing caps. Track GPU page-access counts, prefetch predicted hot pages into VRAM, keep cold data host-backed, evict pages when the hot set shifts, and validate the complete data after each transition. Compare against the existing direct-mapped and compact-cache paths.
-
-After explicit over-VRAM budget approval, run the 13 GiB experiment and then repeat actual LLM inference above VRAM capacity with matched decode settings, output checks, memory-residency telemetry, PCIe records, and zero-swap enforcement.
+Next: (1) test copy/compute overlap in the streamed decode proxy (H2D on one stream, GEMV on another) to determine whether the full-cache rate is H2D-bound or GEMV-bound; (2) run the same 27B model through llama.cpp (managed allocation) for the real-inference comparison, with matched decode settings, output checks, and memory-residency telemetry.

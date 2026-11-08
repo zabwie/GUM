@@ -1,0 +1,11 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,tensors=497,items=726,stream_GiB=13.42,hot_MiB=8192,cache_MiB=4601,nvme_per_token_GiB=0.93,direct=1,readers=4,passes=8
+token,0,seconds=3.170,tok_per_s=0.315,eff_GBps=4.55,items_nvme=726,items_ram=0,items_vram=0,ram_avail_MiB=18090,swap_used_MiB=7610
+token,1,seconds=1.385,tok_per_s=0.722,eff_GBps=10.41,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18097,swap_used_MiB=7610
+token,2,seconds=1.393,tok_per_s=0.718,eff_GBps=10.34,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18079,swap_used_MiB=7610
+token,3,seconds=1.371,tok_per_s=0.729,eff_GBps=10.51,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18097,swap_used_MiB=7610
+token,4,seconds=1.348,tok_per_s=0.742,eff_GBps=10.69,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18104,swap_used_MiB=7610
+token,5,seconds=1.343,tok_per_s=0.744,eff_GBps=10.73,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18096,swap_used_MiB=7610
+token,6,seconds=1.344,tok_per_s=0.744,eff_GBps=10.72,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18093,swap_used_MiB=7610
+token,7,seconds=1.356,tok_per_s=0.737,eff_GBps=10.63,items_nvme=41,items_ram=249,items_vram=436,ram_avail_MiB=18091,swap_used_MiB=7610
+verify,rows_checked=3976,mismatches=0,worst_rel_err=0
+summary,PASS,best_streaming_tok_per_s=0.744
