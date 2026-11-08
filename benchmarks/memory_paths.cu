@@ -14,6 +14,7 @@ namespace {
 
 constexpr int kThreads = 128;
 constexpr int kMaxMiB = 256;
+constexpr int kWarmups = 3;
 
 [[noreturn]] void fail(const char* what, cudaError_t error) {
     std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(error));
@@ -105,7 +106,7 @@ Measurement measure(const char* path, const float4* input, size_t vector_count,
     check(cudaEventCreate(&start), "cudaEventCreate(start)");
     check(cudaEventCreate(&stop), "cudaEventCreate(stop)");
 
-    for (int sample = -1; sample < repeats; ++sample) {
+    for (int sample = -kWarmups; sample < repeats; ++sample) {
         check(cudaEventRecord(start, stream), "record start");
         const float4* source = input;
         if (stage) {
@@ -140,6 +141,52 @@ Measurement measure(const char* path, const float4* input, size_t vector_count,
 
     check(cudaEventDestroy(start), "destroy start event");
     check(cudaEventDestroy(stop), "destroy stop event");
+    return result;
+}
+
+Measurement measure_copy_only(const float4* host_input, size_t vector_count,
+                              float* device_input, double expected,
+                              size_t bytes, int blocks, int repeats,
+                              cudaStream_t stream, float* block_sums,
+                              std::vector<float>& host_sums) {
+    Measurement result;
+    result.milliseconds.reserve(repeats);
+    cudaEvent_t start{}, stop{};
+    check(cudaEventCreate(&start), "cudaEventCreate(copy start)");
+    check(cudaEventCreate(&stop), "cudaEventCreate(copy stop)");
+
+    for (int sample = -kWarmups; sample < repeats; ++sample) {
+        check(cudaEventRecord(start, stream), "record copy start");
+        check(cudaMemcpyAsync(device_input, host_input, bytes, cudaMemcpyHostToDevice, stream),
+              "copy pinned host buffer to VRAM");
+        check(cudaEventRecord(stop, stream), "record copy stop");
+        check(cudaEventSynchronize(stop), "wait for H2D copy");
+
+        float elapsed = 0.0f;
+        check(cudaEventElapsedTime(&elapsed, start, stop), "measure H2D copy time");
+        if (sample >= 0) result.milliseconds.push_back(elapsed);
+
+        scan<<<blocks, kThreads, 0, stream>>>(reinterpret_cast<const float4*>(device_input),
+                                               vector_count, block_sums);
+        check(cudaGetLastError(), "launch copy validation scan");
+        check(cudaMemcpyAsync(host_sums.data(), block_sums,
+                              blocks * sizeof(float), cudaMemcpyDeviceToHost, stream),
+              "copy validation partials");
+        check(cudaStreamSynchronize(stream), "wait for copy validation");
+        double checksum = 0.0;
+        for (int block = 0; block < blocks; ++block) checksum += host_sums[block];
+        result.checksum = checksum;
+        const double relative_error = std::abs(checksum - expected) / expected;
+        result.valid = relative_error < 1.0e-4;
+        if (!result.valid) {
+            std::fprintf(stderr, "H2D copy checksum mismatch: got %.9g expected %.9g (relative error %.3g)\n",
+                         checksum, expected, relative_error);
+            break;
+        }
+    }
+
+    check(cudaEventDestroy(start), "destroy copy start event");
+    check(cudaEventDestroy(stop), "destroy copy stop event");
     return result;
 }
 
@@ -221,6 +268,10 @@ int main(int argc, char** argv) {
     const Measurement mapped = measure("mapped_host", mapped_device, vector_count,
                                         device, false, expected, bytes, blocks,
                                         options.repeats, stream, block_sums, host_sums);
+    const Measurement copy_only = measure_copy_only(reinterpret_cast<const float4*>(host),
+                                                     vector_count, device, expected, bytes,
+                                                     blocks, options.repeats, stream,
+                                                     block_sums, host_sums);
     const Measurement staged = measure("staged_h2d_plus_scan", reinterpret_cast<const float4*>(host), vector_count,
                                        device, true, expected, bytes, blocks,
                                        options.repeats, stream, block_sums, host_sums);
@@ -228,6 +279,7 @@ int main(int argc, char** argv) {
                                       vector_count, device, false, expected, bytes, blocks,
                                       options.repeats, stream, block_sums, host_sums);
     print_results("mapped_host", mapped, bytes);
+    print_results("h2d_copy_only", copy_only, bytes);
     print_results("staged_h2d_plus_scan", staged, bytes);
     print_results("vram_resident", local, bytes);
 
@@ -235,6 +287,6 @@ int main(int argc, char** argv) {
     check(cudaFree(device), "free VRAM buffer");
     check(cudaFreeHost(host), "free mapped pinned memory");
     check(cudaStreamDestroy(stream), "destroy stream");
-    if (!mapped.valid || !staged.valid || !local.valid) return 1;
+    if (!mapped.valid || !copy_only.valid || !staged.valid || !local.valid) return 1;
     return 0;
 }
