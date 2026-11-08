@@ -19,7 +19,7 @@ Measure and improve GPU inference throughput when model state exceeds 12 GiB VRA
 - Initial CUDA streaming benchmark source: `benchmarks/memory_paths.cu`.
 - Guarded runner: `scripts/run_when_idle.sh`.
 - Intended comparison: mapped pinned host read, pinned H2D staging plus scan, and VRAM-resident scan.
-- Current project history: commits `39b107e` (initial code/docs) and `138d410` (capability and deferral records).
+- Git history on `main` records the implementation, capability-only query, both deferred benchmark attempts, and llama.cpp managed-memory source review.
 
 ## Results
 
