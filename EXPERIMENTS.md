@@ -297,3 +297,10 @@ Commands were pinned to one CPU core and routed through the resource gate. Repla
 
 - Date: 2026-11-08. Same harness, 24,576 MiB, 1.5 GiB cudaMalloc reserve, RAM floor 6 GiB. GPU init of all 24 GiB completed (11.77 s, 2.19 GB/s). During the first validation pass MemAvailable fell to 6,118 MiB (< floor) and swap rose from 8.0 to 11.7 GiB, so the harness aborted. No validation result: inconclusive, not a pass. Raw: results/oversubscribe-24gib-20261108.txt.
 - Interpretation: 24 GiB is about the physical limit of 11.9 GiB VRAM + usable RAM on this 31 GiB machine with the desktop running; the host copy (~14 GiB) plus desktop leaves almost nothing.
+
+## E028-E030 — tiered NVMe/RAM/VRAM streaming pool (measured)
+
+- Date: 2026-11-08. benchmarks/tiered_stream.cu: read-only file on NVMe (WD SN850X), 32 MiB chunks, 4 O_DIRECT reader threads, 256 MiB pinned staging ring, bounded 4 GiB RAM cache, 6 GiB VRAM hot arena, 128 MiB VRAM streaming slots. Kernels read VRAM only; GPU validates every element. Run under systemd-run MemoryMax=10G.
+- 24 GiB: pass 0 4.55 GB/s (all NVMe); later passes 6.8 GB/s (192 chunks VRAM hot, 128 RAM, 448 NVMe). Zero errors. 48 GiB (exceeds RAM+VRAM): pass 0 4.98 GB/s, later passes 6.0 GB/s. Zero errors. MemAvailable stayed ~19 GiB and swap did not grow (8.19 GiB, slightly fell).
+- Comparison: managed oversubscription E026 gave 2.7-4.7 GB/s at 13 GiB and aborted at 24 GiB due to RAM pressure and swap growth. The tiered pool is 1.3-2.5x faster and handles 2x larger data with flat RAM/swap.
+- Caveats: sequential access with no compute, so the NVMe read path (about 5 GB/s) is the bottleneck, not PCIe. The hot arena only saves what fits in VRAM. Not yet a model; tokens/s for dense models is bounded by this 5-7 GB/s streaming rate. Raw: results/tiered-24gib-20261108.txt, tiered-48gib-20261108.txt.

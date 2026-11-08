@@ -7,3 +7,4 @@
 /results/*.csv
 /results/*.sqlite
 /logs/*.log
+tier_data/

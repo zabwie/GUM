@@ -1,0 +1,6 @@
+generating 24576 MiB file /home/zabwie/tier_data/tier.bin
+config,dataset_GiB=24,hot_MiB=6144,ram_cache_MiB=4096,staging_MiB=256,readers=4,passes=3
+pass,0,seconds=5.66,GBps=4.55,chunks_nvme=768,chunks_ram=0,chunks_vram_hot=0,errors_cum=0,ram_avail_MiB=18763,swap_used_MiB=9305
+pass,1,seconds=3.80,GBps=6.79,chunks_nvme=448,chunks_ram=128,chunks_vram_hot=192,errors_cum=0,ram_avail_MiB=19067,swap_used_MiB=9303
+pass,2,seconds=3.79,GBps=6.80,chunks_nvme=448,chunks_ram=128,chunks_vram_hot=192,errors_cum=0,ram_avail_MiB=19094,swap_used_MiB=9301
+summary,PASS,dataset_GiB=24,min_ram_avail_MiB=18645
