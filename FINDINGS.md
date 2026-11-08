@@ -5,6 +5,7 @@
 - `nvidia-smi -q` reports **Addressing Mode: HMM** on Linux kernel 7.0.0-38. This is evidence that the active NVIDIA stack selected HMM addressing; the CUDA runtime attributes still need a direct query.
 - The CUDA 13.2 runtime query reports `canMapHostMemory=1`, `unifiedAddressing=1`, `concurrentManagedAccess=1`, `pageableMemoryAccess=1`, and `pageableMemoryAccessUsesHostPageTables=0`. Per NVIDIA's capability classification, this combination indicates full unified-memory access with software coherence on this Linux setup. The query did not allocate sample buffers or launch a kernel.
 - `hostNativeAtomicSupported=0`; the initial prototype uses no host atomics.
+- Existing upstream llama.cpp CUDA support already has a unified-memory mode. Its build guide documents `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`; current CUDA backend source selects `cudaMallocManaged` for CUDA allocations when enabled and `cudaMalloc` otherwise. This is an existing managed-allocation baseline to evaluate before developing a separate allocator/cache.
 - The GPU is linked at 16.0 GT/s x16, corresponding to PCIe 4.0 x16 signaling. About 31.5 GB/s one-way is a theoretical link-rate ceiling before overhead.
 - CUDA 13.2 is installed alongside CUDA 12.0. The project benchmark is built with the installed 13.2 compiler at `/usr/local/cuda/bin/nvcc`, matching the driver-reported CUDA level.
 - At discovery, GPU use was too high for a clean benchmark; no GPU result exists yet.
@@ -27,3 +28,12 @@ Sources:
 - The kernel has not yet successfully read the mapped pinned allocation; `canMapHostMemory=1` only establishes that the device advertises the capability.
 - No mapped-host or managed-memory bandwidth, page-fault count, inference throughput, or cache hit rate has been measured.
 - No novelty claim is made.
+
+## Existing inference implementation
+
+The upstream llama.cpp CUDA backend has a runtime flag for unified memory. Its documented purpose is to let allocation spill into system RAM when VRAM is exhausted. Source inspection shows the switch changes the CUDA backend allocator from `cudaMalloc` to `cudaMallocManaged`; this confirms an implementation path exists, not that the current model/runtime is fast or correct on this machine. Use it as a future inference baseline after the microbenchmark, and compare enabled/disabled behavior with an identical model/workload.
+
+Sources inspected 2026-11-08:
+
+- [llama.cpp build guide: unified-memory runtime flag](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)
+- [llama.cpp CUDA allocator: managed vs device allocation](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-cuda/ggml-cuda.cu#L175-L200)

@@ -17,3 +17,13 @@
 **Metrics:** Per-run elapsed time, effective input GB/s, checksum validity, runtime/device attributes, GPU/host memory before and after. The VRAM scan is a device-local bandwidth reference. Report min and median, not just the best sample.
 
 **Limitations:** This synthetic contiguous reduction is not transformer inference, quantized GEMV, attention, or MoE. It cannot establish end-to-end token throughput or cache benefit.
+
+## H3 — an existing managed-memory inference path is a stronger baseline than a new allocator
+
+**Observation:** The upstream llama.cpp CUDA backend already switches its allocations from `cudaMalloc` to `cudaMallocManaged` when `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` is set. The local CUDA runtime advertises concurrent managed access and HMM pageable-memory access.
+
+**Claim to falsify:** With a model whose working set exceeds free VRAM, llama.cpp's existing managed-memory path completes GPU inference with correct outputs and lower host-side layer-compute cost than ordinary CPU/GPU layer offload, even if token throughput is slower than a VRAM-resident run.
+
+**Prediction:** It should be a usable oversubscription baseline on this Linux/HMM setup. Decode throughput may be constrained by page movement and access locality. This is untested.
+
+**Experiment:** After the memory microbenchmark, build or use a project-local llama.cpp checkout and compare the same model, quantization, context, batch, prompt, output length, and GPU layer configuration with the flag off/on. Record output correctness, prefill/decode rate, first-token latency, GPU/RAM use, and any page-fault/migration evidence. Do not touch an existing user inference project or model files.

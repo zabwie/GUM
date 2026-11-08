@@ -12,7 +12,8 @@ Find the best reproducible way for local inference to use system RAM with the RT
 4. Add separate managed-memory cold-touch and steady-state experiments, with migration behavior recorded.
 5. Measure latency and bandwidth at useful tensor sizes and access patterns; compare with PCIe and DRAM ceilings.
 6. Prototype a bounded GPU-side cache and a simple prefetch/staging pipeline only after measurements identify a useful reuse opportunity.
-7. Integrate with an available local inference workload only after microbenchmarks establish the bottleneck and the run can respect resource limits.
+7. Before inventing an allocator, evaluate llama.cpp's existing Linux CUDA path (`GGML_CUDA_ENABLE_UNIFIED_MEMORY=1`, which switches CUDA allocations to `cudaMallocManaged`) against its ordinary CUDA allocation/offload baseline. Do this only after microbenchmarks establish the transfer behavior and the run can respect resource limits.
+8. Integrate an available local inference workload only after the preceding baseline is reproducible; add a GPU-side cache/prefetch prototype only if the evidence identifies a useful reuse opportunity.
 
 ## Guardrails
 
