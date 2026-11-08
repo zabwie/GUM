@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIB="${MIB:-64}"
 REPEATS="${REPEATS:-5}"
+CHUNK_MIB="${CHUNK_MIB:-16}"
 BENCHMARK="${BENCHMARK:-memory_paths}"
 PROFILE="${PROFILE:-none}"
 SAMPLES=5
@@ -28,6 +29,10 @@ if (( MIB < 1 || MIB > 256 )); then
 fi
 if (( REPEATS < 1 || REPEATS > 10 )); then
   echo "Refusing: REPEATS must be between 1 and 10." >&2
+  exit 2
+fi
+if (( CHUNK_MIB < 4 || CHUNK_MIB > 64 )); then
+  echo "Refusing: CHUNK_MIB must be between 4 and 64." >&2
   exit 2
 fi
 
@@ -75,7 +80,7 @@ if [[ "$BENCHMARK" == "reuse_paths" ]]; then
   VRAM_FIXED_MIB=16
 elif [[ "$BENCHMARK" == "q4_matvec" ]]; then
   VRAM_BUFFER_COUNT=2
-  VRAM_FIXED_MIB=48
+  VRAM_FIXED_MIB="$((16 + 2 * CHUNK_MIB))"
 fi
 MIN_GPU_FREE_MIB="$((2048 + MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
 PLANNED_DEVICE_MIB="$((MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
@@ -122,6 +127,11 @@ if [[ "$PROFILE" == "um_faults" ]]; then
   exec nsys profile --trace=cuda --cuda-um-cpu-page-faults=true \
     --cuda-um-gpu-page-faults=true --output="$REPORT" \
     "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" "$@"
+fi
+
+if [[ "$BENCHMARK" == "q4_matvec" ]]; then
+  exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" \
+    --chunk-mib "$CHUNK_MIB" "$@"
 fi
 
 exec "$ROOT/benchmarks/$BENCHMARK" --mib "$MIB" --repeats "$REPEATS" "$@"

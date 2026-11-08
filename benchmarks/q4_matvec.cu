@@ -23,7 +23,6 @@ constexpr int kMaxMiB = 256;
 constexpr int kRepeatsMax = 10;
 constexpr int kPasses[] = {1, 2, 4};
 constexpr size_t kEvictionMiB = 16;
-constexpr size_t kChunkMiB = 16;
 
 struct BlockQ4_0 {
     uint16_t d;
@@ -103,6 +102,7 @@ __global__ void evict_l2(const float4* input, size_t count, float* sink) {
 struct Options {
     int mib = 64;
     int repeats = 5;
+    int chunk_mib = 16;
     int rows = kDefaultRows;
     size_t blocks_per_row = 0;
     size_t weights_offset = 0;
@@ -128,6 +128,8 @@ Options parse_options(int argc, char** argv) {
             options.mib = parse_positive(argv[++i], "--mib");
         } else if (std::strcmp(argv[i], "--repeats") == 0 && i + 1 < argc) {
             options.repeats = parse_positive(argv[++i], "--repeats");
+        } else if (std::strcmp(argv[i], "--chunk-mib") == 0 && i + 1 < argc) {
+            options.chunk_mib = parse_positive(argv[++i], "--chunk-mib");
         } else if (std::strcmp(argv[i], "--rows") == 0 && i + 1 < argc) {
             options.rows = parse_positive(argv[++i], "--rows");
             options.rows_set = true;
@@ -147,7 +149,7 @@ Options parse_options(int argc, char** argv) {
             }
             options.weights_offset = static_cast<size_t>(parsed);
         } else {
-            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE]\n", argv[0]);
+            std::fprintf(stderr, "Usage: %s [--mib 1..256] [--repeats 1..10] [--chunk-mib 4..64] [--rows N --blocks-per-row N --weights-file PATH --weights-offset BYTE]\n", argv[0]);
             std::exit(2);
         }
     }
@@ -157,7 +159,8 @@ Options parse_options(int argc, char** argv) {
         std::exit(2);
     }
     if (options.rows > 32768 || (!options.weights_file.empty() &&
-        (!options.rows_set || !options.blocks_set))) {
+        (!options.rows_set || !options.blocks_set)) ||
+        options.chunk_mib < 4 || options.chunk_mib > 64) {
         std::fprintf(stderr, "Invalid dimensions or model-weight input options\n");
         std::exit(2);
     }
@@ -385,7 +388,7 @@ int main(int argc, char** argv) {
     const int columns = static_cast<int>(blocks_per_row * kQK);
     const size_t row_bytes = blocks_per_row * sizeof(BlockQ4_0);
     const int chunk_rows = static_cast<int>(std::min<size_t>(rows,
-        std::max<size_t>(1, (kChunkMiB * 1024 * 1024) / row_bytes)));
+        std::max<size_t>(1, (static_cast<size_t>(options.chunk_mib) * 1024 * 1024) / row_bytes)));
     const size_t chunk_bytes = static_cast<size_t>(chunk_rows) * row_bytes;
     const size_t max_input_bytes = static_cast<size_t>(columns) * 4 * sizeof(float);
 
@@ -398,7 +401,8 @@ int main(int argc, char** argv) {
     check(cudaGetDeviceProperties(&prop, 0), "query GPU properties");
     const size_t eviction_bytes = kEvictionMiB * 1024 * 1024;
     const int eviction_blocks = prop.multiProcessorCount * 8;
-    const size_t chunk_buffer_bytes = options.mib >= 32 ? 2 * chunk_bytes : 0;
+    const bool enable_chunking = weight_bytes >= 32 * 1024 * 1024;
+    const size_t chunk_buffer_bytes = enable_chunking ? 2 * chunk_bytes : 0;
     const size_t device_buffers = 2 * weight_bytes + chunk_buffer_bytes + eviction_bytes + max_input_bytes +
                                   static_cast<size_t>(rows) * sizeof(float) +
                                   static_cast<size_t>(eviction_blocks * 256) * sizeof(float);
@@ -415,9 +419,10 @@ int main(int argc, char** argv) {
         std::printf("weight_source,synthetic\n");
     }
     std::printf("format,Q4_0,block_values=32,block_bytes=18,packed_layout=low_nibble_values_0_to_15_high_nibble_values_16_to_31,scale_half_bits=0x2c00\n");
-    if (options.mib >= 32) {
-        std::printf("chunking,chunk_MiB=16,chunk_rows=%d,chunk_bytes=%zu,num_chunks=%d,buffer_count=2\n",
-                    chunk_rows, chunk_bytes, (rows + chunk_rows - 1) / chunk_rows);
+    if (enable_chunking) {
+        std::printf("chunking,chunk_MiB=%d,chunk_rows=%d,chunk_bytes=%zu,num_chunks=%d,buffer_count=2\n",
+                    options.chunk_mib, chunk_rows, chunk_bytes,
+                    (rows + chunk_rows - 1) / chunk_rows);
     }
 
     cudaStream_t stream{};
@@ -443,7 +448,7 @@ int main(int argc, char** argv) {
                             cudaMemAttachGlobal), "allocate managed Q4_0 weights");
     check(cudaMalloc(reinterpret_cast<void**>(&staged_weights), weight_bytes),
           "allocate staged Q4_0 weights");
-    if (options.mib >= 32) {
+    if (enable_chunking) {
         check(cudaMalloc(reinterpret_cast<void**>(&chunk_buffers[0]), chunk_bytes),
               "allocate first Q4_0 chunk buffer");
         check(cudaMalloc(reinterpret_cast<void**>(&chunk_buffers[1]), chunk_bytes),
@@ -639,7 +644,7 @@ int main(int argc, char** argv) {
             sorted.front(), sorted.back(), gbps);
     }
 
-    if (options.mib >= 32) {
+    if (enable_chunking) {
         cudaEvent_t copy_ready[2]{}, compute_done[2]{};
         for (int slot = 0; slot < 2; ++slot) {
             check(cudaEventCreateWithFlags(&copy_ready[slot], cudaEventDisableTiming),
@@ -701,7 +706,7 @@ int main(int argc, char** argv) {
     check(cudaFree(device_output), "free output vector");
     check(cudaFree(device_inputs), "free input vectors");
     check(cudaFree(staged_weights), "free staged weights");
-    if (options.mib >= 32) {
+    if (enable_chunking) {
         check(cudaFree(chunk_buffers[1]), "free second Q4_0 chunk buffer");
         check(cudaFree(chunk_buffers[0]), "free first Q4_0 chunk buffer");
     }
