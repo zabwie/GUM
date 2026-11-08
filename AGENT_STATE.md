@@ -11,12 +11,14 @@ Measure and improve GPU inference throughput when model state exceeds 12 GiB VRA
 - CUDA 12.0 and 13.2 installed; HMM addressing mode reported.
 - CUDA 13.2 reports CC 8.6, `canMapHostMemory=1`, `concurrentManagedAccess=1`, `pageableMemoryAccess=1`, and software-coherent HMM (`pageableMemoryAccessUsesHostPageTables=0`). The capability-only query ran no benchmark kernel.
 - GPU utilization was 54% with desktop/browser/OBS graphics processes; no CUDA compute process. GPU experiment deferred.
+- Raw capability output and the guard refusal are recorded in `results/capabilities-20261108.txt` and `logs/preflight-20261108.txt`. Probe source revision: `39b107e`.
 
 ## Current implementation
 
 - Initial CUDA streaming benchmark source: `benchmarks/memory_paths.cu`.
 - Guarded runner: `scripts/run_when_idle.sh`.
 - Intended comparison: mapped pinned host read, pinned H2D staging plus scan, and VRAM-resident scan.
+- Current project history: commits `39b107e` (initial code/docs) and `138d410` (capability and deferral records).
 
 ## Results
 
