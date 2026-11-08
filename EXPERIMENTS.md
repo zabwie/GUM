@@ -17,3 +17,11 @@
 - **Observed output:** RTX 3060, CC 8.6, 28 SMs; driver/runtime API 13.2. `canMapHostMemory=1`, `unifiedAddressing=1`, `concurrentManagedAccess=1`, `pageableMemoryAccess=1`, `pageableMemoryAccessUsesHostPageTables=0`, `hostNativeAtomicSupported=0`.
 - **Interpretation:** Mapped pinned host access is supported. The attribute combination is consistent with full Linux HMM unified-memory support using software coherence. It does not establish placement, bandwidth, or inference performance.
 - **Conclusion:** H1's capability prerequisite is supported, but its kernel correctness part remains untested. The 64 MiB performance run remains deferred by the guard because GPU utilization was 53%; the gate record is in `logs/preflight-20261108.txt`.
+
+## E002 — second resource-gate check
+
+- **Date:** 2026-11-08
+- **Question:** Had the GPU become quiet enough for the bounded bandwidth experiment?
+- **Procedure:** Re-ran `scripts/run_when_idle.sh`; this command launches the benchmark only if all resource checks pass.
+- **Observation:** GPU utilization was 32%, free VRAM 11,202 MiB, available system RAM 20,178 MiB, and no CUDA compute PID. The 15% utilization gate rejected the run with exit status 3. Raw output is in `logs/benchmark-attempt-20261108.txt`.
+- **Conclusion:** Still no benchmark kernel or performance measurement. Continue only when the gate passes.

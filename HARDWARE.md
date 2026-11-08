@@ -25,7 +25,7 @@ Observed 2026-11-08 before any GPU benchmark. Values are machine observations; t
 | Swap | 43 GiB configured, 0 used at discovery | `free -h` |
 | Locked-memory limit | 3,977 MiB (`ulimit -l`) | shell limit |
 
-The initial GPU snapshot showed 826 MiB used, 54% utilization, 50 °C, and graphics processes for Xorg, Cinnamon, ChatGPT, a browser, and OBS. The later resource-gate snapshot showed 53% utilization, 11,213 MiB free VRAM, 20,038 MiB available RAM, and no CUDA compute processes. The high utilization is enough to defer a reliable benchmark run despite ample free VRAM.
+The initial GPU snapshot showed 826 MiB used, 54% utilization, 50 °C, and graphics processes for Xorg, Cinnamon, ChatGPT, a browser, and OBS. The first resource-gate snapshot showed 53% utilization, 11,213 MiB free VRAM, 20,038 MiB available RAM; a later attempt showed 32% utilization, 11,202 MiB free VRAM, and 20,178 MiB available RAM. Both reported no CUDA compute processes. The gate deferred the benchmark at both utilization levels.
 
 The CUDA 13.2 runtime capability-only query completed without allocating benchmark buffers or launching a kernel. It reported driver/runtime API level 13.2, compute capability 8.6, mapped-host support, unified addressing, concurrent managed access, pageable access, and software-coherent pageable access. It reported no host-native atomic support.
 

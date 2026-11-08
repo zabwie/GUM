@@ -1,0 +1,2 @@
+Preflight: GPU utilization=32%, free VRAM=11202 MiB, available RAM=20178 MiB, CUDA compute PIDs=none
+Deferred: GPU utilization exceeds 15%.
