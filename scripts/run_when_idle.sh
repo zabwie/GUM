@@ -10,8 +10,8 @@ SAMPLES=5
 MAX_TEMP_C=80
 
 case "$BENCHMARK" in
-  memory_paths|managed_paths|reuse_paths) ;;
-  *) echo "Refusing: BENCHMARK must be memory_paths, managed_paths, or reuse_paths." >&2; exit 2 ;;
+  memory_paths|managed_paths|reuse_paths|q4_matvec) ;;
+  *) echo "Refusing: BENCHMARK must be memory_paths, managed_paths, reuse_paths, or q4_matvec." >&2; exit 2 ;;
 esac
 case "$PROFILE" in
   none|um_faults) ;;
@@ -73,11 +73,23 @@ VRAM_FIXED_MIB=0
 if [[ "$BENCHMARK" == "reuse_paths" ]]; then
   VRAM_BUFFER_COUNT=3
   VRAM_FIXED_MIB=16
+elif [[ "$BENCHMARK" == "q4_matvec" ]]; then
+  VRAM_BUFFER_COUNT=2
+  VRAM_FIXED_MIB=16
 fi
 MIN_GPU_FREE_MIB="$((2048 + MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
+PLANNED_DEVICE_MIB="$((MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
+PLANNED_HOST_MIB=0
+if [[ "$BENCHMARK" == "reuse_paths" || "$BENCHMARK" == "q4_matvec" ]]; then
+  PLANNED_HOST_MIB="$((MIB * 2))"
+elif [[ "$BENCHMARK" == "managed_paths" ]]; then
+  PLANNED_HOST_MIB="$((MIB * 3))"
+else
+  PLANNED_HOST_MIB="$MIB"
+fi
 
-printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute clients=%s, sustained heavy GPU PIDs=%s\n' \
-  "$GPU_UTIL_SAMPLES" "$GPU_MAX_UTIL" "$GPU_MIN_FREE_MIB" "$RAM_AVAILABLE_MIB" "$GPU_MAX_TEMP_C" \
+printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), planned device buffers=%s MiB, planned host allocations~=%s MiB, minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute clients=%s, sustained heavy GPU PIDs=%s\n' \
+  "$GPU_UTIL_SAMPLES" "$GPU_MAX_UTIL" "$PLANNED_DEVICE_MIB" "$PLANNED_HOST_MIB" "$GPU_MIN_FREE_MIB" "$RAM_AVAILABLE_MIB" "$GPU_MAX_TEMP_C" \
   "$GPU_MAX_POWER_W" "$GPU_POWER_LIMIT_W" "${COMPUTE_APPS:-none}" "${HEAVY_GPU_PIDS:-none}"
 
 if (( GPU_MIN_FREE_MIB < MIN_GPU_FREE_MIB )); then
