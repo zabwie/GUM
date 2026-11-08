@@ -69,8 +69,12 @@ HEAVY_GPU_PIDS="$(printf '%s\n' "$PMON_OUTPUT" | awk '
   END { for (pid in hits) if (hits[pid] >= 3) printf "%s:%d ", pid, hits[pid] }
 ')"
 VRAM_BUFFER_COUNT=1
-if [[ "$BENCHMARK" == "reuse_paths" ]]; then VRAM_BUFFER_COUNT=2; fi
-MIN_GPU_FREE_MIB="$((2048 + MIB * VRAM_BUFFER_COUNT))"
+VRAM_FIXED_MIB=0
+if [[ "$BENCHMARK" == "reuse_paths" ]]; then
+  VRAM_BUFFER_COUNT=2
+  VRAM_FIXED_MIB=16
+fi
+MIN_GPU_FREE_MIB="$((2048 + MIB * VRAM_BUFFER_COUNT + VRAM_FIXED_MIB))"
 
 printf 'Preflight: sampled GPU utilization=[%s]%% (max %s%%), minimum free VRAM=%s MiB, available RAM=%s MiB, max temperature=%s C, max power=%s/%s W, CUDA compute clients=%s, sustained heavy GPU PIDs=%s\n' \
   "$GPU_UTIL_SAMPLES" "$GPU_MAX_UTIL" "$GPU_MIN_FREE_MIB" "$RAM_AVAILABLE_MIB" "$GPU_MAX_TEMP_C" \

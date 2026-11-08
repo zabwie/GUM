@@ -110,6 +110,14 @@ TimedResult run_scans(const float4* input, size_t selected_vectors,
     return result;
 }
 
+void evict_l2(const float4* eviction_buffer, size_t eviction_vectors,
+              int blocks, cudaStream_t stream, float* block_sums) {
+    scan_selected<<<blocks, kThreads, 0, stream>>>(eviction_buffer,
+        eviction_vectors, 1, block_sums);
+    check(cudaGetLastError(), "launch L2 eviction scan");
+    check(cudaStreamSynchronize(stream), "wait for L2 eviction scan");
+}
+
 void print_summary(const char* path, int selected_pct, int passes,
                    const std::vector<float>& samples, size_t useful_bytes_per_pass,
                    size_t explicit_copy_bytes) {
@@ -161,10 +169,14 @@ int main(int argc, char** argv) {
     cudaDeviceProp prop{};
     check(cudaGetDeviceProperties(&prop, 0), "query GPU properties");
     const int blocks = std::max(1, prop.multiProcessorCount * 8);
+    const size_t eviction_bytes = std::max<size_t>(16u * 1024 * 1024,
+        static_cast<size_t>(prop.l2CacheSize) * 4);
 
-    std::printf("device,%s,cc=%d.%d,driver=%d,runtime=%d,buffer_MiB=%d,repeats=%d,device_buffers_MiB=%d\n",
+    std::printf("device,%s,cc=%d.%d,driver=%d,runtime=%d,buffer_MiB=%d,repeats=%d,device_buffers_MiB=%zu,L2_MiB=%zu\n",
                 prop.name, prop.major, prop.minor, driver_version, runtime_version,
-                options.mib, options.repeats, options.mib * 2);
+                options.mib, options.repeats,
+                options.mib * 2 + eviction_bytes / (1024 * 1024),
+                static_cast<size_t>(prop.l2CacheSize) / (1024 * 1024));
 
     cudaStream_t stream{};
     check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
@@ -172,6 +184,7 @@ int main(int argc, char** argv) {
     float4* mapped_device = nullptr;
     float* staged_device = nullptr;
     float4* managed = nullptr;
+    float4* eviction_buffer = nullptr;
     float* block_sums = nullptr;
     check(cudaHostAlloc(reinterpret_cast<void**>(&host), bytes, cudaHostAllocMapped),
           "allocate mapped pinned input");
@@ -180,6 +193,9 @@ int main(int argc, char** argv) {
     check(cudaMalloc(reinterpret_cast<void**>(&staged_device), bytes), "allocate staging buffer");
     check(cudaMallocManaged(reinterpret_cast<void**>(&managed), bytes, cudaMemAttachGlobal),
           "allocate managed input");
+    check(cudaMalloc(reinterpret_cast<void**>(&eviction_buffer), eviction_bytes),
+          "allocate L2 eviction buffer");
+    check(cudaMemset(eviction_buffer, 0, eviction_bytes), "initialize L2 eviction buffer");
     check(cudaMalloc(reinterpret_cast<void**>(&block_sums), blocks * sizeof(float)),
           "allocate checksum buffer");
 
@@ -216,6 +232,8 @@ int main(int argc, char** argv) {
             std::vector<float> managed_samples;
 
             for (int trial = 0; trial < options.repeats; ++trial) {
+                evict_l2(eviction_buffer, eviction_bytes / sizeof(float4), blocks,
+                         stream, block_sums);
                 const TimedResult result = run_scans(mapped_device, selected_vectors,
                     stride_vectors, expected, passes, blocks, stream, block_sums,
                     host_sums, start, stop);
@@ -231,6 +249,8 @@ int main(int argc, char** argv) {
                           useful_bytes, 0);
 
             for (int trial = 0; trial < options.repeats; ++trial) {
+                evict_l2(eviction_buffer, eviction_bytes / sizeof(float4), blocks,
+                         stream, block_sums);
                 check(cudaEventRecord(start, stream), "record staged path start");
                 check(cudaMemcpyAsync(staged_device, host, bytes, cudaMemcpyHostToDevice, stream),
                       "copy full buffer to staging VRAM");
@@ -269,6 +289,8 @@ int main(int argc, char** argv) {
                 check(cudaMemPrefetchAsync(managed, bytes, host_location, 0, stream),
                       "reset managed input to CPU");
                 check(cudaStreamSynchronize(stream), "wait for CPU managed reset");
+                evict_l2(eviction_buffer, eviction_bytes / sizeof(float4), blocks,
+                         stream, block_sums);
                 check(cudaEventRecord(start, stream), "record managed path start");
                 check(cudaMemPrefetchAsync(managed, bytes, gpu_location, 0, stream),
                       "prefetch managed input to GPU");
@@ -302,6 +324,7 @@ int main(int argc, char** argv) {
     check(cudaEventDestroy(start), "destroy start event");
     check(cudaEventDestroy(stop), "destroy stop event");
     check(cudaFree(block_sums), "free checksum buffer");
+    check(cudaFree(eviction_buffer), "free L2 eviction buffer");
     check(cudaFree(managed), "free managed buffer");
     check(cudaFree(staged_device), "free staging buffer");
     check(cudaFreeHost(host), "free mapped pinned input");
