@@ -1,0 +1,54 @@
+0.00.049.766 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.154.843 W srv  llama_server: -----------------
+0.00.154.845 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.154.845 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.154.845 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.154.845 W srv  llama_server: -----------------
+0.00.156.030 I srv    load_model: loading model '/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf'
+0.13.620.738 I cmn          init: llama threadpool init, n_threads = 8
+0.22.048.766 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 1024, kv_unified = 'false'
+0.22.059.298 I srv          init: chat template supports preserving reasoning, consider enabling it via --reasoning-preserve
+0.22.059.822 I srv  llama_server: model loaded
+0.22.059.824 I srv  llama_server: listening on http://127.0.0.1:49769
+0.22.095.670 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.22.096.039 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+
+
+Loading model... 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b10573-d775b8967
+model      : /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf
+ftype      : Q4_0
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Explain what a graphics processing unit is, in one paragraph.
+A Graphics Processing Unit (GPU) is a specialized electronic circuit designed to rapidly manipulate and alter memory to accelerate the creation of images in a frame buffer intended for output to a display. Unlike a Central Processing Unit (CPU), which is optimized for sequential processing of complex logic, a GPU is built with thousands of smaller, efficient cores that excel at parallel processing, allowing it to handle the massive number of simultaneous calculations required for rendering graphics, video, and increasingly, general-purpose computing tasks like artificial intelligence and3.06.405.971 I slot print_timing: id  0 | task 0 | n_gen =    100, tg =   0.62 t/s, tg_3s =   0.63 t/s
+ scientific simulations.3.09.607.149 I slot print_timing: id  0 | task 0 | prompt eval time =    5777.60 ms /    25 tokens (  231.10 ms per token,     4.33 tokens per second)
+3.09.607.151 I slot print_timing: id  0 | task 0 |        eval time =  161733.48 ms /   103 tokens ( 1585.62 ms per token,     0.63 tokens per second)
+3.09.607.152 I slot print_timing: id  0 | task 0 |       total time =  167511.08 ms /   128 tokens
+3.09.607.155 I slot print_timing: id  0 | task 0 |    graphs reused =        102
+3.09.607.241 I slot      release: id  0 | task 0 | stop processing: n_tokens = 127, truncated = 0
+
+3.09.608.084 I srv    operator(): operator(): cleaning up before exit...
+
+[ Prompt: 4.3 t/s | Generation: 0.6 t/s ]
+
+
+Exiting...
