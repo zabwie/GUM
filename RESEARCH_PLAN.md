@@ -128,8 +128,9 @@ does not apply to single-sequence verification. Consequences:
 | Dense streaming (today) | ~4.4 tok/s (measured 3.39; verify-path 2.88 — the verify pass pays a small attention/sync tax) |
 | Speculation at measured acceptance E[N]=2.84, γ=7 | **~6.2 tok/s** (T_iter ≈ 0.455 s) |
 | Speculation at acceptance 4 (PLD fusion / better drafting) | ~9.4 tok/s |
-| Speculation at acceptance 5+ + compute cuts (E043) | ~12-14 tok/s |
-| Zero-draft, 100%-acceptance bound at γ=7 | ~20.9 tok/s (measured) |
+| AGENT spans: deep γ=16-32 PLD, near-100% acceptance on exact repeats | in-span 60-120 tok/s (measured curve extrapolation) |
+| AGENT sustained (50-70% repetitive spans) | ~20-30 tok/s |
+| Zero-draft, 100%-acceptance bound at γ=8 | 20.9 tok/s (measured); γ=32 ≈ 64 |
 | 40 tok/s | NOT reachable lossless on 12 GB — needs ≥22 GB VRAM or quality loss |
 
 ## 6. Experiment ladder (E040 onward)
@@ -141,7 +142,19 @@ does not apply to single-sequence verification. Consequences:
   foundation for E041/E042. Note: the summary's cold_GiB_per_step field reports the total over
   all steps (incl. the skipped warm-up); true per-step cold = 6.17 GiB (hot 7424 config),
   0.77 GiB/position at B=8.
-- **E041 — MTP-head drafter in VRAM (NEXT).** Decode the qwen35 nextn head (eh_proj/enorm/hnorm +
+- **E041/E042 — fused drafters with ADAPTIVE DEEP γ (NEXT, rewritten after owner pushback).**
+  The owner challenged the 15 tok/s "ceiling" — correctly: E040's marginal cost (+5 ms/position)
+  means DEEP verification is nearly free; the real constraint is draft cost and acceptance decay.
+  Design: PLD-first drafting (n-gram context lookup, ~0.1 ms/token — deep γ=16-32 is cheap),
+  MTP head as fallback drafter, adaptive γ by match confidence. On exact-repeat spans
+  (agent tool-JSON, echoed context, code) acceptance does NOT decay per position — PLD
+  literature shows near-100% on exact spans. Projection from the MEASURED E040 curve:
+  T(32 pos) ≈ 0.50 s → in-span ~64 tok/s at full acceptance; sustained agent sessions
+  (50-70% repetitive spans) ~20-30 tok/s; bursts 100+. Lossless (rejection sampling).
+  Benchmark must be an agent-shaped trace (tool JSON + echoes + code), not chat.
+  Verify-side prerequisite: attention kernel for γ+1 positions already exists (E040);
+  tree-attention (SpecInfer-style) deferred until linear-chain acceptance is measured.
+- **E041a — MTP-head drafter in VRAM (fallback drafter for novel text).** Decode the qwen35 nextn head (eh_proj/enorm/hnorm +
   dense block, own small KV) from VRAM; greedy self-verification first (accept if draft token
   == target argmax), then full rejection sampling. Measure real α on our decode loop.
 - **E042 — PLD drafter.** n-gram lookup drafts; same verify path. Compare acceptance by
