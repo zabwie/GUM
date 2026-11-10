@@ -986,11 +986,15 @@ int main(int argc, char** argv) {
                 meminfo_mib("MemAvailable:"), host_mib, g_floor);
         return 4;
     }
-    // VRAM preflight: hot + slots + states must keep >= 2 GiB free
+    // VRAM preflight: hot + slots + states must keep >= 2 GiB free.
+    // E044: in multi/speculate mode the rows are positions of ONE sequence (kv_seq_stride 0,
+    // single-slice SSM) — states are sized for 1 sequence, not B. At batch 8 this frees
+    // ~1.27 GiB of VRAM (was the reason gamma=16 could not run at the fast hot config).
+    const long seqs = (multi > 0 || speculate > 0) ? 1 : batch;
     const long sss_v = m.sss_dt ? m.sss_inner / m.sss_dt : 0;
     const uint64_t ssm_vram = ((uint64_t)m.n_recr * m.sss_dt * (uint64_t)sss_v * sss_v * 4
-                            + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4) * batch;
-    const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * batch;
+                            + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4) * seqs;
+    const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * seqs;
     size_t total_vram = 0;
     const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + (16u << 20);
     { int dev = 0; cudaDeviceProp prop{}; check(cudaGetDeviceProperties(&prop, dev), "props"); total_vram = prop.totalGlobalMem; }
@@ -1053,16 +1057,17 @@ int main(int argc, char** argv) {
           check(cudaMemcpy(small_dev + o, hbuf.data(), p.second->bytes, cudaMemcpyHostToDevice), "small copy");
           m.small_off[p.first] = o; o = align_up(o + p.second->bytes, 256);
       } }
-    // KV + SSM state
+    // KV + SSM state (E044: sized for seqs — 1 slice suffices in multi/speculate mode,
+    // rows share slice 0; batch mode keeps one slice per sequence)
     float *kv_dev = nullptr, *ssm_dev = nullptr, *conv_dev = nullptr;
     const uint64_t kv_per_layer = (uint64_t)m.n_kv * ctx * m.head_v * 4;
-    if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn * B), "kv cache");
+    if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn * seqs), "kv cache");
     const uint64_t sss = m.sss_inner / m.sss_dt;
     if (m.n_recr) {
-        check(cudaMalloc((void**)&ssm_dev, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * B), "ssm state");
-        check(cudaMalloc((void**)&conv_dev, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * B), "conv state");
-        check(cudaMemset(ssm_dev, 0, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * B), "ssm zero");
-        check(cudaMemset(conv_dev, 0, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * B), "conv zero");
+        check(cudaMalloc((void**)&ssm_dev, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * seqs), "ssm state");
+        check(cudaMalloc((void**)&conv_dev, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * seqs), "conv state");
+        check(cudaMemset(ssm_dev, 0, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * seqs), "ssm zero");
+        check(cudaMemset(conv_dev, 0, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * seqs), "conv zero");
     }
     // pinned stage ring + staged cache
     uint8_t* stage[kStage]; for (auto& s : stage) check(cudaHostAlloc((void**)&s, kStageBytes + 4096, cudaHostAllocPortable), "stage");
