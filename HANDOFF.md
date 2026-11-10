@@ -1,4 +1,4 @@
-# Vanta — Session Handoff (2026-11-10, post E049)
+# Vanta — Session Handoff (2026-11-10, post E050)
 
 Repo: `/home/zabwie/gpu-unified-memory-research` (git; latest see `git log -1`). Read AGENT.md
 first for the operating mentality. RESEARCH_PLAN.md is the strategy; EXPERIMENTS.md the
@@ -70,20 +70,28 @@ verified in one cold-set pass → in-span bursts. E040's measured +7.4 ms/positi
 verification nearly free, and E043 made it correct and gated. What stands between us and the
 burst numbers is now purely **drafter quality** (issue 2): the verify side is solved.
 
-## KNOWN ISSUES — next levers, ranked (post E049)
+## KNOWN ISSUES — next levers, ranked (post E050 — RE-RANKED, copy-bound claim superseded)
 
-1. **Copy throughput is THE bound.** nsys: the pass is H2D-copy-bound at 13.6 GB/s effective
-   (median copy 16.6 MB) vs the 24.6 GB/s peak; ALL compute is hidden behind copies. Lifting
-   copies to ~20 GB/s is a 1.5x on every path. Failed attempts (E048, reverted): 64 MiB
-   items, write-combined host buffers. Untried: dual copy streams (check
-   asyncEngineCount first — consumer GPUs may have 1 CE), per-stream copy batching.
-2. **Drafter acceptance on high-entropy content.** MTP gets 78% (chat) but 34% (agent JSON);
+1. **k_mat_q4 GEMV: 271 ms/cycle (55%) at 53 GB/s logical — NB=16 collapses it 5.4x.**
+   E050 microbench: 273 GB/s at NB=1 → 50.6 at NB=16; E034's "275 GB/s" was NB=1. Cost split
+   per 29.8 MB tensor: xq re-reads 0.25 ms + xs/xsum 32x-overfetch loads 0.22 ms + weight
+   loads 0.11 ms + ALU 0.05 ms. Fix: smem xq+xs/xsum tile per K-half, grid-stride rows,
+   deterministic partial sums (NO atomicAdd — bit-exactness), optional weight repack.
+   Negative results (don't retry): repacked quanta/scale-plane layout 0.85x; per-row smem
+   tile 0.15x; once-per-block tile ≈ current. Est. 271→70-110 ms/cycle. Full data:
+   results/e050-profile-20261110.md, benchmarks/microbench/e050-gemv-load-decomposition.cu.
+2. **k_delta_net_multi: 116 ms/cycle (24%) at ~0.3% fp32 peak.** Thread-per-(h,j) serial
+   128-loops ×4 ×17 positions, 512 B lane stride on state, 48 blocks/28 SMs. Fix: transposed
+   state [h][i][j] + warp-split S-loops with smem reduction. Est. 116→5-15 ms. Preserve the
+   `h % ngroup` mapping and the E043 snapshot/rollback layout.
+3. **After 1+2, the copy chain (222 ms/cycle = 5.42 GiB / 25.5 GB/s, already at PCIe peak)
+   becomes the wall → ~13-15 tok/s at today's 34% acceptance.** Terms to attack then: cold
+   bytes per pass (hot hit-rate) and tokens per pass (drafter acceptance, lever 4).
+4. **Drafter acceptance on high-entropy content.** MTP gets 78% (chat) but 34% (agent JSON);
    the hybrid picks PLD only on 6-token matches. Next: tree/beam drafting needs multi-branch
    verify (rows are one sequence — an architecture change); or p_min adaptive per depth.
-3. **delta-net kernel is 2x off its bandwidth floor** (85 ms/pass vs ~40 ms) — currently
-   FREE (hidden behind copies); only matters after lever 1 lands.
-4. **k_attn_decode is O(context) serial per head** with half the threads idle (hd=128,
-  256 threads) — same story: hidden until copies lift.
+5. **k_attn_decode is O(context) serial per head** with half the threads idle (hd=128,
+  256 threads) — 6.4 ms/cycle; matters after levers 1-2.
 5. **Summary metric bug**: verify mode's cold_GiB_per_step prints the TOTAL (cosmetic).
 6. **E040 soft check**: keep it honest — prompt-region rows are skipped, absolute gap,
    garbage detector. Never "simplify" it back.

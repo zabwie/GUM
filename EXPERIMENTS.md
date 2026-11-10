@@ -591,3 +591,30 @@ at a time, every run gated by --expect-ids vs the dense greedy stream:
 **Ledger (27B, single-user, lossless-gated, hot 8192/cache 5600 + MTP):** dense 2.7-3.5 |
 PLD-only 2.9-3.3 | MTP 9.4 chat / 4.6 agent | hybrid 9.22 chat / 5.79 agent (1.7-3.4x dense)
 | verify bound gamma=8: 20.4. Raw: results/e04[4-9]-*.
+
+## E050 — profile of the 6.99 tok/s path: it is GEMV-bound, not copy-bound (2026-11-10)
+
+Reproduced the current best config ungated first: hybrid drafter γ=16, agent trace, 64 tokens,
+hot 8192/cache 5600 → **6.990 tok/s, lossless PASS** (22 cycles, 3.41 tok/cycle, 34% accept).
+Then nsys (results/e050-spec-agent-g16.nsys-rep) + isolated microbenches
+(benchmarks/microbench/e050-gemv-load-decomposition.cu). Full analysis: results/e050-profile-20261110.md.
+
+**The E047 "copy-bound" diagnosis is superseded at this config.** Copies run at 25.5 GB/s
+effective (139 GB in decode) — at the PCIe peak — and hide under compute; GPU is 98.1% busy.
+The 488 ms cycle is: k_mat_q4 271 ms (55%) + k_delta_net_multi 116 ms (24%) + small kernels
+17 ms + exposed copies 82 ms.
+
+- **k_mat_q4 collapses 5.4x at NB=16**: measured 273 GB/s at NB=1 → 50.6 GB/s at NB=16.
+  E034's "275 GB/s dp4a" was an NB=1 microbench; the pipeline always ran at ~50 GB/s, hidden
+  behind copies until now. Decomposition: xq re-reads ~0.25 ms + xs/xsum 32x-overfetch loads
+  ~0.22 ms + weight loads ~0.11 ms + ALU 0.05 ms per 29.8 MB tensor. Negative results:
+  repacked layout 0.85x, per-row smem tile 0.15x, once-per-block smem tile ≈ current.
+  Fix (designed, unimplemented): smem xq+xs/xsum tile per K-half, grid-stride rows,
+  deterministic partial sums (no atomics), optional weight repack. Est. 2.5-4x → 271→70-110 ms.
+- **k_delta_net_multi at ~0.3% fp32 peak**: thread-per-(h,j) serial 128-loops ×4 ×17 positions,
+  512 B lane stride on state, 48 blocks/28 SMs. Fix: transposed state + warp-split S-loops.
+  Est. 116→5-15 ms.
+- **Next wall after both**: the copy chain (222 ms/cycle = 5.42 GiB / 25.5 GB/s) bounds the
+  cycle → ~13-15 tok/s at today's 34% acceptance; beyond that, acceptance × cold-bytes are
+  the terms (consistent with the 20.4 tok/s zero-draft verify bound).
+- Rollback D2D (151 MB × 39) = 35.6 ms TOTAL — the E043 hybrid-state tax is negligible.
