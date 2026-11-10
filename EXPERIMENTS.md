@@ -551,3 +551,43 @@ proposes what a greedy 27B actually continues with on these traces, and deep γ 
 pass over mostly-rejected rows. The verify machinery (one-pass multi-position, state
 rollback, re-feed) is now correct and gated; the next lever is drafter quality (adaptive-γ,
 RESEARCH_PLAN), not verification depth. Raw: results/e043-*.
+
+## E044-E049 — the drafter sprint: 2.8 -> 9.2 tok/s chat, 5.8 agent, all lossless-gated (2026-11-10)
+
+Owner directive: "2 t/s is too slow — fix everything, chase the ceiling." Sequence, one change
+at a time, every run gated by --expect-ids vs the dense greedy stream:
+
+- **E044 (VRAM right-sizing):** ssm/conv/kv were allocated per batch slice but multi/spec rows
+  share slice 0 — 1.27 GiB dead VRAM at batch 8. Sized to 1 slice: gamma=16 now runs at the
+  fast hot config. RAM cache sized to cover the whole cold set (nvme_per_token 0.17 -> 0.00
+  GiB/token). Dense 2.85 -> 3.53 tok/s (8704/5150) or 3.35 desktop-safe (8448/5400).
+- **E045 (no dummy rows):** the verify pass width is exactly carry+drafts. Padded dummies
+  cost ~7.4 ms/row for guaranteed rejects. Low-draft cycles now cost dense-equivalent.
+- **E046 (MTP head drafter — the big one):** the qwen3.5 nextn block (blk.64) integrated as a
+  model-guided drafter. token_embd + output.weight are byte-identical to the main model
+  (sha256-verified): ~230 MiB unique weights + 682 MiB head in VRAM; embeddings reuse the
+  main pread path. Scheme mirrors llama.cpp speculative.cpp: per-position h_tgt (= the
+  final-normed hidden the main pass already computes — zero extra cost), MTP sync over
+  accepted rows with the h input shifted one position back, recursive draft chain (h = the
+  MTP's own output), MTP KV synced over the whole prefill. Two bugs on the way:
+  (1) k_add must use the 2D flat grid ((n*B+255)/256, B) — dim3(1,B) truncated the MTP
+  residual to the first 256*B flat elements; teacher-forced accuracy was 6-8% until fixed.
+  Ground truth: llama.cpp reference (E036 build, unified memory) gets 50% acceptance / mean
+  accepted len 5.0 on the same prompt. (2) MTP KV empty over the prefill — invisible on a
+  13-token prompt, fatal on a 153-token agent prompt (draft steps attended zero KV).
+  **Chat: 2.9 -> 9.3-10.0 tok/s (3.4x dense), 78% acceptance at p_min 0.3.**
+- **E047 (copy pipeline):** slot ring 4->8, release window 3->6. nsys profile: the pass is
+  H2D-copy-bound — 0.40 s/pass at 13.6 GB/s effective (median copy 16.6 MB) vs the 24.6 GB/s
+  peak; all compute (GEMV 140 ms, delta-net 85 ms) is fully hidden behind copies.
+- **E048 (negative):** 64 MiB items + write-combined host buffers both REGRESSED (0.45 ->
+  0.99 s/cycles). Reverted; recorded so nobody tries it blind again.
+- **E049 (hybrid drafter):** PLD overrides the MTP chain when it finds a max-length (6-token)
+  history match — periodic/echo spans are near-certain and free to draft; MTP handles novel
+  content. **Agent trace 4.6 -> 5.79 tok/s; chat 9.22 (PLD rarely fires there).** Synthetic
+  "periodic" traces do NOT produce periodic greedy continuations (the model helpfully
+  comments on the pattern instead) — bursts are bounded by real echo content, and the
+  zero-draft verify bound is 20.4 tok/s at gamma=8.
+
+**Ledger (27B, single-user, lossless-gated, hot 8192/cache 5600 + MTP):** dense 2.7-3.5 |
+PLD-only 2.9-3.3 | MTP 9.4 chat / 4.6 agent | hybrid 9.22 chat / 5.79 agent (1.7-3.4x dense)
+| verify bound gamma=8: 20.4. Raw: results/e04[4-9]-*.

@@ -1777,7 +1777,21 @@ int main(int argc, char** argv) {
                 printf("\n");
             }  // KEEP: drafter alignment debugging (E041 known-issues)
             if (mtp_on) {
-                drafts = pending_drafts;   // produced by the previous cycle's MTP chain
+                // E049 hybrid: a long PLD match predicts a periodic/echo span where the
+                // history continuation is near-certain — and costs nothing to draft. It
+                // overrides the MTP chain (whose speculative steps would be wasted there).
+                // Short/no match: the MTP chain (drafted last cycle) is the better bet.
+                std::vector<long> pld;
+                for (int n = std::min<size_t>(6, n0 - 1); n >= 1 && pld.empty(); --n) {
+                    for (long j = (long)n0 - n - 2; j >= 0 && pld.empty(); --j) {
+                        bool ok = true;
+                        for (int t = 0; t < n; ++t) if (hist[j + t] != hist[n0 - n + t]) { ok = false; break; }
+                        if (!ok) continue;
+                        for (int k = 0; k < G - 1 && j + n + k < (long)n0; ++k) pld.push_back(hist[j + n + k]);
+                        break;
+                    }
+                }
+                drafts = (pld.size() >= 6) ? pld : pending_drafts;
             } else {
             for (int n = std::min<size_t>(6, n0 - 1); n >= 1 && drafts.empty(); --n) {
                 // j+n < n0-1: exclude the self-match (the pattern's own tail would seed on
