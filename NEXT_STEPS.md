@@ -34,3 +34,13 @@
 
 Moderate desktop activity and an idle CUDA context do not automatically block a short bounded run. The guard defers on sustained heavy per-process GPU activity, repeated global utilization at or above 85%, temperature at or above 80 C, insufficient RAM/VRAM headroom, or invalid input limits. Q4_0 runs account for the full matrix, two configured chunk buffers, and scratch allowance; `CHUNK_MIB` is bounded to 4–64, and combinations above 2 GiB are rejected. The runner never stops unrelated processes.
 For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate and Q4 executable enforce the 2 GiB VRAM cap, with host-RAM plans within the 4 GiB project limit.
+
+29. **Completed (E038, measured):** Real decode loop with tiered residency (`benchmarks/real_decode.cu`):
+    full qwen3/qwen35 layer math (attention+KV, gated-delta-net+SSM state, greedy sampling) over real
+    GGUF weights with the E031-E037 hot-arena/RAM-cache/overlap streaming. Validated token-for-token
+    against llama.cpp greedy (0.6B: 24/24; 27B: matches after fixing the delta-net k-head mapping
+    `h % n_group`). 27B steady **3.39 tok/s** vs 0.63 t/s llama.cpp unified memory = **5.4x**, 5.42 GiB
+    cold H2D/token, zero NVMe steady-state, >=2.87 GiB VRAM free. Raw: results/e038-*.
+30. **Next:** batch-16 real decode (amortize the 5.42 GiB/token cold set across sequences, E033-style)
+    for aggregate serving throughput; then approximate-layer drafting + exact verification to cut
+    bytes/accepted-token (the E036 KPI).

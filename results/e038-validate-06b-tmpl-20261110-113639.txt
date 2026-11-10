@@ -1,0 +1,55 @@
+ARGMAX MISMATCH at seq 0: gpu=96793(orestation) cpu=25(:) logit_rel=1.92
+ARGMAX MISMATCH at seq 1: gpu=104518(èµļéĴ±) cpu=198(Ċ) logit_rel=1.07
+ARGMAX MISMATCH at seq 2: gpu=113460(æīĢæıĲä¾ĽçļĦ) cpu=93217(okay) logit_rel=1.7
+ARGMAX MISMATCH at seq 3: gpu=14759(theast) cpu=2701(Ġfollowing) logit_rel=1.37
+ARGMAX MISMATCH at seq 4: gpu=126146(ĠÑĥÑĢÐ¾Ð²) cpu=315(Ġof) logit_rel=1.26
+ARGMAX MISMATCH at seq 5: gpu=12348(Ġdegrees) cpu=279(Ġthe) logit_rel=1.27
+ARGMAX MISMATCH at seq 6: gpu=41349(culus) cpu=374(Ġis) logit_rel=1.07
+ARGMAX MISMATCH at seq 7: gpu=80658(RLF) cpu=12095(ĠParis) logit_rel=1.41
+ARGMAX MISMATCH at seq 8: gpu=57230(vette) cpu=151644(<|im_start|>) logit_rel=1.41
+ARGMAX MISMATCH at seq 9: gpu=86461(buah) cpu=151644(<|im_start|>) logit_rel=0.821
+ARGMAX MISMATCH at seq 10: gpu=100776(æľºåħ³) cpu=198(Ċ) logit_rel=0.964
+ARGMAX MISMATCH at seq 11: gpu=294(Ġd) cpu=510(:Ċ) logit_rel=1.27
+ARGMAX MISMATCH at seq 12: gpu=125381(ÑĢÐ°ÑĦ) cpu=151667(<think>) logit_rel=1.05
+ARGMAX MISMATCH at gen 0: gpu=25709(Ġinsights) cpu=198(Ċ) logit_rel=1.56
+ARGMAX MISMATCH at gen 1: gpu=29363(urf) cpu=198(Ċ) logit_rel=1.24
+ARGMAX MISMATCH at gen 2: gpu=101269(åĩ¤) cpu=287(ing) logit_rel=1.39
+ARGMAX MISMATCH at gen 3: gpu=13264(juana) cpu=198(Ċ) logit_rel=1.52
+ARGMAX MISMATCH at gen 4: gpu=20968(empt) cpu=198(Ċ) logit_rel=1.61
+ARGMAX MISMATCH at gen 5: gpu=73458(CDC) cpu=198(Ċ) logit_rel=1.55
+ARGMAX MISMATCH at gen 6: gpu=79127(idious) cpu=198(Ċ) logit_rel=1.67
+ARGMAX MISMATCH at gen 7: gpu=138099(ÑģÑħ) cpu=198(Ċ) logit_rel=1.57
+config,model=models/Qwen3-0.6B-Q4_0.gguf,arch=qwen3,layers=28,recr=0,attn=28,n_embd=1024,n_head=16,n_kv=8,head=128,rot=128,ffn=3072,vocab=151936,ssm_state=0,ssm_group=0,ssm_dt=0,ssm_inner=0,rope_base=1000000,ctx=64,hot_mib=512,cache_mib=512,validate=1
+alloc_plan,items=199,stream_GiB=0.31,hot_GiB=0.31,cache_GiB=0.00,pinned_MiB=0,nvme_per_token_GiB=0.00,ssm_state_MiB=0,kv_MiB=14
+prompt_ids,13,151644,872,198,785,6722,315,9625,374,151645,198,151644,77091,198
+prompt_text,<|im_start|>user
+The capital of France is<|im_end|>
+<|im_start|>assistant
+
+cpu_ref,weights_loaded=311,raw_MiB=403
+alloc,free_vram_MiB=10907,ram_avail_MiB=22963,swap_used_MiB=0
+hot_load,items=199,GiB=0.31
+prompt_token,0,seconds=0.004,cold_bytes=0,free_vram_MiB=10919
+prompt_token,1,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,2,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,3,seconds=0.004,cold_bytes=0,free_vram_MiB=10919
+prompt_token,4,seconds=0.004,cold_bytes=0,free_vram_MiB=10919
+prompt_token,5,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,6,seconds=0.004,cold_bytes=0,free_vram_MiB=10919
+prompt_token,7,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,8,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,9,seconds=0.004,cold_bytes=0,free_vram_MiB=10919
+prompt_token,10,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,11,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+prompt_token,12,seconds=0.003,cold_bytes=0,free_vram_MiB=10919
+gen_token,0,seconds=0.004,tok_per_s=260.004,cold_bytes=0,free_vram_MiB=10919,token=25709[Ġinsights]
+gen_token,1,seconds=0.004,tok_per_s=273.142,cold_bytes=0,free_vram_MiB=10924,token=29363[urf]
+gen_token,2,seconds=0.004,tok_per_s=241.064,cold_bytes=0,free_vram_MiB=10924,token=101269[åĩ¤]
+gen_token,3,seconds=0.004,tok_per_s=267.678,cold_bytes=0,free_vram_MiB=10924,token=13264[juana]
+gen_token,4,seconds=0.004,tok_per_s=276.510,cold_bytes=0,free_vram_MiB=10924,token=20968[empt]
+gen_token,5,seconds=0.004,tok_per_s=249.926,cold_bytes=0,free_vram_MiB=10924,token=73458[CDC]
+gen_token,6,seconds=0.004,tok_per_s=275.299,cold_bytes=0,free_vram_MiB=10924,token=79127[idious]
+gen_token,7,seconds=0.004,tok_per_s=262.107,cold_bytes=0,free_vram_MiB=10924,token=138099[ÑģÑħ]
+generated_text,ÑĢÐ°ÑĦ insightsurfåĩ¤juanaemptCDCidious
+verify,steps_checked=21,argmax_mismatches=21,worst_logit_rel=1.923,validate=1
+summary,FAIL,gen_tokens=8,steady_tok_per_s=262.669,best_tok_per_s=276.510,overall_gen_tok_per_s=262.669,cold_GiB_per_token=0.000,min_free_vram_MiB=10907,ram_avail_MiB=23082,swap_used_MiB=0

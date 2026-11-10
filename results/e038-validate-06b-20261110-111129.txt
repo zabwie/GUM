@@ -1,0 +1,40 @@
+ARGMAX MISMATCH at seq 0: gpu=81820(venting) cpu=69791(Ġbeiden) logit_rel=1.05
+ARGMAX MISMATCH at seq 1: gpu=83896(inions) cpu=88243(elight) logit_rel=1.1
+ARGMAX MISMATCH at seq 2: gpu=34280(ursion) cpu=32873(ajÄħ) logit_rel=1.19
+ARGMAX MISMATCH at seq 3: gpu=75790(auce) cpu=119469(èľ») logit_rel=1.11
+ARGMAX MISMATCH at seq 4: gpu=114327(éļĲéļĲ) cpu=37121(andel) logit_rel=1.12
+ARGMAX MISMATCH at seq 5: gpu=29489(uming) cpu=112380(ä»ĸä»¬ä¼ļ) logit_rel=1.14
+ARGMAX MISMATCH at seq 6: gpu=141943(Ã¤mp) cpu=87030(Ġpoj) logit_rel=1.03
+ARGMAX MISMATCH at seq 7: gpu=44834(ıè¿°) cpu=14136(irk) logit_rel=1.12
+ARGMAX MISMATCH at seq 8: gpu=27030(Ġcruel) cpu=69429(lasting) logit_rel=1.07
+ARGMAX MISMATCH at gen 0: gpu=12633(UNC) cpu=25220(itches) logit_rel=1.02
+ARGMAX MISMATCH at gen 1: gpu=8551(essions) cpu=98061(maf) logit_rel=1.14
+ARGMAX MISMATCH at gen 2: gpu=8758(ETHOD) cpu=6080(uario) logit_rel=1.05
+ARGMAX MISMATCH at gen 3: gpu=71216(oliberal) cpu=48504(VML) logit_rel=1.03
+ARGMAX MISMATCH at gen 4: gpu=89179(Ĩµ) cpu=48504(VML) logit_rel=1.14
+ARGMAX MISMATCH at gen 5: gpu=104624(è¿Ļä¹Łæĺ¯) cpu=86419(lius) logit_rel=1.07
+config,model=models/Qwen3-0.6B-Q4_0.gguf,arch=qwen3,layers=28,recr=0,attn=28,n_embd=1024,n_head=16,n_kv=8,head=128,rot=128,ffn=3072,vocab=151936,ssm_state=0,ssm_group=0,ssm_dt=0,ssm_inner=0,rope_base=1000000,ctx=64,hot_mib=512,cache_mib=512,validate=1
+alloc_plan,items=199,stream_GiB=0.31,hot_GiB=0.31,cache_GiB=0.00,pinned_MiB=0,nvme_per_token_GiB=0.00,ssm_state_MiB=0,kv_MiB=14
+prompt_ids,9,
+prompt_text,TheÄcapitalÄofÄFranceÄis
+cpu_ref,weights_loaded=311,raw_MiB=403
+alloc,free_vram_MiB=10871,ram_avail_MiB=23388,swap_used_MiB=0
+hot_load,items=199,GiB=0.31
+prompt_token,0,seconds=0.004,cold_bytes=0,free_vram_MiB=10869
+prompt_token,1,seconds=0.003,cold_bytes=0,free_vram_MiB=10869
+prompt_token,2,seconds=0.004,cold_bytes=0,free_vram_MiB=10869
+prompt_token,3,seconds=0.003,cold_bytes=0,free_vram_MiB=10869
+prompt_token,4,seconds=0.003,cold_bytes=0,free_vram_MiB=10869
+prompt_token,5,seconds=0.004,cold_bytes=0,free_vram_MiB=10869
+prompt_token,6,seconds=0.003,cold_bytes=0,free_vram_MiB=10870
+prompt_token,7,seconds=0.004,cold_bytes=0,free_vram_MiB=10870
+prompt_token,8,seconds=0.004,cold_bytes=0,free_vram_MiB=10870
+gen_token,0,seconds=0.004,tok_per_s=278.776,cold_bytes=0,free_vram_MiB=10870,token=12633[UNC]
+gen_token,1,seconds=0.004,tok_per_s=279.250,cold_bytes=0,free_vram_MiB=10870,token=8551[essions]
+gen_token,2,seconds=0.004,tok_per_s=262.360,cold_bytes=0,free_vram_MiB=10870,token=8758[ETHOD]
+gen_token,3,seconds=0.004,tok_per_s=265.245,cold_bytes=0,free_vram_MiB=10870,token=71216[oliberal]
+gen_token,4,seconds=0.003,tok_per_s=286.009,cold_bytes=0,free_vram_MiB=10870,token=89179[Ĩµ]
+gen_token,5,seconds=0.004,tok_per_s=241.761,cold_bytes=0,free_vram_MiB=10870,token=104624[è¿Ļä¹Łæĺ¯]
+generated_text, cruelUNCessionsETHODoliberalĨµ
+verify,steps_checked=15,argmax_mismatches=15,worst_logit_rel=1.188,validate=1
+summary,FAIL,gen_tokens=6,steady_tok_per_s=268.067,best_tok_per_s=286.009,overall_gen_tok_per_s=268.067,cold_GiB_per_token=0.000,min_free_vram_MiB=10869,ram_avail_MiB=23415,swap_used_MiB=0

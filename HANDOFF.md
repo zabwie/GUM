@@ -1,6 +1,6 @@
 # Handoff: GPU Unified Memory R&D (updated 2026-11-09, E037)
 
-Repo: `/home/zabwie/gpu-unified-memory-research` (git; last commit `da648f7`; E032-E037 work is uncommitted).
+Repo: `/home/zabwie/gpu-unified-memory-research` (git; E032-E037 committed as 4c02c68; E038 in this session's commit).
 
 ## Mission
 
@@ -107,3 +107,19 @@ The streamed decode is a weight-streaming PROXY: no attention/SSM math, no KV st
 synthetic input vectors. It bounds weight-bandwidth-limited decode from above. Batch tok/s is
 serving-style aggregate (NB parallel vectors), not single-user latency. All measured numbers are
 CPU-reference validated (zero mismatches); theoretical numbers are labeled as ceilings.
+
+## E038 (this session, measured) — REAL decode loop, 5.4x llama.cpp
+
+`benchmarks/real_decode.cu` implements the actual decode graph (attention + KV, gated-delta-net +
+persistent SSM state, greedy sampling) over real GGUF weights with the proxy's tiered residency
+(hot arena loaded once, pinned RAM cache head, overlapped H2D, slot events). Correctness: 0.6B
+token-for-token vs llama.cpp CPU greedy (24/24); 27B token-for-token after fixing the delta-net
+k-head mapping to `h % n_group` (verified per-op against cb_eval node dumps from a patched
+out-of-tree llama.cpp copy at /tmp/llama-dbg; user checkout untouched). Performance: 27B steady
+**3.39 tok/s** (0.29 s/token), 5.42 GiB cold H2D/token at ~19 GB/s effective, >= 2.87 GiB VRAM
+free, zero NVMe in steady state. Reproduce:
+```
+/usr/local/cuda/bin/nvcc -O2 -std=c++17 -arch=sm_86 -lpthread benchmarks/real_decode.cu -o benchmarks/real_decode
+taskset -c 0-3 benchmarks/real_decode --model /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf   --prompt-ids "248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198"   --gen-tokens 16 --ctx 256 --hot-mib 8192 --cache-mib 5553 --readers 4
+```
+Next: batch-16 real decode; approximate-layer drafting for the bytes/token KPI.

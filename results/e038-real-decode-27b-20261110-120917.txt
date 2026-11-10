@@ -1,0 +1,25 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=256,hot_mib=8192,cache_mib=5553,validate=0
+alloc_plan,items=726,stream_GiB=13.42,hot_GiB=8.00,cache_GiB=5.41,pinned_MiB=3658,nvme_per_token_GiB=0.02,ssm_state_MiB=150,kv_MiB=32
+prompt_ids,13,248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198
+prompt_text,<|im_start|>user
+The capital of France is<|im_end|>
+<|im_start|>assistant
+
+alloc,free_vram_MiB=2891,ram_avail_MiB=19718,swap_used_MiB=291
+hot_load,items=436,GiB=8.00
+prompt_token,0,seconds=1.065,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,1,seconds=0.290,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,2,seconds=0.290,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,3,seconds=0.291,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,4,seconds=0.291,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,5,seconds=0.290,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,6,seconds=0.293,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,7,seconds=0.289,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,8,seconds=0.288,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,9,seconds=0.289,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,10,seconds=0.288,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,11,seconds=0.293,cold_bytes=5822449920,free_vram_MiB=2904
+prompt_token,12,seconds=0.292,cold_bytes=5822449920,free_vram_MiB=2904
+generated_text,
+verify,steps_checked=0,argmax_mismatches=0,near_ties=0,worst_logit_rel=0,validate=0
+summary,PASS,gen_tokens=0,steady_tok_per_s=0.000,best_tok_per_s=0.000,overall_gen_tok_per_s=0.000,cold_GiB_per_token=0.000,min_free_vram_MiB=2891,ram_avail_MiB=17714,swap_used_MiB=291

@@ -362,3 +362,65 @@ Commands were pinned to one CPU core and routed through the resource gate. Repla
 - Throughput impact (streamed_decode proxy, same E034 config: 8 GiB hot, 5.55 GiB cache, 8 passes, 4 readers, taskset -c 0-3; all PASS zero mismatches): **batch 1 single-stream 1.951 -> 4.009 tok/s (2.05x, 3976 rows); batch 16 aggregate 31.775 -> 64.119 tok/s (2.02x, 63616 rows)**. Best pass rate 4.007/s for both batch 1 and 16 (compute fully hidden under the copy); effective cold-set H2D ~23.3 GB/s = 95% of the isolated 24.61. Single-stream is now near the Gen4-passthrough ceiling (5.82 GB cold/token / 24.61 GB/s = 4.23 tok/s theoretical). Raw: results/streamed-decode-27b-iommu-pt-batch{1,16}-20261109-172744.txt.
 - Interpretation: the user's challenge to the "physics limit" framing was correct — profiling found a removable config limiter, and removing it doubled both bandwidth and end-to-end proxy throughput. Single-stream 4 tok/s is now the measured ceiling for this dense 13.42 GiB model reading its full ~5.8 GB cold set per token over Gen4 x16; going faster single-stream requires reading fewer bytes per token (approximate-layer drafting + exact verification done right, cf. E036's negative traffic result), not more bandwidth. Batch 32 was compute-bound (E034) so is not expected to gain much from the copy speedup.
 - Caveats: proxy throughput, not real inference (no attention/SSM/KV). The kernel cmdline change is persistent (GRUB); `iommu=pt` keeps interrupt remapping but disables DMA translation for all devices — a security/ isolation tradeoff the user accepted. Revert by removing `iommu=pt` from GRUB_CMDLINE_LINUX_DEFAULT + update-grub + reboot.
+
+
+## E038 — Real decode loop with tiered residency (2026-11-10)
+
+**Goal.** Port the streamed_decode proxy's intelligent residency (8 GiB VRAM hot arena + 5.55 GiB RAM
+cache + overlapped H2D, E031-E037) into a REAL decode loop — attention + KV state + the qwen35
+gated-delta-net path — to close the gap between the 4 tok/s proxy and llama.cpp's 0.63-1.04 t/s
+unified-memory thrashing (E036).
+
+**Implementation.** `benchmarks/real_decode.cu` (~1,100 lines): own GGUF parser, byte-level BPE
+detokenize, dp4a Q4_0 GEMV with per-32-block int8 activation quantization (same as the proxy),
+per-head RMS/L2 norms, NEOX RoPE (qwen3) and IMROPE-as-half-split RoPE (qwen35, text positions),
+GQA decode attention with KV cache, gated-delta-net recurrence with persistent 48x(128x128) fp32
+state + conv state, gated output norms, and the proxy's slot/event/reader streaming machinery
+(hot arena loaded once at startup; staged items through the pinned ring with slot-reuse events).
+Greedy sampling; optional `--validate 1` runs an mmap-backed fp32 CPU reference that mirrors the
+GPU math exactly (same int8 activation quantization) and compares argmax per step (ties < 0.25
+logit gap excused as FP reduction-order noise).
+
+**Validation.**
+- Qwen3-0.6B (fits in VRAM): 24/24 generated tokens identical to llama.cpp CPU greedy (user build,
+  d775b8967, via a token-ID dump tool); CPU-reference 43/45 exact argmax + 2 near-ties (gaps 0.02/0.29).
+- Qwen3.8-27B: per-op bisection against a patched out-of-tree llama.cpp copy (/tmp/llama-dbg, cb_eval
+  node dumps, user checkout untouched) confirmed layer-0 equality, then located the single remaining
+  divergence: the gated-delta-net k-head mapping is `h % n_group` (ggml `iv1 % nek1`), not `h / 3`.
+  After the fix, all 48 per-head delta outputs match llama.cpp to >=4 decimals, and the 27B generates
+  token-for-token identical greedy output to the llama.cpp CPU reference (8+ tokens:
+  248068 198 760 1156 369 9859 264 4145 = "<think>\nThe user is asking a simple").
+
+**Results (27B, hot 8192 MiB / cache 5553 MiB / readers 4, taskset 0-3, iommu=pt).**
+
+| metric | value |
+|---|---|
+| steady decode | **3.39 tok/s** (best 3.43), 0.290-0.300 s/token |
+| llama.cpp unified memory (E036, same model) | 0.63 t/s baseline / 1.04 t/s with MTP |
+| speedup vs baseline | **5.4x** (2.0x vs E036's MTP arm, with correct greedy output) |
+| cold H2D per token | 5.423 GiB (hot 8.0 GiB resident, RAM cache hit, zero NVMe steady-state) |
+| effective bandwidth | ~18.7 GB/s vs 24.6 GB/s isolated pinned H2D |
+| VRAM headroom | >= 2.87 GiB free throughout |
+| correctness | PASS; token-for-token match vs llama.cpp greedy |
+
+**Bugs found and fixed during E038** (each initially produced plausible-but-wrong or NaN output):
+1. KV-cache appends were issued on the copy stream while the producing GEMVs ran on the compute
+   stream (race); layer >= 1 read zeros. Appends now run on the compute stream.
+2. SSM/conv state buffers were indexed by raw layer index (il up to 62) but allocated for 48
+   recurrent layers (195 MB into 151 MB) — illegal access. Fixed with ri = il - (il+1)/4.
+3. Delta-net k-head mapping: h/3 (repeat-group intuition) -> h % n_group (ggml semantics).
+4. qwen35 RoPE: IMROPE uses NEOX half-split pairing (ggml rope switch), i.e. plain half-split RoPE
+   for text — not adjacent-pair pairing.
+5. K-slice L2 norm was applied at the V offset (2*Sdim*group instead of Sdim*group).
+6. Conv1d weight layout confirmed as w[c*4 + j] (ne[0]=4 taps fastest); an attempted "fix" to
+   w[j*C+c] was reverted after per-value comparison against llama.cpp.
+7. yA/yB scratch sized by max chunk rows instead of max tensor rows (17408) — overflow on 27B only.
+8. CPU reference: double zero-point subtraction in the Q4_0 mirror (GPU was correct); ssm/conv state
+   indexing; weights now mmap-backed (a 14.4 GiB anon copy swapped out the desktop and tripped the
+   swap guard).
+
+**Interpretation limits.** Single-stream decode is bound by the same cold-set/PCIe physics as the
+proxy (5.42 GiB/token at ~19 GB/s effective vs 24.6 GB/s isolated H2D = 78% efficiency); the gap to
+the 4.0 tok/s proxy is per-token compute/launch overhead in the real graph. Batch>1 (E033-style)
+and approximate-layer drafting remain the levers for aggregate throughput. Raw:
+results/e038-real-decode-27b-*.txt, results/e038-validate-06b-*.txt.

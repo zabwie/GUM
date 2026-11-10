@@ -1,0 +1,10 @@
+ev sync: an illegal memory access was encountered
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=256,hot_mib=8192,cache_mib=5553,validate=0
+alloc_plan,items=726,stream_GiB=13.42,hot_GiB=8.00,cache_GiB=5.41,pinned_MiB=3658,nvme_per_token_GiB=0.02,ssm_state_MiB=150,kv_MiB=32
+prompt_ids,13,248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198
+prompt_text,<|im_start|>user
+The capital of France is<|im_end|>
+<|im_start|>assistant
+
+alloc,free_vram_MiB=2685,ram_avail_MiB=19838,swap_used_MiB=0
+hot_load,items=436,GiB=8.00

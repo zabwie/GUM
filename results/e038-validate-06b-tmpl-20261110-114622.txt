@@ -1,0 +1,41 @@
+ARGMAX MISMATCH at seq 2: gpu=510(:Ċ) cpu=93217(okay) logit_rel=0.0418
+config,model=models/Qwen3-0.6B-Q4_0.gguf,arch=qwen3,layers=28,recr=0,attn=28,n_embd=1024,n_head=16,n_kv=8,head=128,rot=128,ffn=3072,vocab=151936,ssm_state=0,ssm_group=0,ssm_dt=0,ssm_inner=0,rope_base=1000000,ctx=64,hot_mib=512,cache_mib=512,validate=1
+alloc_plan,items=199,stream_GiB=0.31,hot_GiB=0.31,cache_GiB=0.00,pinned_MiB=0,nvme_per_token_GiB=0.00,ssm_state_MiB=0,kv_MiB=14
+prompt_ids,13,151644,872,198,785,6722,315,9625,374,151645,198,151644,77091,198
+prompt_text,<|im_start|>user
+The capital of France is<|im_end|>
+<|im_start|>assistant
+
+cpu_ref,weights_loaded=311,raw_MiB=403
+alloc,free_vram_MiB=11076,ram_avail_MiB=22625,swap_used_MiB=0
+hot_load,items=199,GiB=0.31
+dbg_cpu,logits_top,0,25:4.4810
+prompt_token,0,seconds=0.005,cold_bytes=0,free_vram_MiB=11087
+prompt_token,1,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,2,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,3,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,4,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,5,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,6,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,7,seconds=0.005,cold_bytes=0,free_vram_MiB=11087
+prompt_token,8,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,9,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,10,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,11,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+prompt_token,12,seconds=0.004,cold_bytes=0,free_vram_MiB=11087
+gen_token,0,seconds=0.005,tok_per_s=213.560,cold_bytes=0,free_vram_MiB=11087,token=198[Ċ]
+gen_token,1,seconds=0.005,tok_per_s=221.510,cold_bytes=0,free_vram_MiB=11087,token=32313[Okay]
+gen_token,2,seconds=0.004,tok_per_s=240.783,cold_bytes=0,free_vram_MiB=11087,token=11[,]
+gen_token,3,seconds=0.004,tok_per_s=240.092,cold_bytes=0,free_vram_MiB=11087,token=773[Ġso]
+gen_token,4,seconds=0.005,tok_per_s=210.225,cold_bytes=0,free_vram_MiB=11087,token=279[Ġthe]
+gen_token,5,seconds=0.005,tok_per_s=219.227,cold_bytes=0,free_vram_MiB=11087,token=1196[Ġuser]
+gen_token,6,seconds=0.004,tok_per_s=236.690,cold_bytes=0,free_vram_MiB=11087,token=374[Ġis]
+gen_token,7,seconds=0.004,tok_per_s=235.831,cold_bytes=0,free_vram_MiB=11087,token=10161[Ġasking]
+gen_token,8,seconds=0.005,tok_per_s=219.193,cold_bytes=0,free_vram_MiB=11087,token=911[Ġabout]
+gen_token,9,seconds=0.004,tok_per_s=232.370,cold_bytes=0,free_vram_MiB=11087,token=279[Ġthe]
+gen_token,10,seconds=0.005,tok_per_s=217.179,cold_bytes=0,free_vram_MiB=11087,token=6722[Ġcapital]
+gen_token,11,seconds=0.004,tok_per_s=228.301,cold_bytes=0,free_vram_MiB=11087,token=315[Ġof]
+generated_text,<think>
+Okay, so the user is asking about the capital
+verify,steps_checked=25,argmax_mismatches=1,worst_logit_rel=0.05096,validate=1
+summary,FAIL,gen_tokens=12,steady_tok_per_s=225.780,best_tok_per_s=240.783,overall_gen_tok_per_s=225.780,cold_GiB_per_token=0.000,min_free_vram_MiB=11076,ram_avail_MiB=22817,swap_used_MiB=0
