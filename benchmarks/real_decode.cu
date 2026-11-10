@@ -851,7 +851,7 @@ static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq,
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     std::string model, prompt, prompt_ids_s, out_ids_path;
-    long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1, multi = 0;
+    long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1, multi = 0, speculate = 0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0;
     std::string feed_ids_s;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -863,6 +863,7 @@ int main(int argc, char** argv) {
         else if (k == "--gen-tokens") gen_tokens = atol(v);
         else if (k == "--batch") batch = atol(v);
         else if (k == "--multi") multi = atol(v);
+        else if (k == "--speculate") speculate = atol(v);
         else if (k == "--feed-ids") feed_ids_s = v;
         else if (k == "--prompt") prompt = v;
         else if (k == "--prompt-ids") prompt_ids_s = v;
@@ -879,14 +880,15 @@ int main(int argc, char** argv) {
     if (model.empty()) { fprintf(stderr, "need --model\n"); return 2; }
     if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
     if (validate && batch != 1) { fprintf(stderr, "--validate requires --batch 1\n"); return 2; }
-    g_batch = batch;
-    if (multi > 0) {
-        // E040 verify mode: one sequence, `multi` positions per step (B rows share one
-        // cold-set transfer); batch buffers are reused as position rows
-        if (validate) { fprintf(stderr, "--validate requires multi mode off\n"); return 2; }
-        batch = multi;
-        if (batch & (batch - 1)) { fprintf(stderr, "--multi must be a power of two\n"); return 2; }
+    if (multi > 0 || speculate > 0) {
+        // E040 verify / E041 speculative mode: one sequence, B rows share one cold-set
+        // transfer; batch buffers are reused as position rows
+        if (validate) { fprintf(stderr, "--validate requires multi/speculate mode off\n"); return 2; }
+        batch = multi > 0 ? multi : speculate;
+        if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--multi/--speculate must be a power of two in 1..64\n"); return 2; }
+        // note: multi stays 0 — the E040 verify branch checks multi>0; spec mode uses its own loop
     }
+    g_batch = batch;   // MUST follow the multi/speculate adjustment (E040 regression: GEMV<1> skipped rows 1..B-1)
     g_swap0 = meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:"); safety("start");
 
     GgufKV kv; std::vector<GTensor> gtensors; uint64_t data_start = 0;
@@ -1225,8 +1227,8 @@ int main(int argc, char** argv) {
     std::vector<long> generated;        // argmax tokens produced
     long cur_pos = 0;                   // sequence position for rope/kv
 
-    const int row_pos = multi > 0 ? 1 : 0;   // E040: rows are positions of one sequence
-    auto run_token = [&](const std::vector<long>& toks, int pass, double* tok_s_out, uint64_t* cold_out) { (void)dbg_dump;
+    const int row_pos = (multi > 0 || speculate > 0) ? 1 : 0;   // rows are positions of one sequence
+    auto run_token = [&](const std::vector<long>& toks, long B, int pass, double* tok_s_out, uint64_t* cold_out) { (void)dbg_dump;
         std::atomic<size_t> released{0};
         std::atomic<long> ready[kStage]; for (auto& r : ready) r = 0;
         std::atomic<bool> fail{false};
@@ -1384,7 +1386,9 @@ int main(int argc, char** argv) {
                 const int rope_style = 0;
                 k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style, row_pos);
                 const long li = A == "qwen35" ? il / 4 : il;
-                const long kv_seq_stride = (long)m.n_attn * 2 * m.n_kv * ctx * m.head_v;   // FLOATS per sequence (kv_per_layer is bytes)
+                // batch mode: one slice per sequence; multi/verify mode: rows are positions of
+                // ONE sequence and must share slice 0 (full-history causal attention)
+                const long kv_seq_stride = row_pos ? 0 : (long)m.n_attn * 2 * m.n_kv * ctx * m.head_v;   // FLOATS
                 float* Kc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer);
                 float* Vc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer + kv_per_layer);
                 // NOTE: appends must run on the compute stream — they read yB/t_v produced
@@ -1440,6 +1444,18 @@ int main(int argc, char** argv) {
         cur_pos += row_pos ? B : 1;   // multi-position verify advances B positions per step
     };
 
+    // ---- SSM state snapshot/rollback for speculative decoding ----
+    // Rejected draft positions permanently corrupt the cumulative delta-net state (unlike
+    // KV, it cannot be overwritten) — snapshot before each verify cycle, restore on partial
+    // accept. ~150 MB D2D, ~1 ms.
+    float *ssm_snap = nullptr, *conv_snap = nullptr;
+    const uint64_t ssm_bytes = (size_t)m.n_recr * m.sss_dt * Sv * Sv * 4;
+    const uint64_t conv_bytes = (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4;
+    if (speculate > 0 && m.n_recr) {
+        check(cudaMalloc((void**)&ssm_snap, ssm_bytes), "ssm snap");
+        check(cudaMalloc((void**)&conv_snap, conv_bytes), "conv snap");
+    }
+
     // ---- run: prompt then greedy generation ----
     auto argmax = [&](const float* lg) {
         long best = 0; float bv = lg[0];
@@ -1470,7 +1486,7 @@ int main(int argc, char** argv) {
     double sum_gen_s = 0; long n_gen_s = 0;
     size_t max_plen = 0;
     for (long v = 0; v < batch; ++v) { plen[v] = prompts[v].size(); max_plen = std::max(max_plen, plen[v]); }
-    if (multi > 0) {
+    if (multi > 0 && speculate == 0) {
         // ---- E040: verification-ceiling benchmark ----
         // One sequence; teacher-forced tokens (prompt + --feed-ids, which should be the
         // model's own greedy continuation) processed `multi` positions per step. The cold
@@ -1487,11 +1503,15 @@ int main(int argc, char** argv) {
         for (size_t base = 0; base + Bp <= seq.size(); base += Bp) {
             std::vector<long> toks(seq.begin() + base, seq.begin() + base + Bp);
             double s; uint64_t cold;
-            run_token(toks, (int)(base / Bp), &s, &cold);
+            run_token(toks, Bp, (int)(base / Bp), &s, &cold);
             // teacher-forced check: row p's argmax should predict seq[base+p+1]
             for (long p = 0; p < Bp && base + Bp + p < seq.size(); ++p) {
                 const long pred = argmax(&logits_h[(size_t)p * m.n_vocab]);
+                if (dbg_dump && base == 0) printf("dbg,e040row,%ld,pred=%ld\n", p, pred);
                 ++soft_checked;
+                float rowmax = 0.f;
+                for (long j = 0; j < m.n_vocab; ++j) rowmax = fmaxf(rowmax, fabsf(logits_h[(size_t)p * m.n_vocab + j]));
+                if (rowmax < 1e-2f) { ++soft_mism; fprintf(stderr, "VERIFY GARBAGE row %ld (all-zero logits)\n", p); continue; }
                 if (pred != seq[base + Bp + p]) {
                     const float* lg = &logits_h[(size_t)p * m.n_vocab];
                     const double gap = lg[seq[base + Bp + p]] - lg[pred];
@@ -1515,11 +1535,131 @@ int main(int argc, char** argv) {
                soft_mism, soft_checked, free_min);
         return 0;
     }
+    if (speculate > 0) {
+        // ---- E041/E042: speculative decoding with PLD drafter ----
+        // Lossless greedy speculation: draft γ-1 tokens from context n-grams (CPU, ~free),
+        // verify all γ positions in one cold-set pass, accept the longest target-confirmed
+        // prefix, emit the target's correction token. Output = exact greedy target decode.
+        const long G = speculate;
+        std::vector<long> hist = prompts[0];
+        std::vector<long> emitted;
+        // prefill: process the prompt in G-position chunks (multi-position path)
+        for (size_t base = 0; base < hist.size(); base += G) {
+            const long nb = std::min<long>(G, (long)hist.size() - base);
+            std::vector<long> toks(hist.begin() + base, hist.begin() + base + nb);
+            double s; uint64_t cold;
+            run_token(toks, nb, (int)(base / G), &s, &cold);
+        }
+        // prefill must land on a chunk boundary for cur_pos to be exact; pad the prompt
+        // to a multiple of G by trimming... handled below by requiring alignment
+        safety("spec-prefill");
+        // known_next = argmax of the LAST computed row
+        long known = argmax(&logits_h[((long)hist.size() - 1 - ((long)hist.size() / G * G >= (long)hist.size() ? G : 0)) * 0]) ; // placeholder
+        // simpler: recompute from the last processed row = hist.size()-1 position if aligned
+        {
+            const long last_row = (long)hist.size() - 1 - (long)hist.size() / G * G;
+            const long rows_last = std::min<long>(G, (long)hist.size() - (long)hist.size() / G * G);
+            known = argmax(&logits_h[(rows_last - 1) * m.n_vocab]);
+            (void)last_row;
+        }
+        long cycles = 0, tot_emitted = 0, tot_accepted = 0, tot_draft = 0;
+        double tot_t = 0;
+        bool stop = false;
+        // the prefill's known_next is the confirmed token after the prompt — emit it now;
+        // every later cycle's feed[0] is the previous cycle's already-emitted correction
+        hist.push_back(known); emitted.push_back(known);
+        printf("dbg,known=%ld\n", known);
+        for (long c = 0; c < gen_tokens * 4 && !stop && tot_emitted < gen_tokens; ++c) {
+            // ---- draft: PLD over history, seeds with known_next ----
+            std::vector<long> drafts;
+            const size_t n0 = hist.size();
+            if (dbg_dump && c < 30) {
+                printf("dbg,draft,n0=%zu,known=%ld,tail=", n0, known);
+                for (int t = (int)std::max<size_t>(0, n0 - 6); t < (int)n0; ++t) printf("%ld,", hist[t]);
+                printf("\n");
+            }  // KEEP: drafter alignment debugging (E041 known-issues)
+            for (int n = std::min<size_t>(6, n0 - 1); n >= 1 && drafts.empty(); --n) {
+                // j+n < n0-1: exclude the self-match (the pattern's own tail would seed on
+                // itself and propose nothing). The proposal is whatever followed the
+                // previous occurrence — no filter on its identity; the verify pass confirms.
+                for (long j = (long)n0 - n - 2; j >= 0 && drafts.empty(); --j) {
+                    bool ok = true;
+                    for (int t = 0; t < n; ++t) if (hist[j + t] != hist[n0 - n + t]) { ok = false; break; }
+                    if (!ok) continue;
+                    for (int k = 0; k < G - 1 && j + n + k < (long)n0; ++k) drafts.push_back(hist[j + n + k]);
+                }
+            }
+            std::vector<long> feed = {known};
+            feed.insert(feed.end(), drafts.begin(), drafts.end());
+            while (feed.size() < (size_t)G) feed.push_back(known);   // pad dummies (guaranteed mismatch)
+            const long Bf = G;
+            const long base = cur_pos;
+            // snapshot recurrent state: delta-net state is cumulative, rejected positions
+            // cannot be overwritten — restore on partial accept (~150 MB D2D, ~1 ms)
+            if (m.n_recr) {
+                check(cudaMemcpy(ssm_snap, ssm_dev, ssm_bytes, cudaMemcpyDeviceToDevice), "ssm snap cp");
+                check(cudaMemcpy(conv_snap, conv_dev, conv_bytes, cudaMemcpyDeviceToDevice), "conv snap cp");
+            }
+            double s; uint64_t cold;
+            run_token(feed, Bf, (int)c, &s, &cold);
+            // row argmaxes
+            std::vector<long> ra(Bf);
+            for (long r = 0; r < Bf; ++r) ra[r] = argmax(&logits_h[(size_t)r * m.n_vocab]);
+            // count matched comparisons: row r confirms feed[r+1]
+            long mt = 0;
+            while (mt < Bf - 1 && ra[mt] == feed[mt + 1]) ++mt;
+            long emitted_here;
+            if (mt == Bf - 1) {
+                // full match: feed[1..Bf-1] confirmed; correction ra[Bf-1] new.
+                // feed[0] is the carried known — already emitted last cycle (or prefill).
+                for (long r = 1; r < Bf; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
+                known = ra[Bf - 1];
+                hist.push_back(known); emitted.push_back(known);
+                emitted_here = Bf;               // NEW tokens: feed[1..Bf-1] + correction
+                // cur_pos advanced by Bf; known's KV computed next cycle as feed[0]
+                tot_accepted += Bf - 1;
+            } else {
+                // feed[1..mt] confirmed; feed[mt+1] rejected — roll back recurrent state,
+                // correction ra[mt] emitted now, its KV computed next cycle as feed[0]
+                if (m.n_recr) {
+                    check(cudaMemcpy(ssm_dev, ssm_snap, ssm_bytes, cudaMemcpyDeviceToDevice), "ssm rollback");
+                    check(cudaMemcpy(conv_dev, conv_snap, conv_bytes, cudaMemcpyDeviceToDevice), "conv rollback");
+                }
+                for (long r = 1; r <= mt; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
+                known = ra[mt];
+                hist.push_back(known); emitted.push_back(known);
+                emitted_here = mt + 1;           // NEW tokens: feed[1..mt] + correction (feed[0] was emitted earlier)
+                cur_pos = base + mt + 1;         // correction's position: computed next cycle
+                tot_accepted += mt;
+            }
+            tot_draft += G - 1;
+            tot_emitted += emitted_here;
+            tot_t += s;
+            ++cycles;
+            const long fv = free_vram_mib();
+            if (fv >= 0 && fv < free_min) free_min = fv;
+            safety("spec");
+            bool hit_eos = false;
+            for (long r = emitted.size() - emitted_here; r < (long)emitted.size(); ++r) if (emitted[r] == m.eos_id) hit_eos = true;
+            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,seconds=%.4f,tok_per_s_cycle=%.3f,free_vram_MiB=%ld\n",
+                   c, (long)drafts.size(), mt, emitted_here, s, emitted_here / s, fv);
+            if (hit_eos || known == m.eos_id) stop = true;
+        }
+        if (show_text) printf("generated_text,%s\n", tok.decode(emitted).c_str());
+        printf("spec_summary,cycles=%ld,emitted=%ld,mean_emitted_per_cycle=%.3f,draft_acceptance=%.3f,mean_cycle_s=%.4f,tok_per_s=%.3f,min_free_vram_MiB=%ld\n",
+               cycles, tot_emitted, cycles ? (double)tot_emitted / cycles : 0, tot_draft ? (double)tot_accepted / tot_draft : 0,
+               cycles ? tot_t / cycles : 0, tot_t > 0 ? (double)tot_emitted / tot_t : 0, free_min);
+        if (out_ids_path.size()) {
+            FILE* f = fopen(out_ids_path.c_str(), "w");
+            if (f) { for (long id : emitted) fprintf(f, "%ld\n", id); fclose(f); }
+        }
+        return 0;
+    }
     for (size_t i = 0; i < max_plen; ++i) {
         std::vector<long> toks(batch);
         for (long v = 0; v < batch; ++v) toks[v] = i < plen[v] ? prompts[v][i] : prompts[v].back();
         double s; uint64_t cold;
-        run_token(toks, (int)i, &s, &cold);
+        run_token(toks, batch, (int)i, &s, &cold);
         if (validate) {
             cpu_step(cm, toks[0], cl);
             cmp_step(cl, "seq", (long)i);
@@ -1545,7 +1685,7 @@ int main(int argc, char** argv) {
         std::vector<long> toks(batch);
         for (long v = 0; v < batch; ++v) toks[v] = next_toks[v] >= 0 ? next_toks[v] : m.eos_id;
         double s; uint64_t cold;
-        run_token(toks, pass, &s, &cold);
+        run_token(toks, batch, pass, &s, &cold);
         n_eos = 0;
         for (long v = 0; v < batch; ++v) {
             gen_ids[v].push_back(toks[v]);

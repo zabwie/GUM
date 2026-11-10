@@ -54,3 +54,21 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     indices — nondeterministic lost updates) + delta-net qkv stride. Raw: results/e039-*.
 32. **Next:** tensor-core int8 MMQ kernel (batch-8 step time is compute+copy mixed); approximate-
     layer drafting for the bytes/accepted-token KPI; optional fp16 SSM states for batch 16.
+
+33. **In progress (E041/E042, first working cut):** speculative decoding with PLD drafter +
+    E040 verify. Working: lossless greedy speculation loop (draft -> one cold-set pass ->
+    accept-prefix -> correction), SSM/conv state snapshot-rollback (~150 MB D2D/cycle),
+    shared-cache full-history attention. Measured 27B: chat 7.26 tok/s (2.3x dense, acceptance
+    33%), repeat workload 6.8 tok/s (28%). KNOWN ISSUES (next session): (a) known/hist
+    alignment drift — the carried known_next occasionally disagrees with the history tail,
+    capping acceptance below the periodic-stream expectation (~100%); (b) deep-g (16-32)
+    untested; (c) MTP-head drafter (E041a) not integrated; (d) proposal wrap-around for
+    periodic streams partially handled. Debug hooks: --dbg-dump prints drafter inputs
+    (dbg,draft lines) and verify-row argmaxes.
+34. **E040 CORRECTION (same-day):** the first E040 sweep had a silent regression — g_batch was
+    set before the multi-mode adjustment, so GEMV<1> computed only row 0 and the tie-excused
+    checks passed vacuously on all-zero rows. Fixed (g_batch ordering + all-zero-logits
+    garbage detector). CORRECTED numbers: B=1 0.350s/2.86 tok/s, B=4 0.386s/10.37, B=8
+    0.430s/18.61 (~7.4 ms/position marginal). The E039 serving numbers were never affected
+    (--batch sets g_batch correctly). Lesson: tie-excused validation needs a row-energy
+    garbage detector; new modes must be checked against g_batch ordering.

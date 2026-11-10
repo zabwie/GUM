@@ -1,0 +1,13 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=256,batch=8,hot_mib=7424,cache_mib=6144,validate=0
+alloc_plan,items=726,stream_GiB=13.42,hot_GiB=7.25,cache_GiB=6.00,pinned_MiB=3658,nvme_per_token_GiB=0.17,ssm_state_MiB=1197,kv_MiB=256
+prompt_seqs,8,first_len=13,ids=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198
+alloc,free_vram_MiB=2185,ram_avail_MiB=19476,swap_used_MiB=4037
+hot_load,items=402,GiB=7.25
+dbg,known=248068
+spec_cycle,0,draft=0,matched=0,emitted=1,seconds=0.5105,tok_per_s_cycle=1.959,free_vram_MiB=2100
+spec_cycle,1,draft=2,matched=0,emitted=1,seconds=0.4293,tok_per_s_cycle=2.330,free_vram_MiB=2100
+spec_cycle,2,draft=7,matched=7,emitted=8,seconds=0.4374,tok_per_s_cycle=18.290,free_vram_MiB=2100
+generated_text,<think>
+The capital of France is<|im_end|>
+<|im_start|><|im_start|>
+spec_summary,cycles=3,emitted=10,mean_emitted_per_cycle=3.333,draft_acceptance=0.333,mean_cycle_s=0.4591,tok_per_s=7.261,min_free_vram_MiB=2100

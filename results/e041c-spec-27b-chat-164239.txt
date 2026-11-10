@@ -1,0 +1,13 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=256,batch=8,hot_mib=7424,cache_mib=6144,validate=0
+alloc_plan,items=726,stream_GiB=13.42,hot_GiB=7.25,cache_GiB=6.00,pinned_MiB=3658,nvme_per_token_GiB=0.17,ssm_state_MiB=1197,kv_MiB=256
+prompt_seqs,8,first_len=13,ids=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198
+alloc,free_vram_MiB=2041,ram_avail_MiB=19640,swap_used_MiB=4038
+hot_load,items=402,GiB=7.25
+dbg,known=248068
+spec_cycle,0,draft=0,matched=0,emitted=1,seconds=0.4952,tok_per_s_cycle=2.019,free_vram_MiB=1957
+spec_cycle,1,draft=0,matched=0,emitted=1,seconds=0.4244,tok_per_s_cycle=2.357,free_vram_MiB=1957
+spec_cycle,2,draft=0,matched=0,emitted=1,seconds=0.4313,tok_per_s_cycle=2.319,free_vram_MiB=1957
+spec_cycle,3,draft=0,matched=0,emitted=1,seconds=0.4302,tok_per_s_cycle=2.325,free_vram_MiB=1957
+generated_text,<think>
+The capital<|im_end|>
+spec_summary,cycles=4,emitted=4,mean_emitted_per_cycle=1.000,draft_acceptance=0.000,mean_cycle_s=0.4453,tok_per_s=2.246,min_free_vram_MiB=1957

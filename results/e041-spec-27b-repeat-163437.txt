@@ -1,0 +1,27 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=256,batch=8,hot_mib=7424,cache_mib=6144,validate=0
+alloc_plan,items=726,stream_GiB=13.42,hot_GiB=7.25,cache_GiB=6.00,pinned_MiB=3658,nvme_per_token_GiB=0.17,ssm_state_MiB=1197,kv_MiB=256
+prompt_seqs,8,first_len=52,ids=
+alloc,free_vram_MiB=2170,ram_avail_MiB=20583,swap_used_MiB=4098
+hot_load,items=402,GiB=7.25
+dbg,known=271
+dbg,cycle0_rows,37436,760,760,760,760,760,760,760
+spec_cycle,0,draft=0,matched=0,emitted=2,seconds=0.5242,tok_per_s_cycle=3.815,free_vram_MiB=2166
+spec_cycle,1,draft=0,matched=0,emitted=2,seconds=0.4312,tok_per_s_cycle=4.638,free_vram_MiB=2166
+spec_cycle,2,draft=0,matched=0,emitted=2,seconds=0.4309,tok_per_s_cycle=4.641,free_vram_MiB=2166
+spec_cycle,3,draft=0,matched=1,emitted=3,seconds=0.4293,tok_per_s_cycle=6.988,free_vram_MiB=2166
+spec_cycle,4,draft=0,matched=3,emitted=5,seconds=0.4347,tok_per_s_cycle=11.501,free_vram_MiB=2166
+spec_cycle,5,draft=0,matched=5,emitted=7,seconds=0.4311,tok_per_s_cycle=16.237,free_vram_MiB=2166
+spec_cycle,6,draft=0,matched=0,emitted=2,seconds=0.4412,tok_per_s_cycle=4.534,free_vram_MiB=2166
+spec_cycle,7,draft=0,matched=0,emitted=2,seconds=0.4310,tok_per_s_cycle=4.640,free_vram_MiB=2166
+spec_cycle,8,draft=0,matched=0,emitted=2,seconds=0.4285,tok_per_s_cycle=4.668,free_vram_MiB=2166
+spec_cycle,9,draft=0,matched=7,emitted=8,seconds=0.4299,tok_per_s_cycle=18.610,free_vram_MiB=2166
+spec_cycle,10,draft=0,matched=7,emitted=8,seconds=0.4307,tok_per_s_cycle=18.576,free_vram_MiB=2166
+spec_cycle,11,draft=0,matched=7,emitted=8,seconds=0.4344,tok_per_s_cycle=18.417,free_vram_MiB=2166
+spec_cycle,12,draft=0,matched=0,emitted=2,seconds=0.4313,tok_per_s_cycle=4.637,free_vram_MiB=2166
+spec_cycle,13,draft=0,matched=0,emitted=2,seconds=0.4286,tok_per_s_cycle=4.667,free_vram_MiB=2166
+spec_cycle,14,draft=0,matched=7,emitted=8,seconds=0.4335,tok_per_s_cycle=18.454,free_vram_MiB=2166
+spec_cycle,15,draft=0,matched=7,emitted=8,seconds=0.4259,tok_per_s_cycle=18.785,free_vram_MiB=2166
+generated_text,
+
+RepeatRepeat this this exact exact exact sentence sentence sentence sentence sentence five five five five five five five times times,, , , one one one one one one one one one per per per per per per per per line line line line line line line line:::: The The The The The The The The The quick quick quick quick quick quick quick quick
+spec_summary,cycles=16,emitted=71,mean_emitted_per_cycle=4.438,draft_acceptance=0.393,mean_cycle_s=0.4373,tok_per_s=10.148,min_free_vram_MiB=2166

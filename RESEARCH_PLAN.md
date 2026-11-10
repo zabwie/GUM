@@ -108,29 +108,34 @@ is achieved and validated; the goal is now single-user speed.
 
 ## 5. Honest ceilings on this hardware (lossless, single-user)
 
-**E040 MEASURED the verification ceiling (2026-11-10) — the amortization is near-perfect.**
-Multi-position verify, one sequence, cold set streamed once per step, teacher-forced tokens
-(130/130 argmax checks match across B ∈ {1,2,4,8}):
+**E040 MEASURED the verification ceiling (2026-11-10, CORRECTED same day).**
+Multi-position verify, one sequence, cold set streamed once per step, teacher-forced tokens.
+First run had a silent regression: g_batch was set before the multi-mode adjustment, so the
+GEMV template stayed <1> and rows 1..B-1 were never computed — their all-zero logits were
+excused by the tie threshold (gap 0 ≤ 0.25), making the checks vacuous. Caught while building
+E041's drafter (spec-mode row argmaxes printed 0); fixed by reordering g_batch and adding an
+all-zero-logits garbage detector. CORRECTED sweep (GEMV computes every row, garbage detector
+active, 130/130 teacher checks meaningful and passing):
 
 | positions/step | mean step | tok/s (upper bound) | marginal cost/position |
 |---|---|---|---|
-| 1 | 0.348 s | 2.88 | — |
-| 2 | 0.355 s | 5.64 | +7 ms |
-| 4 | 0.364 s | 10.98 | +3 ms |
-| 8 | 0.383 s | **20.87** | **+5 ms** |
+| 1 | 0.350 s | 2.86 | — |
+| 2 | 0.362 s | 5.52 | +13 ms |
+| 4 | 0.386 s | 10.37 | +8 ms |
+| 8 | 0.430 s | **18.61** | **+7.4 ms** |
 
-The external estimate (+28 ms for 5 positions) was nearly right; my E039-based correction
-(+150-250 ms) was pessimistic — serving-batch overhead (per-sequence states, cache appends)
-does not apply to single-sequence verification. Consequences:
+Amortization confirmed with real compute: the cable transfer dominates; per-position marginal
+cost ~7-13 ms. Lesson recorded: tie-excused validation checks must include a row-energy
+garbage detector, and any new mode must be checked against g_batch ordering. Consequences:
 
 | Configuration | Ceiling |
 |---|---|
 | Dense streaming (today) | ~4.4 tok/s (measured 3.39; verify-path 2.88 — the verify pass pays a small attention/sync tax) |
 | Speculation at measured acceptance E[N]=2.84, γ=7 | **~6.2 tok/s** (T_iter ≈ 0.455 s) |
 | Speculation at acceptance 4 (PLD fusion / better drafting) | ~9.4 tok/s |
-| AGENT spans: deep γ=16-32 PLD, near-100% acceptance on exact repeats | in-span 60-120 tok/s (measured curve extrapolation) |
-| AGENT sustained (50-70% repetitive spans) | ~20-30 tok/s |
-| Zero-draft, 100%-acceptance bound at γ=8 | 20.9 tok/s (measured); γ=32 ≈ 64 |
+| AGENT spans: deep γ=16-32 PLD, near-100% acceptance on exact repeats | in-span ~50-90 tok/s (measured curve: 0.348+0.0074·(B-1)) |
+| AGENT sustained (50-70% repetitive spans) | ~15-25 tok/s |
+| Zero-draft, 100%-acceptance bound at γ=8 | 18.6 tok/s (measured); γ=32 ≈ 50 |
 | 40 tok/s | NOT reachable lossless on 12 GB — needs ≥22 GB VRAM or quality loss |
 
 ## 6. Experiment ladder (E040 onward)

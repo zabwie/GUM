@@ -1,0 +1,11 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=256,batch=8,hot_mib=7424,cache_mib=6144,validate=0
+alloc_plan,items=726,stream_GiB=13.42,hot_GiB=7.25,cache_GiB=6.00,pinned_MiB=3658,nvme_per_token_GiB=0.17,ssm_state_MiB=1197,kv_MiB=256
+prompt_seqs,8,first_len=13,ids=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198
+alloc,free_vram_MiB=2184,ram_avail_MiB=20354,swap_used_MiB=4098
+hot_load,items=402,GiB=7.25
+verify_mode,positions_per_step=8,seq_len=32,steps=4
+verify_step,0,positions=8,seconds=1.3123,tok_per_s=6.096,cold_bytes=6627870720,free_vram_MiB=2182
+verify_step,1,positions=8,seconds=0.4280,tok_per_s=18.693,cold_bytes=6627870720,free_vram_MiB=2182
+verify_step,2,positions=8,seconds=0.4318,tok_per_s=18.525,cold_bytes=6627870720,free_vram_MiB=2182
+verify_step,3,positions=8,seconds=0.4301,tok_per_s=18.601,cold_bytes=6627870720,free_vram_MiB=2182
+verify_summary,positions_per_step=8,steps=3,mean_step_s=0.4300,best_step_s=0.4280,mean_tok_per_s=18.606,best_tok_per_s=18.693,cold_GiB_per_step=24.691,cold_GiB_per_token=1.0288,soft_mismatches=0,soft_checked=24,min_free_vram_MiB=2182

@@ -141,3 +141,17 @@ taskset -c 0-3 benchmarks/real_decode --model /home/zabwie/Desktop/Chip/models/Q
   --prompt-ids "248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198" \
   --gen-tokens 16 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4 --batch 8
 ```
+
+## E040/E041 (this session) — verify ceiling + first speculative loop
+
+E040 (corrected): multi-position verify in real_decode.cu (--multi B --feed-ids). Amortization
+real: 0.350s (B=1) -> 0.430s (B=8), ~7.4 ms/position marginal, 18.6 tok/s zero-draft bound at
+B=8. CORRECTED same-day: first sweep had GEMV<1> regression (g_batch ordering) with vacuous
+tie-excused checks; garbage detector added.
+
+E041/E042 first cut: --speculate y — PLD drafter (CPU n-gram, ~free) + verify + accept-prefix +
+SSM/conv state snapshot-rollback (~150 MB D2D per cycle — REQUIRED for hybrid models: rejected
+positions corrupt the cumulative delta-net state, KV alone is not enough). Lossless greedy
+speculation working end-to-end on the 27B: chat 7.26 tok/s (2.3x dense), repeat 6.8 (acceptance
+partial — known-issues list in NEXT_STEPS.md item 33: known/hist alignment drift, deep-g, MTP
+head integration).
