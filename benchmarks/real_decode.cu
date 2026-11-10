@@ -42,7 +42,7 @@
 static constexpr size_t kMaxItem = 32u << 20;
 static constexpr size_t kStageBytes = kMaxItem + 8192;
 static constexpr int kStage = 8;
-static constexpr int kSlots = 4;
+static constexpr int kSlots = 8;   // E047: deeper slot ring
 static constexpr uint64_t kMapMargin = 64ull << 20;
 static constexpr int kGGML_F32 = 0, kGGML_F16 = 1, kGGML_Q4_0 = 2;  // ggml enum: Q4_0=2 (8 is Q8_0)
 
@@ -850,8 +850,9 @@ static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq,
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    std::string model, prompt, prompt_ids_s, out_ids_path, expect_ids_path;
+    std::string model, prompt, prompt_ids_s, out_ids_path, expect_ids_path, mtp_path;
     long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1, multi = 0, speculate = 0;
+    double p_min = 0.0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0;
     std::string feed_ids_s;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -877,6 +878,8 @@ int main(int argc, char** argv) {
         else if (k == "--verify-hot") verify_hot = atoi(v);
         else if (k == "--out-ids") out_ids_path = v;
         else if (k == "--expect-ids") expect_ids_path = v;
+        else if (k == "--mtp") mtp_path = v;
+        else if (k == "--p-min") p_min = atof(v);
     }
     if (model.empty()) { fprintf(stderr, "need --model\n"); return 2; }
     if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
@@ -995,8 +998,9 @@ int main(int argc, char** argv) {
     const uint64_t ssm_vram = ((uint64_t)m.n_recr * m.sss_dt * (uint64_t)sss_v * sss_v * 4
                             + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4) * seqs;
     const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * seqs;
+    const uint64_t mtp_reserve = mtp_path.empty() ? 0 : 980ull << 20;   // E046: MTP blob + KV + h_tgt
     size_t total_vram = 0;
-    const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + (16u << 20);
+    const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + mtp_reserve + (16u << 20);
     { int dev = 0; cudaDeviceProp prop{}; check(cudaGetDeviceProperties(&prop, dev), "props"); total_vram = prop.totalGlobalMem; }
     if (vram_plan + (2ull << 30) > total_vram) {
         fprintf(stderr, "ABORT before alloc: VRAM plan %.2f GiB + 2 GiB floor exceeds %.2f GiB\n",
@@ -1070,6 +1074,8 @@ int main(int argc, char** argv) {
         check(cudaMemset(conv_dev, 0, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * seqs), "conv zero");
     }
     // pinned stage ring + staged cache
+    // E048: stage + pinned cache are write-combined — the CPU only ever WRITES them;
+    // WC lifts the H2D rate (the GPU is the only reader)
     uint8_t* stage[kStage]; for (auto& s : stage) check(cudaHostAlloc((void**)&s, kStageBytes + 4096, cudaHostAllocPortable), "stage");
     uint8_t* staged_cache = nullptr; uint8_t* pinned_cache = nullptr;
     if (staged_used) {
@@ -1226,6 +1232,64 @@ int main(int argc, char** argv) {
     uint8_t* emb_buf = nullptr; check(cudaHostAlloc((void**)&emb_buf, (size_t)B * emb_nb * 18 + 4096, cudaHostAllocPortable), "emb buf");
     std::vector<float> emb_row((size_t)B * m.n_embd), logits_h((size_t)B * m.n_vocab);
 
+    // ---- E046: MTP (nextn) drafter ----
+    // The qwen3.5 nextn block (blk.64 in the mtp gguf): hnorm(h) + enorm(emb(token)) ->
+    // eh_proj -> one gated-attention layer (own KV, same rope/heads as the main model) ->
+    // shared_head_norm -> shared lm_head. token_embd and output.weight are byte-identical
+    // to the main model's (sha256-verified), so embeddings reuse the main pread path and
+    // only ~230 MiB of unique weights are loaded; the head is another 682 MiB.
+    // Scheme (mirrors llama.cpp speculative.cpp): the main pass stores its final-normed
+    // hidden per position (h_tgt); the MTP block is synced over accepted rows with h
+    // shifted one position back, then drafts recursively (h = the MTP's own output).
+    bool mtp_on = false;
+    uint8_t *mtp_dev = nullptr, *mtp_small_dev = nullptr;
+    float *mtp_kv_dev = nullptr, *h_tgt_dev = nullptr;
+    float *mtp_cat = nullptr, *mtp_normed = nullptr, *mtp_resid = nullptr, *mtp_hout = nullptr, *mtp_hout2 = nullptr;
+    std::map<std::string, uint64_t> mtp_off, mtp_small_off;
+    uint64_t mtp_vram = 0;
+    if (!mtp_path.empty()) {
+        GgufKV mkv; std::vector<GTensor> mt; uint64_t mstart = 0;
+        if (!parse_gguf(mtp_path.c_str(), mkv, mt, mstart)) { fprintf(stderr, "mtp gguf parse failed\n"); return 1; }
+        uint64_t q4tot = 0, f32tot = 0;
+        std::vector<std::pair<std::string, const GTensor*>> q4s, f32s;
+        for (const GTensor& t : mt) {
+            if (t.type == kGGML_Q4_0 && t.name != "token_embd.weight") { q4s.push_back({t.name, &t}); q4tot += align_up(t.bytes, 256); }
+            else if (t.type == kGGML_F32) { f32s.push_back({t.name, &t}); f32tot += align_up(t.bytes, 256); }
+        }
+        mtp_vram = q4tot + f32tot + (uint64_t)m.n_kv * ctx * m.head_v * 8 + (uint64_t)ctx * m.n_embd * 4;
+        check(cudaMalloc((void**)&mtp_dev, q4tot), "mtp q4 blob");
+        check(cudaMalloc((void**)&mtp_small_dev, f32tot), "mtp f32 blob");
+        check(cudaMalloc((void**)&mtp_kv_dev, (size_t)m.n_kv * ctx * m.head_v * 8), "mtp kv");
+        check(cudaMemset(mtp_kv_dev, 0, (size_t)m.n_kv * ctx * m.head_v * 8), "mtp kv zero");
+        check(cudaMalloc((void**)&h_tgt_dev, (size_t)ctx * m.n_embd * 4), "h_tgt");
+        check(cudaMemset(h_tgt_dev, 0, (size_t)ctx * m.n_embd * 4), "h_tgt zero");
+        check(cudaMalloc((void**)&mtp_cat, (size_t)B * 2 * m.n_embd * 4), "mtp cat");
+        check(cudaMalloc((void**)&mtp_normed, (size_t)B * m.n_embd * 4), "mtp normed");
+        check(cudaMalloc((void**)&mtp_resid, (size_t)B * m.n_embd * 4), "mtp resid");
+        check(cudaMalloc((void**)&mtp_hout, (size_t)B * m.n_embd * 4), "mtp hout");
+        check(cudaMalloc((void**)&mtp_hout2, (size_t)m.n_embd * 4), "mtp hout2");
+        { uint64_t o = 0; std::vector<uint8_t> hb;
+          for (auto& p : q4s) {
+              hb.resize(p.second->bytes);
+              FILE* f = fopen(mtp_path.c_str(), "rb");
+              if (fseek(f, (long)(mstart + p.second->off), SEEK_SET) || fread(hb.data(), 1, p.second->bytes, f) != p.second->bytes) { fprintf(stderr, "mtp read %s\n", p.first.c_str()); return 1; }
+              fclose(f);
+              check(cudaMemcpy(mtp_dev + o, hb.data(), p.second->bytes, cudaMemcpyHostToDevice), "mtp q4 h2d");
+              mtp_off[p.first] = o; o = align_up(o + p.second->bytes, 256);
+          } }
+        { uint64_t o = 0; std::vector<uint8_t> hb;
+          for (auto& p : f32s) {
+              hb.resize(p.second->bytes);
+              FILE* f = fopen(mtp_path.c_str(), "rb");
+              if (fseek(f, (long)(mstart + p.second->off), SEEK_SET) || fread(hb.data(), 1, p.second->bytes, f) != p.second->bytes) { fprintf(stderr, "mtp read %s\n", p.first.c_str()); return 1; }
+              fclose(f);
+              check(cudaMemcpy(mtp_small_dev + o, hb.data(), p.second->bytes, cudaMemcpyHostToDevice), "mtp f32 h2d");
+              mtp_small_off[p.first] = o; o = align_up(o + p.second->bytes, 256);
+          } }
+        mtp_on = true;
+        printf("mtp_plan,q4_MiB=%.0f,f32_MiB=%.0f,total_MiB=%.0f\n", q4tot / 1048576.0, f32tot / 1048576.0, mtp_vram / 1048576.0);
+    }
+
     double best_tok_s = 1e30, sum_steady_s = 0; long n_steady = 0; long free_min = free_after_alloc;
     uint64_t steady_cold_bytes = 0; long n_steady_cold = 0;
     long checked = 0, mismatches = 0; double worst_rel = 0;
@@ -1318,7 +1382,7 @@ int main(int argc, char** argv) {
                 launch_mat_q4(dst, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0, ystride, stc);
                 check(cudaEventRecord(evc[cold_k % kSlots], stc), "evc");
                 pending.push_back((int)cold_k);
-                if (pending.size() >= 3) {
+                if (pending.size() >= 6) {   // E047: deeper release window
                     const int o = pending.front(); pending.erase(pending.begin());
                     check(cudaEventSynchronize(ev[o % kStage]), "ev sync");
                     released.store((size_t)o + 1);
@@ -1441,6 +1505,13 @@ int main(int argc, char** argv) {
         released.store(cold_list.size() + (size_t)kStage);
         for (auto& th : pool) th.join();
         check(cudaMemcpy(logits_h.data(), logits, B * m.n_vocab * 4, cudaMemcpyDeviceToHost), "logits d2h");
+        // E046: stash the final-normed hidden per position — the MTP block's h input is
+        // the PREVIOUS position's h_tgt (llama.cpp shifts it right by one)
+        if (mtp_on && row_pos) {
+            for (long v = 0; v < B && cur_pos + v < ctx; ++v)
+                check(cudaMemcpyAsync(h_tgt_dev + (size_t)(cur_pos + v) * m.n_embd, t_norm + (size_t)v * m.n_embd,
+                                      m.n_embd * 4, cudaMemcpyDeviceToDevice, stc), "h_tgt stash");
+        }
         if (dbg_dump) {
             long t1 = 0;
             for (long j = 1; j < m.n_vocab; ++j) if (logits_h[j] > logits_h[t1]) t1 = j;
@@ -1553,6 +1624,67 @@ int main(int argc, char** argv) {
                soft_mism, soft_checked, free_min);
         return 0;
     }
+    // ---- E046: MTP forward — one gated-attention layer (the nextn block) ----
+    // h_in: [B][n_embd] device rows (h_tgt of the previous position for a sync pass, the
+    // MTP's own output for a draft step). toks: the tokens at positions pos0..pos0+B-1.
+    // Appends MTP KV causally; h_out = [B][n_embd] shared-head-normed hidden. With
+    // want_logits, the head GEMV runs for row `logit_row` and its logits land in logits[0].
+    auto mtp_S = [&](const std::string& tn) -> const float* { return (const float*)(mtp_small_dev + mtp_small_off.at(tn)); };
+    const long mtp_kv_layer = m.n_kv * ctx * m.head_v;
+    auto mtp_forward = [&](const float* h_in, const std::vector<long>& toks, long B, long pos0,
+                           float* h_out, bool want_logits, long logit_row) {
+        for (long v = 0; v < B; ++v) {
+            if (pread(fdc, emb_buf + (size_t)v * emb_nb * 18, emb_nb * 18, (off_t)(data_start + embd->off + (uint64_t)toks[v] * emb_nb * 18)) != (ssize_t)(emb_nb * 18)) { fprintf(stderr, "mtp embd pread\n"); exit(1); }
+            cpu_dequant_row_q4(emb_buf + (size_t)v * emb_nb * 18, m.n_embd, &emb_row[(size_t)v * m.n_embd]);
+        }
+        check(cudaMemcpy(x, emb_row.data(), B * m.n_embd * 4, cudaMemcpyHostToDevice), "mtp emb h2d");
+        // enorm(emb) -> cat[..n_embd), hnorm(h) -> cat[n_embd..): concat is [e; h]
+        k_rms_norm<<<dim3(1, (unsigned)B), 256, 0, stc>>>(mtp_cat, x, mtp_S("blk.64.nextn.enorm.weight"), (int)m.n_embd, (float)m.eps);
+        k_rms_norm<<<dim3(1, (unsigned)B), 256, 0, stc>>>(mtp_cat + m.n_embd, h_in, mtp_S("blk.64.nextn.hnorm.weight"), (int)m.n_embd, (float)m.eps);
+        const dim3 grid1m(1, (unsigned)B);
+        k_quant_x<<<dim3((unsigned)((2 * m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_cat, 2 * m.n_embd / 32 * B, xq, xs, xsum);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.nextn.eh_proj.weight"), 2 * m.n_embd, m.n_embd, xq, xs, xsum, mtp_resid, m.n_embd, stc);
+        k_rms_norm<<<grid1m, 256, 0, stc>>>(mtp_normed, mtp_resid, mtp_S("blk.64.attn_norm.weight"), (int)m.n_embd, (float)m.eps);
+        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_normed, m.n_embd / 32 * B, xq, xs, xsum);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_q.weight"), m.n_embd, 12288, xq, xs, xsum, yA, 12288, stc);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_k.weight"), m.n_embd, 1024, xq, xs, xsum, yB, 1024, stc);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_v.weight"), m.n_embd, 1024, xq, xs, xsum, t_v, 1024, stc);
+        k_rms_heads<<<dim3((unsigned)nh_q, (unsigned)B), 128, 0, stc>>>(yA, mtp_S("blk.64.attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, 2 * (int)hd);
+        k_rms_heads<<<dim3((unsigned)nh_k, (unsigned)B), 128, 0, stc>>>(yB, mtp_S("blk.64.attn_k_norm.weight"), (int)nh_k, (int)hd, (float)m.eps, (int)hd);
+        k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)pos0, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, 2 * (int)hd, 0, 1);
+        for (long v = 0; v < B; ++v) {
+            const long p = pos0 + v;
+            for (long h = 0; h < nh_k; ++h) {
+                check(cudaMemcpyAsync(mtp_kv_dev + ((size_t)h * ctx + p) * hd, yB + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "mtp kv append k");
+                check(cudaMemcpyAsync(mtp_kv_dev + mtp_kv_layer + ((size_t)h * ctx + p) * hd, t_v + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "mtp kv append v");
+            }
+        }
+        k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((pos0 + B) * 4), stc>>>(t_att, mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yA, (int)pos0, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, 2 * (int)hd, 0, 1);
+        k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
+        k_quant_x<<<dim3((unsigned)((nh_q * hd / 32 * B + 127) / 128)), 128, 0, stc>>>(t_att, nh_q * hd / 32 * B, xq, xs, xsum);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_output.weight"), nh_q * hd, m.n_embd, xq, xs, xsum, yA, m.n_embd, stc);
+        // k_add is flat-indexed over [B*n]: its grid must be ((n*B+255)/256, B) like the
+        // main path — dim3(1, B) covers only the first 256*B flat elements (E046 bug)
+        const dim3 addgrid_m((unsigned)((m.n_embd * B + 255) / 256), (unsigned)B);
+        k_add<<<addgrid_m, 256, 0, stc>>>(mtp_resid, yA, (int)m.n_embd);
+        k_rms_norm<<<grid1m, 256, 0, stc>>>(mtp_normed, mtp_resid, mtp_S("blk.64.post_attention_norm.weight"), (int)m.n_embd, (float)m.eps);
+        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_normed, m.n_embd / 32 * B, xq, xs, xsum);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_gate.weight"), m.n_embd, m.n_ff, xq, xs, xsum, yA, m.n_ff, stc);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_up.weight"), m.n_embd, m.n_ff, xq, xs, xsum, yB, m.n_ff, stc);
+        k_silu_mul<<<dim3((unsigned)((m.n_ff * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_ffnh, yA, yB, (int)m.n_ff);
+        k_quant_x<<<dim3((unsigned)((m.n_ff / 32 * B + 127) / 128)), 128, 0, stc>>>(t_ffnh, m.n_ff / 32 * B, xq, xs, xsum);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_down.weight"), m.n_ff, m.n_embd, xq, xs, xsum, yA, m.n_embd, stc);
+        k_add<<<addgrid_m, 256, 0, stc>>>(mtp_resid, yA, (int)m.n_embd);
+        k_rms_norm<<<grid1m, 256, 0, stc>>>(h_out, mtp_resid, mtp_S("blk.64.nextn.shared_head_norm.weight"), (int)m.n_embd, (float)m.eps);
+        if (want_logits) {
+            k_quant_x<<<dim3((unsigned)((m.n_embd / 32 + 127) / 128)), 128, 0, stc>>>(h_out + (size_t)logit_row * m.n_embd, m.n_embd / 32, xq, xs, xsum);
+            launch_mat_q4(mtp_dev + mtp_off.at("output.weight"), m.n_embd, m.n_vocab, xq, xs, xsum, logits, m.n_vocab, stc);
+            check(cudaMemcpyAsync(logits_h.data(), logits, m.n_vocab * 4, cudaMemcpyDeviceToHost, stc), "mtp logits d2h");
+        }
+        check(cudaGetLastError(), "mtp kernel");
+        check(cudaStreamSynchronize(stc), "mtp sync");
+    };
+
     if (speculate > 0) {
         // ---- E041/E042/E043: speculative decoding with PLD drafter ----
         // Lossless greedy speculation: draft tokens from context n-grams (CPU, ~free),
@@ -1582,6 +1714,40 @@ int main(int argc, char** argv) {
             run_token(toks, nb, (int)(base / G), &s, &cold);
         }
         safety("spec-prefill");
+        // E046 fix: sync the MTP block over the ENTIRE prefill. Without this the MTP KV
+        // for positions 0..plen-1 is empty and every draft step at prompt end attends a
+        // sea of zero KV — proposals become garbage (invisible on a 13-token chat prompt,
+        // fatal on a 153-token agent prompt). Row 0's h input is zeros (llama.cpp's
+        // pending_h initialization); rows r>0 take h_tgt[r-1] (the one-position shift).
+        if (mtp_on) {
+            for (size_t pb = 0; pb < hist.size(); pb += (size_t)G) {
+                const long nb = std::min<long>(G, (long)hist.size() - pb);
+                std::vector<long> ptoks(hist.begin() + pb, hist.begin() + pb + nb);
+                if (pb == 0) {
+                    check(cudaMemsetAsync(mtp_hout, 0, (size_t)nb * m.n_embd * 4, stc), "mtp prefill sync zero");
+                    if (nb > 1) check(cudaMemcpyAsync(mtp_hout + m.n_embd, h_tgt_dev, (size_t)(nb - 1) * m.n_embd * 4, cudaMemcpyDeviceToDevice, stc), "mtp prefill sync shift");
+                    mtp_forward(mtp_hout, ptoks, nb, (long)pb, mtp_hout, false, -1);
+                } else {
+                    mtp_forward(h_tgt_dev + (pb - 1) * m.n_embd, ptoks, nb, (long)pb, mtp_hout, false, -1);
+                }
+                // teacher-forced MTP sanity: row r's head argmax should predict the token
+                // after ptoks[r] for most rows — a low rate means the MTP forward is broken
+                if (dbg_dump) {
+                    long tf_ok = 0, tf_n = 0;
+                    for (long r = 0; r + 1 < nb; ++r) {
+                        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 + 127) / 128)), 128, 0, stc>>>(mtp_hout + (size_t)r * m.n_embd, m.n_embd / 32, xq, xs, xsum);
+                        launch_mat_q4(mtp_dev + mtp_off.at("output.weight"), m.n_embd, m.n_vocab, xq, xs, xsum, logits, m.n_vocab, stc);
+                        check(cudaStreamSynchronize(stc), "tf sync");
+                        check(cudaMemcpy(logits_h.data(), logits, m.n_vocab * 4, cudaMemcpyDeviceToHost), "tf d2h");
+                        if (argmax(logits_h.data()) == ptoks[r + 1]) ++tf_ok;
+                        else if (dbg_dump && pb == 0 && r < 6)
+                            printf("dbg,mtftfmiss,r=%ld,pred=%ld,want=%ld\n", r, argmax(logits_h.data()), ptoks[r + 1]);
+                        ++tf_n;
+                    }
+                    printf("dbg,mtp_tf,pb=%zu,ok=%ld,n=%ld\n", pb, tf_ok, tf_n);
+                }
+            }
+        }
         // known_next = argmax of the last computed row: the last prefill chunk had
         // ((size-1) % G) + 1 rows, and its last row predicts the token after the prompt.
         // (The old min(G, size % G) formula yielded row -1 — an OOB read — whenever the
@@ -1591,6 +1757,7 @@ int main(int argc, char** argv) {
         long cycles = 0, tot_emitted = 0, tot_accepted = 0, tot_draft = 0;
         double tot_t = 0;
         bool stop = false;
+        std::vector<long> pending_drafts;   // E046: MTP chain output for the NEXT cycle
         // carry = confirmed-but-unprocessed tokens, at positions cur_pos..cur_pos+L-1.
         // Invariant at cycle start: device SSM/conv state covers positions 0..cur_pos-1
         // and hist/emitted end with carry.back() (= known, the newest confirmed token).
@@ -1600,7 +1767,7 @@ int main(int argc, char** argv) {
         hist.push_back(known); emitted.push_back(known);
         printf("dbg,known=%ld\n", known);
         for (long c = 0; c < gen_tokens * 4 && !stop && tot_emitted < gen_tokens; ++c) {
-            // ---- draft: PLD over history, continues after carry.back() (= hist tail) ----
+            // ---- draft: MTP chain (E046) or PLD over history ----
             std::vector<long> drafts;
             const size_t n0 = hist.size();
             const long L = (long)carry.size();
@@ -1609,6 +1776,9 @@ int main(int argc, char** argv) {
                 for (int t = (int)std::max<size_t>(0, n0 - 6); t < (int)n0; ++t) printf("%ld,", hist[t]);
                 printf("\n");
             }  // KEEP: drafter alignment debugging (E041 known-issues)
+            if (mtp_on) {
+                drafts = pending_drafts;   // produced by the previous cycle's MTP chain
+            } else {
             for (int n = std::min<size_t>(6, n0 - 1); n >= 1 && drafts.empty(); --n) {
                 // j+n < n0-1: exclude the self-match (the pattern's own tail would seed on
                 // itself and propose nothing). The proposal is whatever followed the
@@ -1620,13 +1790,16 @@ int main(int argc, char** argv) {
                     for (int k = 0; k < G - 1 && j + n + k < (long)n0; ++k) drafts.push_back(hist[j + n + k]);
                 }
             }
+            }
             // feed = carry (front rows re-verify confirmed tokens and rebuild state after
-            // any rollback) + drafts seeded after carry.back(); pad with carry.back()
+            // any rollback) + drafts seeded after carry.back(). E045: NO dummy padding —
+            // every padded row cost ~7.4 ms of pass time for a guaranteed-reject position.
+            // The pass width is exactly the rows that can teach us something; with no
+            // drafts this degenerates to a dense-cost step (L rows, L==1 typical).
             std::vector<long> feed(carry);
             feed.insert(feed.end(), drafts.begin(), drafts.end());
-            while (feed.size() < (size_t)G) feed.push_back(known);   // pad dummies (verify confirms)
-            feed.resize(G);                                          // carry alone may fill the pass (L == G)
-            const long Bf = G;
+            if (feed.size() > (size_t)G) feed.resize(G);
+            const long Bf = (long)std::max<size_t>(feed.size(), 1);
             const long base = cur_pos;
             // snapshot recurrent state: delta-net state is cumulative, rejected positions
             // cannot be overwritten — restore on partial accept, then re-feed (~150 MB D2D, ~1 ms)
@@ -1687,6 +1860,45 @@ int main(int argc, char** argv) {
             printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,carry=%ld,seconds=%.4f,tok_per_s_cycle=%.3f,free_vram_MiB=%ld\n",
                    c, (long)drafts.size(), mt, emitted_here, L, s, emitted_here / s, fv);
             if (hit_eos || known == m.eos_id) stop = true;
+            // ---- E046: MTP sync over accepted rows + recursive draft chain ----
+            // Sync: rows 0..mt were confirmed; their MTP KV entries are (h_tgt[pos-1],
+            // token) — h_tgt is contiguous in h_tgt_dev, one D2D covers the shifted input.
+            // Draft: step 0 runs at the correction's position with h = h_tgt of the last
+            // accepted position (llama.cpp pending_h); steps 1+ feed back the MTP's own
+            // output. Drafts fill the NEXT cycle's feed after the carry.
+            if (mtp_on && !stop && tot_emitted < gen_tokens) {
+                const long sb = mt + 1;
+                if (base - 1 >= 0 && base + sb <= ctx)
+                    mtp_forward(h_tgt_dev + (size_t)(base - 1) * m.n_embd,
+                                std::vector<long>(feed.begin(), feed.begin() + sb), sb, base, mtp_hout, false, -1);
+                pending_drafts.clear();
+                float* h_chain = h_tgt_dev + (size_t)(base + mt) * m.n_embd;
+                long tok = known;
+                const long nd_max = std::max<long>(0, G - (mt + 2));
+                for (long k = 0; k < nd_max; ++k) {
+                    const long qpos = base + mt + 1 + k;
+                    if (qpos >= ctx) break;
+                    mtp_forward(h_chain, std::vector<long>{tok}, 1, qpos, mtp_hout2, true, 0);
+                    const long d = argmax(logits_h.data());
+                    if (dbg_dump && c < 30 && k < 2) {
+                        long t1 = 0, t2 = 0, t3 = 0;
+                        for (long j = 1; j < m.n_vocab; ++j) { if (logits_h[j] > logits_h[t1]) { t3 = t2; t2 = t1; t1 = j; } else if (logits_h[j] > logits_h[t2]) { t3 = t2; t2 = j; } else if (logits_h[j] > logits_h[t3]) t3 = j; }
+                        printf("dbg,mtpdraft,c=%ld,k=%ld,pos=%ld,top=%ld:%.3f,%ld:%.3f,%ld:%.3f,tok=%ld\n", c, k, qpos, t1, logits_h[t1], t2, logits_h[t2], t3, logits_h[t3], tok);
+                    }
+                    if (p_min > 0.0) {
+                        double mx = -1e30;
+                        for (long j = 0; j < m.n_vocab; ++j) mx = fmax(mx, (double)logits_h[j]);
+                        double z = 0;
+                        for (long j = 0; j < m.n_vocab; ++j) z += exp((double)logits_h[j] - mx);
+                        const double p = exp((double)logits_h[d] - mx) / z;
+                        if (p < p_min) break;
+                    }
+                    pending_drafts.push_back(d);
+                    if (d == m.eos_id) break;
+                    tok = d;
+                    h_chain = mtp_hout2;
+                }
+            }
         }
         if (show_text) printf("generated_text,%s\n", tok.decode(emitted).c_str());
         printf("spec_summary,cycles=%ld,emitted=%ld,mean_emitted_per_cycle=%.3f,draft_acceptance=%.3f,mean_cycle_s=%.4f,tok_per_s=%.3f,min_free_vram_MiB=%ld\n",
