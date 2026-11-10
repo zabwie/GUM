@@ -850,7 +850,7 @@ static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq,
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    std::string model, prompt, prompt_ids_s, out_ids_path;
+    std::string model, prompt, prompt_ids_s, out_ids_path, expect_ids_path;
     long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1, multi = 0, speculate = 0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0;
     std::string feed_ids_s;
@@ -876,6 +876,7 @@ int main(int argc, char** argv) {
         else if (k == "--dbg-dump") dbg_dump = atoi(v);
         else if (k == "--verify-hot") verify_hot = atoi(v);
         else if (k == "--out-ids") out_ids_path = v;
+        else if (k == "--expect-ids") expect_ids_path = v;
     }
     if (model.empty()) { fprintf(stderr, "need --model\n"); return 2; }
     if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
@@ -1266,7 +1267,11 @@ int main(int argc, char** argv) {
                 if (fail.load()) return;
                 const int b = (int)(k % kStage);
                 if (it.tier == kStaged && cached[idx]) {
-                    memcpy(stage[b] + it.head, staged_cache + it.res_off, it.bytes);
+                    // E043 fix: pinned-head items live in pinned_cache, NOT staged_cache —
+                    // the old unconditional staged_cache read returned never-written bytes
+                    // for them. Only triggered on a pass-0 re-entry with populated caches
+                    // (spec cycle 0): pass>=1 reads pinned items via direct_pin instead.
+                    memcpy(stage[b] + it.head, (in_pin ? pinned_cache : staged_cache) + it.res_off, it.bytes);
                 } else {
                     const ssize_t got = pread(fd, stage[b], it.read_len, (off_t)it.aligned_off);
                     if (got < (ssize_t)(it.head + it.bytes)) { fprintf(stderr, "pread %zd < %llu\n", got, (unsigned long long)(it.head + it.bytes)); fail = true; return; }
@@ -1493,6 +1498,8 @@ int main(int argc, char** argv) {
         // set streams ONCE per step; every position is "accepted" by construction, so
         // B / T_step is the zero-draft-cost upper bound on speculative throughput.
         std::vector<long> seq = prompts[0];
+        const long plen0 = (long)prompts[0].size();   // teacher-forced argmax checks are
+                                                      // only valid past the prompt
         seq.insert(seq.end(), feed.begin(), feed.end());
         const long Bp = batch;
         if ((long)seq.size() % Bp) seq.resize(seq.size() / Bp * Bp);
@@ -1504,20 +1511,26 @@ int main(int argc, char** argv) {
             std::vector<long> toks(seq.begin() + base, seq.begin() + base + Bp);
             double s; uint64_t cold;
             run_token(toks, Bp, (int)(base / Bp), &s, &cold);
-            // teacher-forced check: row p's argmax should predict seq[base+p+1]
-            for (long p = 0; p < Bp && base + Bp + p < seq.size(); ++p) {
+            // teacher-forced check: row p's argmax should predict seq[base+p+1] — but ONLY
+            // where seq[base+p+1] is the model's own greedy output (position >= prompt
+            // length); inside the prompt the true next token is not the argmax.
+            // E043 fix: the old check compared against seq[base+Bp+p] (wrong index) AND
+            // computed gap = lg[expected] - lg[pred], which is <= 0 for an argmax pred —
+            // every mismatch was excused as a tie, making the whole soft check vacuous.
+            for (long p = 0; p < Bp && base + p + 1 < (long)seq.size(); ++p) {
+                if (base + p + 1 < plen0) continue;   // prompt region: argmax not guaranteed
                 const long pred = argmax(&logits_h[(size_t)p * m.n_vocab]);
-                if (dbg_dump && base == 0) printf("dbg,e040row,%ld,pred=%ld\n", p, pred);
+                if (dbg_dump) printf("dbg,e040row,step=%zu,row=%ld,pred=%ld,want=%ld\n", base / Bp, p, pred, seq[base + p + 1]);
                 ++soft_checked;
                 float rowmax = 0.f;
                 for (long j = 0; j < m.n_vocab; ++j) rowmax = fmaxf(rowmax, fabsf(logits_h[(size_t)p * m.n_vocab + j]));
                 if (rowmax < 1e-2f) { ++soft_mism; fprintf(stderr, "VERIFY GARBAGE row %ld (all-zero logits)\n", p); continue; }
-                if (pred != seq[base + Bp + p]) {
+                if (pred != seq[base + p + 1]) {
                     const float* lg = &logits_h[(size_t)p * m.n_vocab];
-                    const double gap = lg[seq[base + Bp + p]] - lg[pred];
+                    const double gap = fabs((double)lg[seq[base + p + 1]] - (double)lg[pred]);
                     if (gap > 0.25) { ++soft_mism; fprintf(stderr, "VERIFY MISMATCH step %zu row %ld: pred=%ld(%s) want=%ld(%s) gap=%.4f\n",
                         base / Bp, p, pred, pred < (long)tok.vocab.size() ? tok.vocab[pred].c_str() : "?",
-                        seq[base + Bp + p], seq[base + Bp + p] < (long)tok.vocab.size() ? tok.vocab[seq[base + Bp + p]].c_str() : "?", gap); }
+                        seq[base + p + 1], seq[base + p + 1] < (long)tok.vocab.size() ? tok.vocab[seq[base + p + 1]].c_str() : "?", gap); }
                 }
             }
             const long fv = free_vram_mib();
@@ -1536,10 +1549,23 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (speculate > 0) {
-        // ---- E041/E042: speculative decoding with PLD drafter ----
-        // Lossless greedy speculation: draft γ-1 tokens from context n-grams (CPU, ~free),
-        // verify all γ positions in one cold-set pass, accept the longest target-confirmed
+        // ---- E041/E042/E043: speculative decoding with PLD drafter ----
+        // Lossless greedy speculation: draft tokens from context n-grams (CPU, ~free),
+        // verify all G positions in one cold-set pass, accept the longest target-confirmed
         // prefix, emit the target's correction token. Output = exact greedy target decode.
+        //
+        // E043 (known-issues #1 fix — the acceptance killer): the old loop carried ONE
+        // token and on a partial accept restored the pre-cycle SSM snapshot. That snapshot
+        // covers positions 0..base-1, but verify rows 0..mt had processed the carried token
+        // AND the accepted drafts — cumulative delta-net/conv updates the restore discards,
+        // while cur_pos = base+mt+1 never reprocessed them. From the first partial accept
+        // the recurrent state diverged from the true greedy decode: logits drifted,
+        // known_next disagreed with the history tail, acceptance capped at ~30%, and the
+        // output stopped being lossless — all silently. Fix = re-feed: a carry buffer
+        // holds ALL confirmed-but-unprocessed tokens; after a rollback they are reprocessed
+        // as the front rows of the next pass. The recomputation is deterministic (same
+        // tokens, same order, same kernels, state restored bit-exact), so it rebuilds the
+        // recurrent state exactly AND re-verifies the carry for free within the same pass.
         const long G = speculate;
         std::vector<long> hist = prompts[0];
         std::vector<long> emitted;
@@ -1550,31 +1576,31 @@ int main(int argc, char** argv) {
             double s; uint64_t cold;
             run_token(toks, nb, (int)(base / G), &s, &cold);
         }
-        // prefill must land on a chunk boundary for cur_pos to be exact; pad the prompt
-        // to a multiple of G by trimming... handled below by requiring alignment
         safety("spec-prefill");
-        // known_next = argmax of the LAST computed row
-        long known = argmax(&logits_h[((long)hist.size() - 1 - ((long)hist.size() / G * G >= (long)hist.size() ? G : 0)) * 0]) ; // placeholder
-        // simpler: recompute from the last processed row = hist.size()-1 position if aligned
-        {
-            const long last_row = (long)hist.size() - 1 - (long)hist.size() / G * G;
-            const long rows_last = std::min<long>(G, (long)hist.size() - (long)hist.size() / G * G);
-            known = argmax(&logits_h[(rows_last - 1) * m.n_vocab]);
-            (void)last_row;
-        }
+        // known_next = argmax of the last computed row: the last prefill chunk had
+        // ((size-1) % G) + 1 rows, and its last row predicts the token after the prompt.
+        // (The old min(G, size % G) formula yielded row -1 — an OOB read — whenever the
+        // prompt length was a multiple of G.)
+        const long rows_last = (long)((hist.size() - 1) % (size_t)G) + 1;
+        long known = argmax(&logits_h[(rows_last - 1) * m.n_vocab]);
         long cycles = 0, tot_emitted = 0, tot_accepted = 0, tot_draft = 0;
         double tot_t = 0;
         bool stop = false;
+        // carry = confirmed-but-unprocessed tokens, at positions cur_pos..cur_pos+L-1.
+        // Invariant at cycle start: device SSM/conv state covers positions 0..cur_pos-1
+        // and hist/emitted end with carry.back() (= known, the newest confirmed token).
+        std::vector<long> carry = { known };
         // the prefill's known_next is the confirmed token after the prompt — emit it now;
-        // every later cycle's feed[0] is the previous cycle's already-emitted correction
+        // every later cycle's carry front is previous cycles' already-emitted tokens
         hist.push_back(known); emitted.push_back(known);
         printf("dbg,known=%ld\n", known);
         for (long c = 0; c < gen_tokens * 4 && !stop && tot_emitted < gen_tokens; ++c) {
-            // ---- draft: PLD over history, seeds with known_next ----
+            // ---- draft: PLD over history, continues after carry.back() (= hist tail) ----
             std::vector<long> drafts;
             const size_t n0 = hist.size();
+            const long L = (long)carry.size();
             if (dbg_dump && c < 30) {
-                printf("dbg,draft,n0=%zu,known=%ld,tail=", n0, known);
+                printf("dbg,draft,n0=%zu,L=%ld,known=%ld,tail=", n0, L, known);
                 for (int t = (int)std::max<size_t>(0, n0 - 6); t < (int)n0; ++t) printf("%ld,", hist[t]);
                 printf("\n");
             }  // KEEP: drafter alignment debugging (E041 known-issues)
@@ -1589,13 +1615,16 @@ int main(int argc, char** argv) {
                     for (int k = 0; k < G - 1 && j + n + k < (long)n0; ++k) drafts.push_back(hist[j + n + k]);
                 }
             }
-            std::vector<long> feed = {known};
+            // feed = carry (front rows re-verify confirmed tokens and rebuild state after
+            // any rollback) + drafts seeded after carry.back(); pad with carry.back()
+            std::vector<long> feed(carry);
             feed.insert(feed.end(), drafts.begin(), drafts.end());
-            while (feed.size() < (size_t)G) feed.push_back(known);   // pad dummies (guaranteed mismatch)
+            while (feed.size() < (size_t)G) feed.push_back(known);   // pad dummies (verify confirms)
+            feed.resize(G);                                          // carry alone may fill the pass (L == G)
             const long Bf = G;
             const long base = cur_pos;
             // snapshot recurrent state: delta-net state is cumulative, rejected positions
-            // cannot be overwritten — restore on partial accept (~150 MB D2D, ~1 ms)
+            // cannot be overwritten — restore on partial accept, then re-feed (~150 MB D2D, ~1 ms)
             if (m.n_recr) {
                 check(cudaMemcpy(ssm_snap, ssm_dev, ssm_bytes, cudaMemcpyDeviceToDevice), "ssm snap cp");
                 check(cudaMemcpy(conv_snap, conv_dev, conv_bytes, cudaMemcpyDeviceToDevice), "conv snap cp");
@@ -1605,34 +1634,43 @@ int main(int argc, char** argv) {
             // row argmaxes
             std::vector<long> ra(Bf);
             for (long r = 0; r < Bf; ++r) ra[r] = argmax(&logits_h[(size_t)r * m.n_vocab]);
-            // count matched comparisons: row r confirms feed[r+1]
+            // longest confirmed prefix: row r confirms feed[r+1]
             long mt = 0;
             while (mt < Bf - 1 && ra[mt] == feed[mt + 1]) ++mt;
+            // rows 0..L-2 re-verify already-confirmed carry tokens — deterministic
+            // recomputation, guaranteed to match. Clamp so no anomaly can ever truncate
+            // carry: ra[L-1] is the target's own argmax after the confirmed token
+            // feed[L-1], so treating row L-1 as confirmed is lossless regardless.
+            if (mt < L - 1) mt = L - 1;
             long emitted_here;
             if (mt == Bf - 1) {
-                // full match: feed[1..Bf-1] confirmed; correction ra[Bf-1] new.
-                // feed[0] is the carried known — already emitted last cycle (or prefill).
-                for (long r = 1; r < Bf; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
+                // full match: every fed position confirmed; the post-pass state covers them
+                // all. carry rows were emitted earlier; drafts feed[L..Bf-1] confirmed now.
+                for (long r = L; r < Bf; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
                 known = ra[Bf - 1];
                 hist.push_back(known); emitted.push_back(known);
-                emitted_here = Bf;               // NEW tokens: feed[1..Bf-1] + correction
-                // cur_pos advanced by Bf; known's KV computed next cycle as feed[0]
-                tot_accepted += Bf - 1;
+                emitted_here = Bf - L + 1;       // NEW tokens: drafts feed[L..Bf-1] + correction
+                // cur_pos advanced by Bf (run_token); state covers the whole pass
+                carry.assign(1, known);
+                tot_accepted += Bf - L;
             } else {
-                // feed[1..mt] confirmed; feed[mt+1] rejected — roll back recurrent state,
-                // correction ra[mt] emitted now, its KV computed next cycle as feed[0]
+                // feed[L..mt] confirmed, feed[mt+1] rejected — roll back recurrent state;
+                // rows 0..mt (carry + accepted drafts) and the correction ra[mt] re-feed
+                // next cycle, rebuilding the state exactly
                 if (m.n_recr) {
                     check(cudaMemcpy(ssm_dev, ssm_snap, ssm_bytes, cudaMemcpyDeviceToDevice), "ssm rollback");
                     check(cudaMemcpy(conv_dev, conv_snap, conv_bytes, cudaMemcpyDeviceToDevice), "conv rollback");
                 }
-                for (long r = 1; r <= mt; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
+                for (long r = L; r <= mt; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
                 known = ra[mt];
                 hist.push_back(known); emitted.push_back(known);
-                emitted_here = mt + 1;           // NEW tokens: feed[1..mt] + correction (feed[0] was emitted earlier)
-                cur_pos = base + mt + 1;         // correction's position: computed next cycle
-                tot_accepted += mt;
+                emitted_here = mt - L + 2;       // NEW tokens: drafts feed[L..mt] + correction
+                cur_pos = base;                  // rewound: carry re-feeds from base next cycle
+                carry.assign(feed.begin(), feed.begin() + mt + 1);
+                carry.push_back(known);
+                tot_accepted += mt - L + 1;
             }
-            tot_draft += G - 1;
+            tot_draft += Bf - L;
             tot_emitted += emitted_here;
             tot_t += s;
             ++cycles;
@@ -1641,8 +1679,8 @@ int main(int argc, char** argv) {
             safety("spec");
             bool hit_eos = false;
             for (long r = emitted.size() - emitted_here; r < (long)emitted.size(); ++r) if (emitted[r] == m.eos_id) hit_eos = true;
-            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,seconds=%.4f,tok_per_s_cycle=%.3f,free_vram_MiB=%ld\n",
-                   c, (long)drafts.size(), mt, emitted_here, s, emitted_here / s, fv);
+            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,carry=%ld,seconds=%.4f,tok_per_s_cycle=%.3f,free_vram_MiB=%ld\n",
+                   c, (long)drafts.size(), mt, emitted_here, L, s, emitted_here / s, fv);
             if (hit_eos || known == m.eos_id) stop = true;
         }
         if (show_text) printf("generated_text,%s\n", tok.decode(emitted).c_str());
@@ -1652,6 +1690,27 @@ int main(int argc, char** argv) {
         if (out_ids_path.size()) {
             FILE* f = fopen(out_ids_path.c_str(), "w");
             if (f) { for (long id : emitted) fprintf(f, "%ld\n", id); fclose(f); }
+        }
+        // --expect-ids: lossless gate — diff the speculative stream against a dense greedy
+        // reference saved with --out-ids (same prompt, same --gen-tokens). Exit 1 on drift.
+        if (expect_ids_path.size()) {
+            std::vector<long> expect;
+            if (FILE* f = fopen(expect_ids_path.c_str(), "r")) {
+                long id; while (fscanf(f, "%ld", &id) == 1) expect.push_back(id);
+                fclose(f);
+            } else { fprintf(stderr, "cannot open --expect-ids %s\n", expect_ids_path.c_str()); return 2; }
+            const size_t ncmp = std::min(expect.size(), emitted.size());
+            size_t bad = ncmp, bad_at = 0;
+            for (size_t i = 0; i < ncmp; ++i) if (expect[i] != emitted[i]) { bad_at = i; --bad; break; }
+            const bool clean = bad == ncmp;   // no mismatch in the compared prefix; a longer
+                                              // emitted tail is the expected gen_tokens overshoot
+            printf("spec_lossless,expected=%zu,emitted=%zu,compared=%zu,mismatches=%zu,first_mismatch=%zu,match=%s\n",
+                   expect.size(), emitted.size(), ncmp, ncmp - bad, bad == ncmp ? 0 : bad_at,
+                   clean ? "yes" : "no");
+            if (!clean) {
+                fprintf(stderr, "LOSSLESS VIOLATION: speculative stream diverges from dense greedy reference\n");
+                return 1;
+            }
         }
         return 0;
     }

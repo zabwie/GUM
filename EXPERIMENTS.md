@@ -485,3 +485,69 @@ single-user latency; single-stream remains ~3.4 tok/s and is PCIe-bound. All bat
 here are replicated for equivalence; diverse prompts are supported (equal lengths) and expected
 to show the same throughput. Raw: results/e039-real-decode-27b-batch8*.txt,
 results/e039-real-decode-27b-batch4-*.txt.
+
+## E043 — the acceptance killer: two silent correctness bugs in the speculative loop (2026-11-10)
+
+**Question.** HANDOFF known-issue #1: PLD acceptance capped at 28–33% where a periodic stream
+should accept ~100%; `known` drifted from the history tail. Find and fix the alignment drift.
+
+**What was actually wrong — two independent bugs, both silent:**
+
+1. **Rollback discarded accepted rows' recurrent state (issue #1, the designed-in bug).**
+   On a partial accept the code restored the SSM/conv snapshot taken *before* the verify
+   pass. The snapshot covers positions 0..base-1, but verify rows 0..mt had processed the
+   carried token AND the accepted drafts — cumulative gated-delta-net/conv updates the
+   restore throws away, while `cur_pos = base+mt+1` never reprocessed them. From the first
+   partial accept, 48/64 layers ran on a state missing the accepted positions' contributions:
+   logits drifted, `known` diverged from the history tail, acceptance collapsed, and — worse —
+   the emitted stream silently stopped being the greedy decode. The old "7.26 tok/s chat at
+   33% acceptance" was measured on this corrupted stream (the drift made the model echo its
+   own repeats, which the n-gram drafter then "predicted"). **Fix = re-feed carry:** a carry
+   buffer holds all confirmed-but-unprocessed tokens; after a rollback they are reprocessed
+   as the front rows of the next pass — deterministic recomputation (same tokens, order,
+   kernels, bit-exact restored state) rebuilds the state exactly and re-verifies the carry
+   inside the same pass. `dbg` logits traces confirm cycles 1+ recompute identical positions
+   to the correct values.
+
+2. **Pinned-cache read-back aliasing (found because the fix exposed it; pre-existing).**
+   The reader's cached-copy branch did `memcpy(stage, staged_cache + it.res_off, bytes)` for
+   *all* cached staged-tier items — but pinned-head items' bytes live in `pinned_cache`, and
+   the `[0, pin_bytes)` region of `staged_cache` is never written. This branch only executes
+   on a **pass-0 re-entry with populated caches** — a code path only speculative decoding
+   reaches (spec cycle 0; dense/multi never re-enter pass 0). Every cycle-0 pass therefore
+   computed on garbage weights for the pinned band (~3.6 GiB). Detection signature: cycle 0
+   produced correct argmax at the tuned 13-token operating point but with *different logits*
+   (23.69 vs 26.90 warm) — it flipped the argmax on every other config/prompt tried
+   (6144/4608, 6656/5120, 6144/6144, γ=16, 153-token agent prompt). The old "hist[n0-1]=271"
+   dbg observation was this bug plus bug 1 compounding. **Fix = one line:** read
+   `(in_pin ? pinned_cache : staged_cache) + it.res_off`.
+
+3. **E040's teacher-forced soft check was vacuous (pre-existing).** It compared row p's argmax
+   against `seq[base+Bp+p]` (wrong index — comment said base+p+1) and computed
+   `gap = lg[expected] - lg[pred]`, which is ≤ 0 for an argmax — every mismatch was excused as
+   a tie. The multi-position math itself is CORRECT (dense per-position argmaxes match verify
+   rows exactly); only the check was dead. Fixed: correct index, absolute gap, and skip
+   prompt-region rows (teacher forcing does not imply argmax inside the prompt — the earlier
+   "step-0 garbage" scare was this distinction, not a bug).
+
+**New tooling.** `--expect-ids <file>`: lossless gate — diffs the speculative stream against a
+dense greedy reference saved with `--out-ids` (same prompt, --gen-tokens); exit 1 on drift.
+This is the correctness gate the spec loop never had.
+
+**Validation (all `spec_lossless ... match=yes`, zero mismatches):** 27B chat prompt γ=8 at
+7424/6144, 6144/4608, 6656/5120, 6144/6144; γ=16 at 6144/4608 (deep γ now lossless — it
+previously needed the low-hot configs that bug 2 corrupted); 153-token agent trace γ=8; 0.6B
+γ=8 32/32. Dense streams are config-independent (7424 vs 6144 identical), multi-verify shows
+0 real mismatches at both configs.
+
+**Honest re-measurement (27B, single-user, lossless, hot 7424):** chat γ=8: 2.46 tok/s, 3.8%
+draft acceptance. Agent-shaped trace (synthetic tool-call JSON, results/e043-agent-prompt.txt)
+γ=8: 3.63 tok/s, 14.8% acceptance; γ=16: 1.91 tok/s, 7.6%. Dense reference: 2.81 tok/s.
+
+**Interpretation.** The known-issues list predicted the fix would unlock acceptance; it did
+not, because the drift itself was *inflating* the old numbers (corrupted state → predictable
+echoes). With correct state, PLD drafting quality is the bottleneck: the drafter rarely
+proposes what a greedy 27B actually continues with on these traces, and deep γ amortizes a
+pass over mostly-rejected rows. The verify machinery (one-pass multi-position, state
+rollback, re-feed) is now correct and gated; the next lever is drafter quality (adaptive-γ,
+RESEARCH_PLAN), not verification depth. Raw: results/e043-*.

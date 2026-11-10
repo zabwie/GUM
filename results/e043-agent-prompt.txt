@@ -1,0 +1,9 @@
+System: You are a coding agent. Use tools for every file operation.
+User: audit the src directory
+Assistant: <tool_call>{"name": "list_files", "arguments": {"path": "src"}}</tool_call>
+<tool_result>main.rs
+util.rs
+parse.rs</tool_result>
+<tool_call>{"name": "read_file", "arguments": {"path": "src/main.rs"}}</tool_call>
+<tool_result>fn main() { parse(); }</tool_result>
+<tool_call>{"name": "read_file", "arguments": {"path": "src/parse.rs"}}</tool_call>

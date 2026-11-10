@@ -1,8 +1,8 @@
-# Vanta — Session Handoff (2026-11-10, post E042)
+# Vanta — Session Handoff (2026-11-10, post E043)
 
-Repo: `/home/zabwie/gpu-unified-memory-research` (git; latest `a84c0e8`). Read AGENT.md first
-for the operating mentality. RESEARCH_PLAN.md is the strategy; EXPERIMENTS.md the evidence;
-this file is the machine state and the immediate next moves.
+Repo: `/home/zabwie/gpu-unified-memory-research` (git; latest see `git log -1`). Read AGENT.md
+first for the operating mentality. RESEARCH_PLAN.md is the strategy; EXPERIMENTS.md the
+evidence; this file is the machine state and the immediate next moves.
 
 ## Mission
 
@@ -35,48 +35,63 @@ RAM/swap floors.
   cold-set pass. MEASURED (corrected, honest): 0.350 s (1 pos) → 0.430 s (8 pos), ~7.4
   ms/position marginal, 18.6 tok/s zero-draft bound at 8. 0.6B: 690 tok/s all-hot.
 - **Speculative loop** (`--speculate γ`): PLD drafter (CPU n-grams, ~free) → one verify pass →
-  accept prefix → correction. Lossless (greedy rejection sampling). **27B chat: 7.26 tok/s
-  (2.3× dense).** SSM/conv state snapshot-rollback (~150 MB D2D/cycle) — REQUIRED because
-  rejected positions corrupt the cumulative delta-net state (KV alone is not enough; this is
-  a genuine contribution for hybrid models).
+  accept prefix → correction. Lossless (greedy rejection sampling) — **now gated**:
+  `--expect-ids <file>` diffs the spec stream against a dense `--out-ids` reference and exits 1
+  on drift. After E043's two bug fixes the loop is proven lossless at γ=8 and γ=16 across
+  four residency configs and two prompts (27B + 0.6B). SSM/conv snapshot-rollback + re-feed
+  carry (~150 MB D2D/cycle) — REQUIRED because rejected positions corrupt the cumulative
+  delta-net state (KV alone is not enough; this is a genuine contribution for hybrid models).
 - **CPU fp32 reference decoder** (`--validate 1`) for correctness gates (0.6B-scale models).
 
-## Performance ledger (27B, single-user, lossless)
+## Performance ledger (27B, single-user, lossless — honest, post E043)
 
 | path | tok/s | vs dense |
 |---|---|---|
 | dense (E038) | 3.39 | 1× |
-| spec chat (E041, PLD 33% accept) | 7.26 | 2.3× |
-| spec, agent-shaped repeat (28% accept — KNOWN BUG caps it) | 6.8 | 2× |
+| dense, 13-token chat prompt (E043 re-measure) | 2.81 | — |
+| spec chat γ=8 (E043, 3.8% accept) | 2.46 | 0.9× |
+| spec agent-trace γ=8 (E043, 14.8% accept) | 3.63 | 1.3× |
+| spec agent-trace γ=16 (E043, 7.6% accept) | 1.91 | 0.7× |
 | verify bound at 8 positions (E040 measured) | 18.6 | — |
 | verify bound deep γ=32 (E040 curve extrapolation) | ~50 | — |
+
+**⚠ The old "7.26 tok/s chat at 33% acceptance" was measured on a corrupted stream** (E043
+bug 1: the state divergence made the model echo its own repeats, which the n-gram drafter
+then "predicted"). With correct state, PLD drafting quality — not verification — is the
+bottleneck. The verify machinery is now correct and gated; the upside is in drafter quality
+(adaptive-γ, RESEARCH_PLAN).
 
 ## THE HEADLINE OPPORTUNITY (owner's insight)
 
 **Agent tool-wrapping is predictable.** Tool-call JSON schemas, fences, keys, echoed context
 — the scaffolding around an agent's text is fixed or repeats from history. The model only
-generates the novel middle. So: deep-γ PLD drafting (16–32 positions, ~0.1 ms/token draft
-cost) verified in one cold-set pass → in-span bursts of 50–90 tok/s, sustained agent sessions
-~20–30 tok/s, lossless. E040's measured +7.4 ms/position makes deep verification nearly free;
-the ONLY thing between us and this is the alignment bug below.
+generates the novel middle. So: deep-γ drafting (16–32 positions, ~0.1 ms/token draft cost)
+verified in one cold-set pass → in-span bursts. E040's measured +7.4 ms/position makes deep
+verification nearly free, and E043 made it correct and gated. What stands between us and the
+burst numbers is now purely **drafter quality** (issue 2): the verify side is solved.
 
 ## KNOWN ISSUES — fix these first (next session)
 
-1. **E041 known/hist alignment drift (the acceptance killer).** The carried `known_next`
-   occasionally disagrees with the history tail (dbg showed known=244 while hist[n0-1]=271 in
-   a periodic stream), capping acceptance at 28-33% where the periodic stream should accept
-   ~100%. Debug hooks exist: `--dbg-dump 1` prints `dbg,draft` lines (hist tail + known per
-   cycle) and `dbg,e040row` (per-row verify argmaxes). Suspects: the prefill-chunk boundary
-   (13-token prompt, chunks of 8+5 — the last partial chunk's row indexing), the rewind
-   bookkeeping after partial accept, or hist/feed[0] duplication. Do NOT touch the emission
-   accounting — it was painful to get right (see the off-by-one saga in EXPERIMENTS.md).
-2. **Deep γ untested.** Buffers already scale; run --speculate 16/32 on an agent-shaped trace
-   (tool-call JSON + echoes). Watch VRAM (states don't scale with γ, activations do — small).
-3. **MTP head drafter (E041a) not integrated.** 1.68 GiB, fits in VRAM beside hot 7.25;
-   measured 2.84 tokens/verify on this model (E036). Requires decoding the qwen35 nextn block
-   (eh_proj/enorm/hnorm + dense block, own small KV) — the main graph machinery is reusable.
+1. ~~E041 known/hist alignment drift~~ **FIXED in E043 — it was two bugs**: (a) the partial-
+   accept rollback discarded accepted rows' cumulative SSM/conv updates → re-feed carry fix;
+   (b) the reader's cached-copy branch read `staged_cache` for pinned-head items whose bytes
+   live in `pinned_cache` → garbage weights on any pass-0 re-entry (spec cycle 0 only; dense
+   and multi never re-enter pass 0, which is why E038/E040 never saw it). One-line fix in
+   `benchmarks/real_decode.cu` (reader memcpy source: `(in_pin ? pinned_cache :
+   staged_cache) + it.res_off`). Full story + validation matrix: EXPERIMENTS.md E043.
+2. **Drafter quality is the bottleneck (supersedes "deep γ untested").** Deep γ is now
+   lossless (γ=16 validated), but PLD acceptance on honest greedy output is 3.8% (chat) /
+   14.8% (agent trace) at γ=8 and *drops* at γ=16 — the drafter rarely proposes the true
+   continuation, so deep passes amortize over rejects. Next lever: adaptive-γ / better
+   draft selection (RESEARCH_PLAN deep-γ section), measured with `--expect-ids` ALWAYS ON.
+3. **MTP head drafter (E041a) not integrated.** 1.68 GiB, fits in VRAM beside hot 7.25
+   (γ=8); at γ=16 use hot ~6144. Measured 2.84 tokens/verify on this model (E036). Requires
+   decoding the qwen35 nextn block (eh_proj/enorm/hnorm + dense block, own small KV).
 4. **Summary metric bug**: verify mode's `cold_GiB_per_step` prints the TOTAL over all steps
    (incl. the warm-up); per-step cold = 6.17 GiB at hot 7424. Cosmetic.
+5. **E040 soft-check regression risk**: the fixed check now skips prompt-region rows and uses
+   an absolute gap — keep it honest (the old inverted-gap version excused everything, which
+   is how bug-class "tie-excused validation vacuity" hid for two sessions).
 
 ## Bug classes to check in ANY new batched/multi kernel
 
@@ -91,21 +106,32 @@ the ONLY thing between us and this is the alignment bug below.
 - **Stream discipline**: KV appends and anything reading kernel output belong on the compute
   stream (stc). Copy stream (st) is for weight staging only.
 - **SSM rollback**: any speculative scheme on hybrid models MUST snapshot/restore the
-  delta-net + conv state per cycle. KV overwrite is not sufficient.
+  delta-net + conv state per cycle. KV overwrite is not sufficient. AND the rollback discards
+  the accepted rows' own updates — re-feed them as the next pass's front rows (E043).
+- **Cached-copy buffer aliasing**: the RAM cache is one logical region backed by TWO host
+  buffers (pinned head + pageable tail); every read-back must select by `in_pin`, not
+  hard-code one. The bug fires only on a pass-0 re-entry with populated caches — a path
+  dense/multi never take (E043 bug 2).
+- **Vacuous tie-excused checks**: `gap = lg[expected] - lg[argmax]` is ≤ 0 by construction —
+  every mismatch becomes an excused "tie". Compute the absolute gap. Also: teacher-forced
+  checks are only valid where the sequence is the model's own output — skip prompt rows.
 
 ## Reproduce the headline numbers
 
 ```
 CUDA=/usr/local/cuda/bin
 $CUDA/nvcc -O2 -std=c++17 -arch=sm_86 -lpthread benchmarks/real_decode.cu -o benchmarks/real_decode
-# dense single-user (3.4 tok/s):
-taskset -c 0-3 benchmarks/real_decode --model /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf \
-  --prompt-ids "248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198" \
-  --gen-tokens 16 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4
-# speculative (7.3 tok/s chat; expect more on repetitive/agent text once issue 1 is fixed):
-taskset -c 0-3 benchmarks/real_decode --model /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf \
-  --prompt-ids "248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198" \
-  --speculate 8 --gen-tokens 32 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4
+M=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf
+IDS="248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198"
+# dense single-user (2.8 tok/s on this prompt) + reference ids for the lossless gate:
+taskset -c 0-3 benchmarks/real_decode --model $M --prompt-ids "$IDS" \
+  --gen-tokens 32 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4 --show-text 0 \
+  --out-ids /tmp/expect27.txt
+# speculative, LOSSLESS-GATED (exit 1 on any drift — always run with --expect-ids):
+taskset -c 0-3 benchmarks/real_decode --model $M --prompt-ids "$IDS" \
+  --speculate 8 --gen-tokens 32 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4 \
+  --show-text 0 --expect-ids /tmp/expect27.txt
+# agent-shaped trace (results/e043-agent-prompt.txt): dense reference first, then --speculate 8
 # verify ceiling (E040):
 ... --multi 8 --feed-ids "$(paste -sd, /tmp/feed27.txt)"
 ```
@@ -120,5 +146,8 @@ E001-E030: memory mechanics (mapped/managed/VMM/tiered pool). E031: streamed pro
 E032-E034: overlap + dp4a + batching → 43.8 agg. E035-E037: IOMMU removal → 2× bandwidth.
 E036: real llama.cpp MTP baseline (1.04 t/s, thrashing diagnosis). E038: real decode loop,
 3.39 tok/s, llama.cpp-validated. E039: batched decode, 13.17 agg, RMW-race class discovered.
-E040: verify ceiling measured (corrected). E041/E042: speculative loop, 7.26 tok/s chat,
-SSM-rollback contribution. Full detail: EXPERIMENTS.md.
+E040: verify ceiling measured (corrected). E041/E042: speculative loop (7.26 tok/s claim —
+RETRACTED in E043, measured on a corrupted stream). E043: two silent correctness bugs fixed
+(SSM-rollback re-feed carry + pinned-cache aliasing), E040 soft check un-vacuumed,
+`--expect-ids` lossless gate added; loop now proven lossless γ=8/16 × 4 configs. Full detail:
+EXPERIMENTS.md.
