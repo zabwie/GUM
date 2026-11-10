@@ -258,6 +258,7 @@ static const GTensor* gt(const Model& m, const char* fmt, long il, char* buf, si
 // ---------------------------------------------------------------------------
 // GPU kernels
 // ---------------------------------------------------------------------------
+// quantize NB activation vectors: x [NB][K], xq [NB][K], xs/xsum [NB][K/32]
 __global__ void k_quant_x(const float* x, long nb, int8_t* xq, float* xs, int* xsum) {
     long b = (long)blockIdx.x * blockDim.x + threadIdx.x; if (b >= nb) return;
     float amax = 0.f; for (int i = 0; i < 32; ++i) amax = fmaxf(amax, fabsf(x[b * 32 + i]));
@@ -265,14 +266,18 @@ __global__ void k_quant_x(const float* x, long nb, int8_t* xq, float* xs, int* x
     for (int i = 0; i < 32; ++i) { int q = __float2int_rn(x[b * 32 + i] * id); xq[b * 32 + i] = (int8_t)q; s += q; }
     xs[b] = d; xsum[b] = s;
 }
-// y[row] = dot(W_row, xq) — identical math to streamed_decode gemv_q4 (dp4a, NB=1)
-__global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const float* xs, const int* xsum, float* y) {
+// y[v*stride + row] = dot(W_row, xq_v) — NB decode vectors share one weight read;
+// identical math to streamed_decode gemv_q4 (dp4a, E033/E034)
+template <int NB>
+__global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const float* xs, const int* xsum, float* y, long ystride) {
     const int lane = threadIdx.x & 31;
     const long row = (long)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
     if (row >= rows) return;
     const long nb = K / 32; const size_t rowbytes = (size_t)nb * 18;
     const uint8_t* r = w + (size_t)row * rowbytes;
-    float acc = 0.f;
+    float acc[NB];
+#pragma unroll
+    for (int v = 0; v < NB; ++v) acc[v] = 0.f;
     for (long b = lane; b < nb; b += 32) {
         const uint16_t* blk = (const uint16_t*)(r + (size_t)b * 18);
         const float d = __half2float(__ushort_as_half(blk[0]));
@@ -281,17 +286,27 @@ __global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, 
         for (int j = 0; j < 4; ++j) q[j] = (uint32_t)blk[1 + 2 * j] | ((uint32_t)blk[2 + 2 * j] << 16);
         const uint32_t lo0 = q[0] & 0x0F0F0F0Fu, lo1 = q[1] & 0x0F0F0F0Fu, lo2 = q[2] & 0x0F0F0F0Fu, lo3 = q[3] & 0x0F0F0F0Fu;
         const uint32_t hi0 = (q[0] >> 4) & 0x0F0F0F0Fu, hi1 = (q[1] >> 4) & 0x0F0F0F0Fu, hi2 = (q[2] >> 4) & 0x0F0F0F0Fu, hi3 = (q[3] >> 4) & 0x0F0F0F0Fu;
-        const int4* xp = (const int4*)(xq + b * 32);
-        const int4 xa = xp[0], xb = xp[1];
-        int s = 0;
-        s = __dp4a((int)lo0, xa.x, s); s = __dp4a((int)lo1, xa.y, s); s = __dp4a((int)lo2, xa.z, s); s = __dp4a((int)lo3, xa.w, s);
-        s = __dp4a((int)hi0, xb.x, s); s = __dp4a((int)hi1, xb.y, s); s = __dp4a((int)hi2, xb.z, s); s = __dp4a((int)hi3, xb.w, s);
-        acc += d * xs[b] * (float)(s - 8 * xsum[b]);
+#pragma unroll
+        for (int v = 0; v < NB; ++v) {
+            const int4* xp = (const int4*)(xq + v * (K / 32 * 32) + b * 32);
+            const int4 xa = xp[0], xb = xp[1];
+            int s = 0;
+            s = __dp4a((int)lo0, xa.x, s); s = __dp4a((int)lo1, xa.y, s); s = __dp4a((int)lo2, xa.z, s); s = __dp4a((int)lo3, xa.w, s);
+            s = __dp4a((int)hi0, xb.x, s); s = __dp4a((int)hi1, xb.y, s); s = __dp4a((int)hi2, xb.z, s); s = __dp4a((int)hi3, xb.w, s);
+            acc[v] += d * xs[v * (K / 32) + b] * (float)(s - 8 * xsum[v * (K / 32) + b]);
+        }
     }
-    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
-    if (lane == 0) y[row] = acc;
+#pragma unroll
+    for (int v = 0; v < NB; ++v) {
+        float a = acc[v];
+        for (int o = 16; o > 0; o >>= 1) a += __shfl_down_sync(0xffffffffu, a, o);
+        if (lane == 0) y[v * ystride + row] = a;
+    }
 }
+// rms norm over NB vectors: x/out [NB][n], grid (1, NB)
 __global__ void k_rms_norm(float* out, const float* x, const float* w, int n, float eps) {
+    const long v = blockIdx.y;
+    x += v * n; out += v * n;
     float ss = 0.f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) { float v = x[i]; ss += v * v; }
     __shared__ float red[32];
@@ -309,6 +324,8 @@ __global__ void k_rms_norm(float* out, const float* x, const float* w, int n, fl
 // per-head RMS norm in place (x: [nh][stride]; stride==hd for packed heads, 2*hd for qwen35 q+gate)
 __global__ void k_rms_heads(float* x, const float* w, int nh, int hd, float eps, int stride) {
     const int h = blockIdx.x;
+    const long v = blockIdx.y;
+    x += v * (size_t)nh * stride;
     float ss = 0.f;
     for (int i = threadIdx.x; i < hd; i += blockDim.x) { float v = x[(size_t)h * stride + i]; ss += v * v; }
     __shared__ float red[32];
@@ -325,15 +342,19 @@ __global__ void k_rms_heads(float* x, const float* w, int nh, int hd, float eps,
 }
 // qwen35 attention output gate: out[h*hd+i] *= sigmoid(qg[h*2*hd+hd+i])
 __global__ void k_attn_gate_apply(float* out, const float* qg, int nh, int hd) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nh * hd) return;
-    const int h = idx / hd;
-    const float gt = qg[(size_t)h * 2 * hd + hd + (idx % hd)];
+    const long idx = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= (long)gridDim.y * nh * hd) return;
+    const long v = idx / ((long)nh * hd);
+    const long i = idx - v * (long)nh * hd;
+    const int h = (int)(i / hd);
+    const float gt = qg[v * (size_t)nh * 2 * hd + (size_t)h * 2 * hd + hd + (i % hd)];
     out[idx] /= (1.f + expf(-gt));
 }
-// in-place L2 norm per head: x /= sqrt(sum(x^2) + eps)
-__global__ void k_l2_heads(float* x, int nh, int hd, float eps) {
+// in-place L2 norm per head: x /= max(sqrt(sum(x^2)), eps)-style (ggml l2_norm semantics)
+// x: [B][nh*hd] stacked with seq_stride between sequences; grid (nh, B)
+__global__ void k_l2_heads(float* x, int nh, int hd, float eps, long seq_stride) {
     const int h = blockIdx.x;
+    x += (size_t)blockIdx.y * seq_stride;
     float ss = 0.f;
     for (int i = threadIdx.x; i < hd; i += blockDim.x) { float v = x[h * hd + i]; ss += v * v; }
     __shared__ float red[32];
@@ -342,16 +363,19 @@ __global__ void k_l2_heads(float* x, int nh, int hd, float eps) {
     __syncthreads();
     if (threadIdx.x == 0) {
         float t = 0.f; for (int i = 0; i < (int)(blockDim.x + 31) / 32; ++i) t += red[i];
-        red[0] = rsqrtf(t + eps);
+        red[0] = 1.f / fmaxf(sqrtf(t), eps);   // ggml: 1/max(sqrt(sum), eps)
     }
     __syncthreads();
     const float s = red[0];
-    for (int i = threadIdx.x; i < hd; i += blockDim.x) x[h * hd + i] *= s;
+    for (int i = threadIdx.x; i < hd; i += blockDim.x) x[(size_t)h * hd + i] *= s;
 }
 // standard (neox half-split) RoPE, text positions: pair (x_i, x_i+n_rot/2), theta = pos*base^(-2i/n_rot)
 // q: [nh_q][hd] (qwen35: only first hd of each (hd+hd_gate) slice — pass stride), k: [nh_k][hd]
 __global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, int n_rot, float base, int q_stride, int style) {
     const int h = blockIdx.x;
+    const long v = blockIdx.y;
+    q += v * (size_t)nh_q * q_stride;
+    k += v * (size_t)nh_k * hd;
     const int half = n_rot / 2;
     float* dst = h < nh_q ? q + (size_t)h * q_stride : k + (size_t)(h - nh_q) * hd;
     for (int i = threadIdx.x; i < half; i += blockDim.x) {
@@ -367,9 +391,14 @@ __global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, 
 // GQA decode attention for one token at position pos (cache already contains pos+1 entries
 // for this layer after append). K/V cache: [n_kh][max_ctx][hd]. out: [nh_q][hd].
 __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, const float* q,
-                              int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride) {
+                              int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride, long kv_seq_stride) {
     extern __shared__ float sh[];   // pos+1 scores
     const int h = blockIdx.x;
+    const long v = blockIdx.y;
+    q += v * (size_t)nh_q * q_stride;
+    out += v * (size_t)nh_q * hd;
+    Kc += v * (size_t)kv_seq_stride;
+    Vc += v * (size_t)kv_seq_stride;
     const int kh = h / (nh_q / n_kh);
     const float* qh = q + (size_t)h * q_stride;
     const float* Kk = Kc + (size_t)kh * n_ctx_max * hd;
@@ -404,8 +433,16 @@ __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, cons
 // gated delta net, one token: state[h] is S transposed (s[h][j*S+i] = S[i][j]).
 // q16/k16: [ngroup][S]; v: [H][S]; g/beta: [H]; out: [H][S].
 __global__ void k_delta_net(float* state, const float* q16, const float* k16, const float* v,
-                            const float* g, const float* beta, float* out, int S, int H, int ngroup, float scale) {
+                            const float* g, const float* beta, float* out, int S, int H, int ngroup, float scale,
+                            long state_seq_stride, long qkv_seq_stride) {
     const int h = blockIdx.x;
+    const long vs = blockIdx.y;
+    state += (size_t)vs * state_seq_stride;
+    // q/k/v live in the dense [B][qkv_out] conv output: advance each by vs*qkv_seq_stride
+    q16 += vs * qkv_seq_stride;
+    k16 += vs * qkv_seq_stride;
+    const float* vv = v + vs * qkv_seq_stride;
+    g += vs * H; beta += vs * H; out += vs * (size_t)H * S;
     const int j = threadIdx.x;
     if (j >= S) return;
     // ggml maps v-head -> k-head with iv1 % n_k_heads (ops.cpp gated_delta_net), NOT grouping
@@ -413,7 +450,7 @@ __global__ void k_delta_net(float* state, const float* q16, const float* k16, co
     float* row = state + (size_t)h * S * S + (size_t)j * S;
     const float* kh = k16 + (size_t)hk * S;
     const float* qh = q16 + (size_t)hk * S;
-    const float* vh = v + (size_t)h * S;
+    const float* vh = vv + (size_t)h * S;
     const float eg = expf(g[h]);
     for (int i = 0; i < S; ++i) row[i] *= eg;
     float dot = 0.f; for (int i = 0; i < S; ++i) dot += row[i] * kh[i];
@@ -424,8 +461,11 @@ __global__ void k_delta_net(float* state, const float* q16, const float* k16, co
 }
 // conv1d(k=4) + silu, decode step: window = conv_state[c][0..2], x[c]; shifts state.
 // w layout F32 [4, C]: w[c*4 + j].
-__global__ void k_conv1d_silu(float* cstate, const float* x, const float* w, float* out, int C) {
+__global__ void k_conv1d_silu(float* cstate, const float* x, const float* w, float* out, int C, long state_seq_stride) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const long v = blockIdx.y;
+    cstate += (size_t)v * state_seq_stride;
+    x += v * C; out += v * C;
     if (c >= C) return;
     const float s0 = cstate[c * 3 + 0], s1 = cstate[c * 3 + 1], s2 = cstate[c * 3 + 2];
     const float xc = x[c];
@@ -434,32 +474,35 @@ __global__ void k_conv1d_silu(float* cstate, const float* x, const float* w, flo
     cstate[c * 3 + 0] = s1; cstate[c * 3 + 1] = s2; cstate[c * 3 + 2] = xc;
     out[c] = sum / (1.f + expf(-sum));
 }
+// all elementwise kernels below operate on NB stacked vectors: idx in [0, NB*n), v = idx / n
 __global__ void k_sigmoid(float* y, const float* x, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
+    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
     y[i] = 1.f / (1.f + expf(-x[i]));
 }
 __global__ void k_gate_ssm(float* g, const float* alpha, const float* dtb, const float* a, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
-    const float v = alpha[i] + dtb[i];
+    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
+    const float v = alpha[i] + dtb[i % n];
     const float sp = v > 20.f ? v : log1pf(expf(v));
-    g[i] = sp * a[i];
+    g[i] = sp * a[i % n];
 }
 __global__ void k_silu_mul(float* y, const float* a, const float* b, int n) {  // y = silu(a)*b
-    const int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
+    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
     const float v = a[i];
     y[i] = v / (1.f + expf(-v)) * b[i];
 }
 __global__ void k_sigmoid_mul(float* y, const float* gate, const float* x, int n) {  // y = x*sigmoid(gate)
-    const int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
+    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
     y[i] = x[i] / (1.f + expf(-gate[i]));
 }
 __global__ void k_add(float* y, const float* x, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
+    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
     y[i] += x[i];
 }
 // gated RMS norm for ssm output: out = rms_norm(x)[.]*silu(z), per v-head (x: [H][S], z: [H][S])
 __global__ void k_gated_norm(float* out, const float* x, const float* w, const float* z, int H, int S, float eps) {
     const int h = blockIdx.x;
+    const long v = blockIdx.y;
+    x += v * (size_t)H * S; z += v * (size_t)H * S; out += v * (size_t)H * S;
     float ss = 0.f;
     for (int i = threadIdx.x; i < S; i += blockDim.x) { float v = x[h * S + i]; ss += v * v; }
     __shared__ float red[32];
@@ -746,12 +789,28 @@ static void cpu_step(CPUModel& cm, long tok, std::vector<float>& logits) {
     ++cm.pos;
 }
 
+// NB-dispatched Q4_0 matvec: y[v*ystride + row] for v in [0, g_batch)
+static long g_batch = 1;
+static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const float* xs, const int* xsum,
+                          float* y, long ystride, cudaStream_t s) {
+    const unsigned g = (unsigned)((rows + 3) / 4);
+    switch (g_batch) {
+        case 1: k_mat_q4<1><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 2: k_mat_q4<2><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 4: k_mat_q4<4><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 8: k_mat_q4<8><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 16: k_mat_q4<16><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 32: k_mat_q4<32><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 64: k_mat_q4<64><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     std::string model, prompt, prompt_ids_s, out_ids_path;
-    long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16;
+    long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i]; const char* v = argv[i + 1];
@@ -760,6 +819,7 @@ int main(int argc, char** argv) {
         else if (k == "--cache-mib") cache_mib = atol(v);
         else if (k == "--ctx") ctx = atol(v);
         else if (k == "--gen-tokens") gen_tokens = atol(v);
+        else if (k == "--batch") batch = atol(v);
         else if (k == "--prompt") prompt = v;
         else if (k == "--prompt-ids") prompt_ids_s = v;
         else if (k == "--validate") validate = atoi(v);
@@ -773,6 +833,9 @@ int main(int argc, char** argv) {
         else if (k == "--out-ids") out_ids_path = v;
     }
     if (model.empty()) { fprintf(stderr, "need --model\n"); return 2; }
+    if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
+    if (validate && batch != 1) { fprintf(stderr, "--validate requires --batch 1\n"); return 2; }
+    g_batch = batch;
     g_swap0 = meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:"); safety("start");
 
     GgufKV kv; std::vector<GTensor> gtensors; uint64_t data_start = 0;
@@ -818,9 +881,9 @@ int main(int argc, char** argv) {
     const GTensor* outw = m.by_name["output.weight"];
     if (!embd || !outw) { fprintf(stderr, "missing token_embd/output\n"); return 1; }
 
-    printf("config,model=%s,arch=%s,layers=%ld,recr=%ld,attn=%ld,n_embd=%ld,n_head=%ld,n_kv=%ld,head=%ld,rot=%ld,ffn=%ld,vocab=%ld,ssm_state=%ld,ssm_group=%ld,ssm_dt=%ld,ssm_inner=%ld,rope_base=%.0f,ctx=%ld,hot_mib=%ld,cache_mib=%ld,validate=%d\n",
+    printf("config,model=%s,arch=%s,layers=%ld,recr=%ld,attn=%ld,n_embd=%ld,n_head=%ld,n_kv=%ld,head=%ld,rot=%ld,ffn=%ld,vocab=%ld,ssm_state=%ld,ssm_group=%ld,ssm_dt=%ld,ssm_inner=%ld,rope_base=%.0f,ctx=%ld,batch=%ld,hot_mib=%ld,cache_mib=%ld,validate=%d\n",
            model.c_str(), A.c_str(), m.n_layer, m.n_recr, m.n_attn, m.n_embd, m.n_head, m.n_kv, m.head_v, m.n_rot, m.n_ff,
-           m.n_vocab, m.sss_state, m.sss_group, m.sss_dt, m.sss_inner, m.rope_base, ctx, hot_mib, cache_mib, validate);
+           m.n_vocab, m.sss_state, m.sss_group, m.sss_dt, m.sss_inner, m.rope_base, ctx, batch, hot_mib, cache_mib, validate);
 
     // ---- items: chunk every Q4_0 tensor except the embedding table ----
     struct Item { std::string tensor; long K, N, row0, rows; uint64_t file_off, bytes, aligned_off, head, read_len; int tier = 0; int64_t res_off = -1; };
@@ -871,9 +934,9 @@ int main(int argc, char** argv) {
     }
     // VRAM preflight: hot + slots + states must keep >= 2 GiB free
     const long sss_v = m.sss_dt ? m.sss_inner / m.sss_dt : 0;
-    const uint64_t ssm_vram = (uint64_t)m.n_recr * m.sss_dt * (uint64_t)sss_v * sss_v * 4
-                            + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4;
-    const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2;
+    const uint64_t ssm_vram = ((uint64_t)m.n_recr * m.sss_dt * (uint64_t)sss_v * sss_v * 4
+                            + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4) * batch;
+    const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * batch;
     size_t total_vram = 0;
     const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + (16u << 20);
     { int dev = 0; cudaDeviceProp prop{}; check(cudaGetDeviceProperties(&prop, dev), "props"); total_vram = prop.totalGlobalMem; }
@@ -898,23 +961,24 @@ int main(int argc, char** argv) {
     for (const Item& it : items) { max_K = std::max(max_K, it.K); }
     for (const GTensor& t : gtensors) if (t.type == kGGML_Q4_0 && t.name != "token_embd.weight") max_rows = std::max(max_rows, t.ne[1]);
     max_rows += 16;
+    const long B = batch;   // all activation buffers are [B][...] stacked
     float *x, *t_norm, *yA, *yB, *t_v, *t_att, *t_dn, *t_conv, *t_g48a, *t_g48b, *logits, *t_ffnh;
-    check(cudaMalloc((void**)&x, m.n_embd * 4), "x");
-    check(cudaMalloc((void**)&t_norm, m.n_embd * 4), "t_norm");
-    check(cudaMalloc((void**)&yA, max_rows * 4), "yA");
-    check(cudaMalloc((void**)&yB, max_rows * 4), "yB");
-    check(cudaMalloc((void**)&t_v, 4096 * 4), "t_v");
-    check(cudaMalloc((void**)&t_att, (A == "qwen35" ? 12288 : 4096) * 4), "t_att");
-    check(cudaMalloc((void**)&t_dn, (A == "qwen35" ? 6144 : 16) * 4), "t_dn");
-    check(cudaMalloc((void**)&t_conv, (A == "qwen35" ? m.qkv_out : 16) * 4), "t_conv");
-    check(cudaMalloc((void**)&t_g48a, 64 * 4), "t_g48a");
-    check(cudaMalloc((void**)&t_g48b, 64 * 4), "t_g48b");
-    check(cudaMalloc((void**)&t_ffnh, (A == "qwen35" ? 17408 : 3072) * 4), "t_ffnh");
-    check(cudaMalloc((void**)&logits, m.n_vocab * 4), "logits");
+    check(cudaMalloc((void**)&x, B * m.n_embd * 4), "x");
+    check(cudaMalloc((void**)&t_norm, B * m.n_embd * 4), "t_norm");
+    check(cudaMalloc((void**)&yA, B * max_rows * 4), "yA");
+    check(cudaMalloc((void**)&yB, B * max_rows * 4), "yB");
+    check(cudaMalloc((void**)&t_v, B * 4096 * 4), "t_v");
+    check(cudaMalloc((void**)&t_att, B * (A == "qwen35" ? 12288 : 4096) * 4), "t_att");
+    check(cudaMalloc((void**)&t_dn, B * (A == "qwen35" ? 6144 : 16) * 4), "t_dn");
+    check(cudaMalloc((void**)&t_conv, B * (A == "qwen35" ? m.qkv_out : 16) * 4), "t_conv");
+    check(cudaMalloc((void**)&t_g48a, B * 64 * 4), "t_g48a");
+    check(cudaMalloc((void**)&t_g48b, B * 64 * 4), "t_g48b");
+    check(cudaMalloc((void**)&t_ffnh, B * (A == "qwen35" ? 17408 : 3072) * 4), "t_ffnh");
+    check(cudaMalloc((void**)&logits, B * m.n_vocab * 4), "logits");
     int8_t* xq; float* xs; int* xsum;
-    check(cudaMalloc((void**)&xq, max_K), "xq");
-    check(cudaMalloc((void**)&xs, max_K / 32 * 4), "xs");
-    check(cudaMalloc((void**)&xsum, max_K / 32 * 4), "xsum");
+    check(cudaMalloc((void**)&xq, B * max_K), "xq");
+    check(cudaMalloc((void**)&xs, B * max_K / 32 * 4), "xs");
+    check(cudaMalloc((void**)&xsum, B * max_K / 32 * 4), "xsum");
     // small F32 tensors -> one device blob
     uint64_t small_bytes = 0;
     std::vector<std::pair<std::string, const GTensor*>> smalls;
@@ -938,13 +1002,13 @@ int main(int argc, char** argv) {
     // KV + SSM state
     float *kv_dev = nullptr, *ssm_dev = nullptr, *conv_dev = nullptr;
     const uint64_t kv_per_layer = (uint64_t)m.n_kv * ctx * m.head_v * 4;
-    if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn), "kv cache");
+    if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn * B), "kv cache");
     const uint64_t sss = m.sss_inner / m.sss_dt;
     if (m.n_recr) {
-        check(cudaMalloc((void**)&ssm_dev, (size_t)m.n_recr * m.sss_dt * sss * sss * 4), "ssm state");
-        check(cudaMalloc((void**)&conv_dev, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4), "conv state");
-        check(cudaMemset(ssm_dev, 0, (size_t)m.n_recr * m.sss_dt * sss * sss * 4), "ssm zero");
-        check(cudaMemset(conv_dev, 0, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4), "conv zero");
+        check(cudaMalloc((void**)&ssm_dev, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * B), "ssm state");
+        check(cudaMalloc((void**)&conv_dev, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * B), "conv state");
+        check(cudaMemset(ssm_dev, 0, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * B), "ssm zero");
+        check(cudaMemset(conv_dev, 0, (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4 * B), "conv zero");
     }
     // pinned stage ring + staged cache
     uint8_t* stage[kStage]; for (auto& s : stage) check(cudaHostAlloc((void**)&s, kStageBytes + 4096, cudaHostAllocPortable), "stage");
@@ -993,21 +1057,34 @@ int main(int argc, char** argv) {
     tok.vocab = kv.arr_strs["tokenizer.ggml.tokens"];
     for (size_t i = 0; i < tok.vocab.size(); ++i) tok.id_of[tok.vocab[i]] = (long)i;
     tok.bos = m.bos_id; tok.eos = m.eos_id;
-    std::vector<long> ids;
+    std::vector<std::vector<long>> prompts;
     if (!prompt_ids_s.empty()) {
         size_t p = 0;
-        while (p < prompt_ids_s.size()) {
-            size_t q = prompt_ids_s.find(',', p);
-            if (q == std::string::npos) q = prompt_ids_s.size();
-            ids.push_back(atol(prompt_ids_s.substr(p, q - p).c_str()));
-            p = q + 1;
+        while (p <= prompt_ids_s.size()) {
+            size_t semi = prompt_ids_s.find(';', p);
+            if (semi == std::string::npos) semi = prompt_ids_s.size();
+            std::vector<long> ids;
+            size_t q = p;
+            while (q < semi) {
+                size_t c = prompt_ids_s.find(',', q);
+                if (c == std::string::npos || c > semi) c = semi;
+                ids.push_back(atol(prompt_ids_s.substr(q, c - q).c_str()));
+                q = c + 1;
+            }
+            if (!ids.empty()) prompts.push_back(ids);
+            p = semi + 1;
         }
     } else {
-        ids = tok.encode(prompt);
+        const std::vector<long> ids = tok.encode(prompt);
         if (ids.empty()) { fprintf(stderr, "empty prompt\n"); return 2; }
+        prompts.push_back(ids);
     }
-    if (show_text) printf("prompt_ids,%zu,%s\n", ids.size(), prompt_ids_s.c_str());
-    if (show_text) printf("prompt_text,%s\n", tok.decode(ids).c_str());
+    while (prompts.size() < (size_t)batch) prompts.push_back(prompts[0]);   // replicate for equivalence tests
+    if ((long)prompts.size() != batch) { fprintf(stderr, "need exactly %ld prompt sequences (';'-separated)\n", batch); return 2; }
+    for (long v = 1; v < batch; ++v)
+        if (prompts[v].size() != prompts[0].size()) { fprintf(stderr, "all prompts must have equal length (lockstep decode)\n"); return 2; }
+    if (show_text) printf("prompt_seqs,%zu,first_len=%zu,ids=%s\n", prompts.size(), prompts[0].size(), prompt_ids_s.c_str());
+    if (show_text && batch == 1) printf("prompt_text,%s\n", tok.decode(prompts[0]).c_str());
 
     // ---- CPU reference ----
     CPUModel cm;
@@ -1077,8 +1154,8 @@ int main(int argc, char** argv) {
     const float attn_scale = 1.f / sqrtf((float)hd);
     const float dn_scale = 1.f / sqrtf((float)Sv);
     const long emb_nb = m.n_embd / 32;
-    uint8_t* emb_buf = nullptr; check(cudaHostAlloc((void**)&emb_buf, (size_t)emb_nb * 18 + 4096, cudaHostAllocPortable), "emb buf");
-    std::vector<float> emb_row(m.n_embd), logits_h(m.n_vocab);
+    uint8_t* emb_buf = nullptr; check(cudaHostAlloc((void**)&emb_buf, (size_t)B * emb_nb * 18 + 4096, cudaHostAllocPortable), "emb buf");
+    std::vector<float> emb_row((size_t)B * m.n_embd), logits_h((size_t)B * m.n_vocab);
 
     double best_tok_s = 1e30, sum_steady_s = 0; long n_steady = 0; long free_min = free_after_alloc;
     uint64_t steady_cold_bytes = 0; long n_steady_cold = 0;
@@ -1087,14 +1164,24 @@ int main(int argc, char** argv) {
     std::vector<long> generated;        // argmax tokens produced
     long cur_pos = 0;                   // sequence position for rope/kv
 
-    auto run_token = [&](long tok, int pass, double* tok_s_out, uint64_t* cold_out) { (void)dbg_dump;
+    auto run_token = [&](const std::vector<long>& toks, int pass, double* tok_s_out, uint64_t* cold_out) { (void)dbg_dump;
         std::atomic<size_t> released{0};
         std::atomic<long> ready[kStage]; for (auto& r : ready) r = 0;
         std::atomic<bool> fail{false};
         *cold_out = 0;
-        if (pread(fdc, emb_buf, emb_nb * 18, (off_t)(data_start + embd->off + (uint64_t)tok * emb_nb * 18)) != (ssize_t)(emb_nb * 18)) { fprintf(stderr, "embd pread\n"); exit(1); }
-        cpu_dequant_row_q4(emb_buf, m.n_embd, emb_row.data());
-        check(cudaMemcpy(x, emb_row.data(), m.n_embd * 4, cudaMemcpyHostToDevice), "emb h2d");
+        for (long v = 0; v < B; ++v) {
+            if (pread(fdc, emb_buf + (size_t)v * emb_nb * 18, emb_nb * 18, (off_t)(data_start + embd->off + (uint64_t)toks[v] * emb_nb * 18)) != (ssize_t)(emb_nb * 18)) { fprintf(stderr, "embd pread\n"); exit(1); }
+            cpu_dequant_row_q4(emb_buf + (size_t)v * emb_nb * 18, m.n_embd, &emb_row[(size_t)v * m.n_embd]);
+        }
+        if (dbg_dump && pass == 0 && B > 1) {
+            printf("dbg_host,embrow_v0");
+            for (int i = 0; i < 6; ++i) printf(",%.9g", emb_row[i]);
+            printf("\ndbg_host,embrow_v1");
+            for (int i = 0; i < 6; ++i) printf(",%.9g", emb_row[m.n_embd + i]);
+            printf("\n");
+        }
+        check(cudaMemcpy(x, emb_row.data(), B * m.n_embd * 4, cudaMemcpyHostToDevice), "emb h2d");
+
         // cold_list must contain EVERY non-hot schedule position: the reader and the
         // main thread both number slots by list position, and direct-pin items keep
         // their position (reader skips the fill, main skips the ready wait)
@@ -1127,13 +1214,16 @@ int main(int argc, char** argv) {
         size_t cold_k = 0;
         std::vector<int> pending;
         auto S = [&](const std::string& tn) -> const float* { return (const float*)(small_dev + m.small_off.at(tn)); };
-        auto mat = [&](const std::string& tn, const float* xin, long K, float* out, long out_row0) {
+        auto mat = [&](const std::string& tn, const float* xin, long K, float* out, long out_row0, long ystride) {
             const long nb = K / 32;
-            k_quant_x<<<(unsigned)((nb + 127) / 128), 128, 0, stc>>>(xin, nb, xq, xs, xsum);
+            // batched GEMV writes y[v*ystride + row]; consumers index dense [B][N], so the
+            // stride must be this tensor's own row count — NOT the max_rows buffer pitch
+            ystride = m.by_name.at(tn)->ne[1];
+            k_quant_x<<<dim3((unsigned)((nb * B + 127) / 128)), 128, 0, stc>>>(xin, nb * B, xq, xs, xsum);
             for (int idx : tensor_items.at(tn)) {
                 Item& it = items[idx];
                 if (it.tier == kHot) {
-                    k_mat_q4<<<(unsigned)((it.rows + 3) / 4), 128, 0, stc>>>(hot + it.res_off, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0);
+                    launch_mat_q4(hot + it.res_off, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0, ystride, stc);
                     continue;
                 }
                 const bool in_pin = (uint64_t)it.res_off + it.bytes <= pin_bytes;
@@ -1151,7 +1241,7 @@ int main(int argc, char** argv) {
                 check(cudaMemcpyAsync(dst, csrc, it.bytes, cudaMemcpyHostToDevice, st), "copy");
                 check(cudaEventRecord(ev[cold_k % kStage], st), "ev");
                 check(cudaStreamWaitEvent(stc, ev[cold_k % kStage], 0), "wait copy");
-                k_mat_q4<<<(unsigned)((it.rows + 3) / 4), 128, 0, stc>>>(dst, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0);
+                launch_mat_q4(dst, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0, ystride, stc);
                 check(cudaEventRecord(evc[cold_k % kSlots], stc), "evc");
                 pending.push_back((int)cold_k);
                 if (pending.size() >= 3) {
@@ -1162,6 +1252,15 @@ int main(int argc, char** argv) {
                 ++cold_k;
             }
         };
+        auto dbg2 = [&](const char* tag, const float* dev, long n, long stride, long v) {
+            if (!dbg_dump) return;
+            std::vector<float> h(n);
+            check(cudaMemcpy(h.data(), dev + v * stride, h.size() * 4, cudaMemcpyDeviceToHost), "dbg2");
+            printf("dbg_gpu,%s_v%ld", tag, v);
+            for (float f : h) printf(",%.9g", f);
+            printf("\n");
+        };
+        if (dbg_dump && pass == 0 && B > 1) { check(cudaDeviceSynchronize(), "dbg sync"); dbg2("embdev", x, m.n_embd, m.n_embd, 1); }
         auto dbg = [&](const char* tag, const float* dev, long n) {
             if (!dbg_dump) return;
             std::vector<float> h(n);
@@ -1170,82 +1269,94 @@ int main(int argc, char** argv) {
             for (float v : h) printf(",%.9g", v);
             printf("\n");
         };
+        const dim3 grid1(1, (unsigned)B);
         for (long il = 0; il < m.n_layer; ++il) {
             const std::string L = "blk." + std::to_string(il);
-            k_rms_norm<<<1, 256, 0, stc>>>(t_norm, x, S(L + ".attn_norm.weight"), (int)m.n_embd, (float)m.eps);
+            k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S(L + ".attn_norm.weight"), (int)m.n_embd, (float)m.eps);
             if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("emb" + std::to_string(il)).c_str(), x, m.n_embd); dbg(("norm" + std::to_string(il)).c_str(), t_norm, m.n_embd); }
             if (A == "qwen35" && m.is_recr[il]) {
                 // gated delta net path (linear attention with persistent state)
-                mat(L + ".attn_qkv.weight", t_norm, m.n_embd, yA, 0);
-                mat(L + ".attn_gate.weight", t_norm, m.n_embd, yB, 0);
-                mat(L + ".ssm_beta.weight", t_norm, m.n_embd, t_g48a, 0);
-                mat(L + ".ssm_alpha.weight", t_norm, m.n_embd, t_g48b, 0);
-                k_sigmoid<<<1, 64, 0, stc>>>(t_g48a, t_g48a, (int)m.sss_dt);
-                k_gate_ssm<<<1, 64, 0, stc>>>(t_v, t_g48b, S(L + ".ssm_dt.bias"), S(L + ".ssm_a"), (int)m.sss_dt);
+                mat(L + ".attn_qkv.weight", t_norm, m.n_embd, yA, 0, max_rows);
+                mat(L + ".attn_gate.weight", t_norm, m.n_embd, yB, 0, max_rows);
+                mat(L + ".ssm_beta.weight", t_norm, m.n_embd, t_g48a, 0, max_rows);
+                if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("betaraw", t_g48a, m.sss_dt, 48, 1); dbg2("betaraw0", t_g48a, m.sss_dt, 48, 0); }
+                mat(L + ".ssm_alpha.weight", t_norm, m.n_embd, t_g48b, 0, max_rows);
+                k_sigmoid<<<dim3((unsigned)((m.sss_dt * B + 63) / 64), (unsigned)B), 64, 0, stc>>>(t_g48a, t_g48a, (int)m.sss_dt);
+                k_gate_ssm<<<dim3((unsigned)((m.sss_dt * B + 63) / 64), (unsigned)B), 64, 0, stc>>>(t_v, t_g48b, S(L + ".ssm_dt.bias"), S(L + ".ssm_a"), (int)m.sss_dt);
                 const long ri = il - (il + 1) / 4;   // recurrent-layer index (pattern 1,1,1,0)
-                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("qkv0", yA, m.qkv_out); dbg("zraw0", yB, m.sss_inner); dbg("beta0", t_g48a, m.sss_dt); dbg("alpharaw0", t_g48b, m.sss_dt); }
-                k_conv1d_silu<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out);
-                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("convout0", t_conv, m.qkv_out); }
+                const long conv_seq_stride = m.n_recr * m.qkv_out * (m.sss_conv - 1);
+                const long ssm_seq_stride = m.n_recr * m.sss_dt * Sv * Sv;
+                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("qkv0", yA, m.qkv_out); dbg("zraw0", yB, m.sss_inner); dbg("beta0", t_g48a, m.sss_dt); dbg("alpharaw0", t_g48b, m.sss_dt); if (B > 1) { dbg2("qkv0", yA, m.qkv_out, m.qkv_out, 1); dbg2("beta0", t_g48a, m.sss_dt, 64, 1); } }
+                k_conv1d_silu<<<dim3((unsigned)((m.qkv_out + 255) / 256), (unsigned)B), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, conv_seq_stride);
+                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("convout0", t_conv, m.qkv_out); if (B > 1) dbg2("convout0", t_conv, m.qkv_out, m.qkv_out, 1); }
                 const long Sdim = m.sss_state;
-                k_l2_heads<<<(unsigned)m.sss_group, 128, 0, stc>>>(t_conv, (int)m.sss_group, (int)Sdim, (float)m.eps);
+                const long conv_slice_stride = A == "qwen35" ? m.qkv_out : 0;
+                k_l2_heads<<<dim3((unsigned)m.sss_group, (unsigned)B), 128, 0, stc>>>(t_conv, (int)m.sss_group, (int)Sdim, (float)m.eps, conv_slice_stride);
                 // K lives at [Sdim*group, 2*Sdim*group) — V (at 2*Sdim*group) must NOT be normalized
-                k_l2_heads<<<(unsigned)m.sss_group, 128, 0, stc>>>(t_conv + Sdim * m.sss_group, (int)m.sss_group, (int)Sdim, (float)m.eps);
-                k_delta_net<<<(unsigned)m.sss_dt, 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_conv + Sdim * m.sss_group,
-                                                                 t_conv + 2 * Sdim * m.sss_group, t_v, t_g48a, t_dn, (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale);
-                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("dnout0", t_dn, m.sss_inner); }
-                k_gated_norm<<<(unsigned)m.sss_dt, 128, 0, stc>>>(t_att, t_dn, S(L + ".ssm_norm.weight"), yB, (int)m.sss_dt, (int)Sv, (float)m.eps);
-                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("gatednorm0", t_att, m.sss_inner); }
-                mat(L + ".ssm_out.weight", t_att, m.sss_inner, yA, 0);
+                k_l2_heads<<<dim3((unsigned)m.sss_group, (unsigned)B), 128, 0, stc>>>(t_conv + Sdim * m.sss_group, (int)m.sss_group, (int)Sdim, (float)m.eps, conv_slice_stride);
+                k_delta_net<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_conv + Sdim * m.sss_group,
+                                                                 t_conv + 2 * Sdim * m.sss_group, t_v, t_g48a, t_dn, (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, ssm_seq_stride, (long)m.qkv_out);
+                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("dnout0", t_dn, m.sss_inner); if (B > 1) { dbg2("dnout0", t_dn, m.sss_inner, m.sss_inner, 1); dbg2("vsl", t_conv + 2 * m.sss_state * m.sss_group, 8, m.qkv_out, 1); dbg2("vsl0", t_conv + 2 * m.sss_state * m.sss_group, 8, m.qkv_out, 0); dbg2("gsl", t_v, 8, 4096, 1); dbg2("gsl0", t_v, 8, 4096, 0); } }
+                k_gated_norm<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(t_att, t_dn, S(L + ".ssm_norm.weight"), yB, (int)m.sss_dt, (int)Sv, (float)m.eps);
+                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("gatednorm0", t_att, m.sss_inner); if (B > 1) dbg2("gatednorm0", t_att, m.sss_inner, m.sss_inner, 1); }
+                mat(L + ".ssm_out.weight", t_att, m.sss_inner, yA, 0, max_rows);
             } else {
                 // full attention path with KV cache
-                mat(L + ".attn_q.weight", t_norm, m.n_embd, yA, 0);
-                mat(L + ".attn_k.weight", t_norm, m.n_embd, yB, 0);
-                mat(L + ".attn_v.weight", t_norm, m.n_embd, t_v, 0);
+                mat(L + ".attn_q.weight", t_norm, m.n_embd, yA, 0, max_rows);
+                mat(L + ".attn_k.weight", t_norm, m.n_embd, yB, 0, max_rows);
+                mat(L + ".attn_v.weight", t_norm, m.n_embd, t_v, 0, max_rows);
                 if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("v" + std::to_string(il)).c_str(), t_v, nh_k * hd); }
                 const int q_stride = A == "qwen35" ? 2 * (int)hd : (int)hd;
-                k_rms_heads<<<(unsigned)nh_q, 128, 0, stc>>>(yA, S(L + ".attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, q_stride);
-                k_rms_heads<<<(unsigned)nh_k, 128, 0, stc>>>(yB, S(L + ".attn_k_norm.weight"), (int)nh_k, (int)hd, (float)m.eps, (int)hd);
+                k_rms_heads<<<dim3((unsigned)nh_q, (unsigned)B), 128, 0, stc>>>(yA, S(L + ".attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, q_stride);
+                k_rms_heads<<<dim3((unsigned)nh_k, (unsigned)B), 128, 0, stc>>>(yB, S(L + ".attn_k_norm.weight"), (int)nh_k, (int)hd, (float)m.eps, (int)hd);
                 // ggml uses NEOX half-split pairing for NORMAL?no: NORM is adjacent; NEOX/MROPE/IMROPE
                 // are half-split (ops.cpp rope switch). qwen35 = IMROPE = half-split; for text the
                 // mrope section positions are all equal, so it is plain half-split RoPE.
                 const int rope_style = 0;
-                k_rope<<<(unsigned)(nh_q + nh_k), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style);
+                k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style);
                 const long li = A == "qwen35" ? il / 4 : il;
+                const long kv_seq_stride = (long)m.n_attn * 2 * m.n_kv * ctx * m.head_v;   // FLOATS per sequence (kv_per_layer is bytes)
                 float* Kc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer);
                 float* Vc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer + kv_per_layer);
                 // NOTE: appends must run on the compute stream — they read yB/t_v produced
                 // by GEMVs on stc (a copy-stream race here corrupted every layer >= 1)
-                for (long h = 0; h < nh_k; ++h) {
-                    check(cudaMemcpyAsync(Kc + ((size_t)h * ctx + cur_pos) * hd, yB + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append k");
-                    check(cudaMemcpyAsync(Vc + ((size_t)h * ctx + cur_pos) * hd, t_v + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append v");
+                for (long v = 0; v < B; ++v) {
+                    float* Ks = Kc + v * kv_seq_stride;
+                    float* Vs = Vc + v * kv_seq_stride;
+                    for (long h = 0; h < nh_k; ++h) {
+                        check(cudaMemcpyAsync(Ks + ((size_t)h * ctx + cur_pos) * hd, yB + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append k");
+                        check(cudaMemcpyAsync(Vs + ((size_t)h * ctx + cur_pos) * hd, t_v + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append v");
+                    }
                 }
                 if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("vc" + std::to_string(il)).c_str(), Vc, nh_k * hd); }
-                k_attn_decode<<<(unsigned)nh_q, 256, (unsigned)((cur_pos + 1) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride);
-                if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); }
-                if (A == "qwen35") k_attn_gate_apply<<<(unsigned)((nh_q * hd + 255) / 256), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
-                mat(L + ".attn_output.weight", t_att, nh_q * hd, yA, 0);
+                k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + 1) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride);
+                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); if (B > 1) { dbg2(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd, nh_q * hd, 1); dbg2(("vv" + std::to_string(il)).c_str(), t_v, nh_k * hd, nh_k * hd, 1); } }
+                if (A == "qwen35") k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
+                mat(L + ".attn_output.weight", t_att, nh_q * hd, yA, 0, max_rows);
+                if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("wo0", yA, m.n_embd, m.n_embd, 1); dbg2("xpre0", x, m.n_embd, m.n_embd, 1); }
             }
-            k_add<<<(unsigned)((m.n_embd + 255) / 256), 256, 0, stc>>>(x, yA, (int)m.n_embd);
-            if (dbg_dump && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("attn_out" + std::to_string(il)).c_str(), x, m.n_embd); }
+            k_add<<<dim3((unsigned)((m.n_embd * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(x, yA, (int)m.n_embd);
+            if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("res0", x, m.n_embd, m.n_embd, 1); }
+            if (dbg_dump && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("attn_out" + std::to_string(il)).c_str(), x, m.n_embd); if (B > 1) for (long vv = 1; vv < std::min<long>(B, 2); ++vv) dbg2(("attnout" + std::to_string(il)).c_str(), x, m.n_embd, m.n_embd, vv); }
             const std::string ln2 = A == "qwen35" ? L + ".post_attention_norm.weight" : L + ".ffn_norm.weight";
-            k_rms_norm<<<1, 256, 0, stc>>>(t_norm, x, S(ln2), (int)m.n_embd, (float)m.eps);
-            mat(L + ".ffn_gate.weight", t_norm, m.n_embd, yA, 0);
-            mat(L + ".ffn_up.weight", t_norm, m.n_embd, yB, 0);
-            k_silu_mul<<<(unsigned)((m.n_ff + 255) / 256), 256, 0, stc>>>(t_ffnh, yA, yB, (int)m.n_ff);
-            mat(L + ".ffn_down.weight", t_ffnh, m.n_ff, yA, 0);
-            k_add<<<(unsigned)((m.n_embd + 255) / 256), 256, 0, stc>>>(x, yA, (int)m.n_embd);
+            k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S(ln2), (int)m.n_embd, (float)m.eps);
+            mat(L + ".ffn_gate.weight", t_norm, m.n_embd, yA, 0, max_rows);
+            mat(L + ".ffn_up.weight", t_norm, m.n_embd, yB, 0, max_rows);
+            k_silu_mul<<<dim3((unsigned)((m.n_ff * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_ffnh, yA, yB, (int)m.n_ff);
+            mat(L + ".ffn_down.weight", t_ffnh, m.n_ff, yA, 0, max_rows);
+            k_add<<<dim3((unsigned)((m.n_embd * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(x, yA, (int)m.n_embd);
             if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("ffn_out" + std::to_string(il)).c_str(), x, m.n_embd); }
             if ((il & 7) == 0) safety("token");
         }
-        k_rms_norm<<<1, 256, 0, stc>>>(t_norm, x, S("output_norm.weight"), (int)m.n_embd, (float)m.eps);
+        k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S("output_norm.weight"), (int)m.n_embd, (float)m.eps);
         if (dbg_dump && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("final_norm", t_norm, m.n_embd); }
-        mat("output.weight", t_norm, m.n_embd, logits, 0);
+        mat("output.weight", t_norm, m.n_embd, logits, 0, m.n_vocab);
         check(cudaGetLastError(), "kernel");
         check(cudaStreamSynchronize(stc), "sync c");
         check(cudaStreamSynchronize(st), "sync copy");
         released.store(cold_list.size() + (size_t)kStage);
         for (auto& th : pool) th.join();
-        check(cudaMemcpy(logits_h.data(), logits, m.n_vocab * 4, cudaMemcpyDeviceToHost), "logits d2h");
+        check(cudaMemcpy(logits_h.data(), logits, B * m.n_vocab * 4, cudaMemcpyDeviceToHost), "logits d2h");
         if (dbg_dump) {
             long t1 = 0;
             for (long j = 1; j < m.n_vocab; ++j) if (logits_h[j] > logits_h[t1]) t1 = j;
@@ -1260,14 +1371,14 @@ int main(int argc, char** argv) {
     };
 
     // ---- run: prompt then greedy generation ----
-    auto argmax = [&](const std::vector<float>& lg) {
+    auto argmax = [&](const float* lg) {
         long best = 0; float bv = lg[0];
         for (long i = 1; i < m.n_vocab; ++i) if (lg[i] > bv) { bv = lg[i]; best = i; }
         return best;
     };
     long ties = 0;
     auto cmp_step = [&](const std::vector<float>& cl, const char* tag, long step) {
-        const long g1 = argmax(logits_h), c1 = argmax(cl);
+        const long g1 = argmax(logits_h.data()), c1 = argmax(cl.data());
         double mx = 0, mg = 0;
         for (long j = 0; j < m.n_vocab; ++j) { mx = fmaxf(mx, fabsf(logits_h[j] - cl[j])); mg = fmaxf(mg, fabsf(cl[j])); }
         worst_rel = fmax(worst_rel, mx / (mg + 1e-9));
@@ -1283,55 +1394,95 @@ int main(int argc, char** argv) {
     };
 
     std::vector<float> cl;
-    long next_tok = -1;
+    std::vector<long> next_toks(batch, -1);
+    std::vector<std::vector<long>> gen_ids(batch);
+    std::vector<size_t> plen(batch);
     double sum_gen_s = 0; long n_gen_s = 0;
-    for (size_t i = 0; i < ids.size(); ++i) {
+    size_t max_plen = 0;
+    for (long v = 0; v < batch; ++v) { plen[v] = prompts[v].size(); max_plen = std::max(max_plen, plen[v]); }
+    for (size_t i = 0; i < max_plen; ++i) {
+        std::vector<long> toks(batch);
+        for (long v = 0; v < batch; ++v) toks[v] = i < plen[v] ? prompts[v][i] : prompts[v].back();
         double s; uint64_t cold;
-        run_token(ids[i], (int)i, &s, &cold);
-        all_ids.push_back(ids[i]);
+        run_token(toks, (int)i, &s, &cold);
         if (validate) {
-            cpu_step(cm, ids[i], cl);
+            cpu_step(cm, toks[0], cl);
             cmp_step(cl, "seq", (long)i);
         }
-        next_tok = argmax(logits_h);
+        for (long v = 0; v < batch; ++v)
+            if (i == plen[v] - 1) {
+                next_toks[v] = argmax(&logits_h[(size_t)v * m.n_vocab]);
+                if (dbg_dump) {   // top-2 per seq at the handoff: tie vs gross divergence
+                    const float* lg = &logits_h[(size_t)v * m.n_vocab];
+                    long t1 = 0, t2 = 0;
+                    for (long j = 1; j < m.n_vocab; ++j) { if (lg[j] > lg[t1]) { t2 = t1; t1 = j; } else if (lg[j] > lg[t2]) t2 = j; }
+                    printf("handoff,seq=%ld,top1=%ld:%.4f,top2=%ld:%.4f,gap=%.4f\n", v, t1, lg[t1], t2, lg[t2], lg[t1] - lg[t2]);
+                }
+            }
         const long fv = free_vram_mib();
         if (fv >= 0 && fv < free_min) free_min = fv;
         safety("prompt");
         printf("prompt_token,%zu,seconds=%.3f,cold_bytes=%llu,free_vram_MiB=%ld\n", i, s, (unsigned long long)cold, fv);
     }
-    for (long g = 0; g < gen_tokens && next_tok != m.eos_id; ++g) {
-        const int pass = (int)(ids.size() + g);
+    long n_eos = 0;
+    for (long g = 0; g < gen_tokens && n_eos < batch; ++g) {
+        const int pass = (int)(max_plen + g);
+        std::vector<long> toks(batch);
+        for (long v = 0; v < batch; ++v) toks[v] = next_toks[v] >= 0 ? next_toks[v] : m.eos_id;
         double s; uint64_t cold;
-        run_token(next_tok, pass, &s, &cold);
-        all_ids.push_back(next_tok);
-        generated.push_back(next_tok);
-        if (validate) {
-            cpu_step(cm, next_tok, cl);
-            cmp_step(cl, "gen", g);
+        run_token(toks, pass, &s, &cold);
+        n_eos = 0;
+        for (long v = 0; v < batch; ++v) {
+            gen_ids[v].push_back(toks[v]);
+            if (validate && v == 0) {
+                cpu_step(cm, toks[0], cl);
+                cmp_step(cl, "gen", g);
+            }
+            next_toks[v] = argmax(&logits_h[(size_t)v * m.n_vocab]);
+            if (next_toks[v] == m.eos_id) ++n_eos;
         }
-        next_tok = argmax(logits_h);
         const long fv = free_vram_mib();
         if (fv >= 0 && fv < free_min) free_min = fv;
         safety("gen");
         if (pass >= 1) { sum_steady_s += s; ++n_steady; steady_cold_bytes += cold; ++n_steady_cold; if (s < best_tok_s) best_tok_s = s; }
         sum_gen_s += s; ++n_gen_s;
-        printf("gen_token,%ld,seconds=%.3f,tok_per_s=%.3f,cold_bytes=%llu,free_vram_MiB=%ld,token=%ld[%s]\n",
-               g, s, 1.0 / s, (unsigned long long)cold, fv, next_tok,
-               next_tok >= 0 && next_tok < (long)tok.vocab.size() ? tok.vocab[next_tok].c_str() : "?");
+        printf("gen_token,%ld,seconds=%.3f,agg_tok_per_s=%.3f,cold_bytes=%llu,free_vram_MiB=%ld,seq0_token=%ld[%s]\n",
+               g, s, (double)batch / s, (unsigned long long)cold, fv, toks[0],
+               toks[0] >= 0 && toks[0] < (long)tok.vocab.size() ? tok.vocab[toks[0]].c_str() : "?");
     }
+    // stash generated ids of sequence 0 for the summary/text
+    generated = gen_ids[0];
+    all_ids = prompts[0];
+    all_ids.insert(all_ids.end(), gen_ids[0].begin(), gen_ids[0].end());
 
     // ---- summary ----
     if (out_ids_path.size()) {
         FILE* f = fopen(out_ids_path.c_str(), "w");
         if (f) { for (long id : generated) fprintf(f, "%ld\n", id); fclose(f); }
     }
-    if (show_text) printf("generated_text,%s\n", tok.decode(generated).c_str());
+    if (show_text && batch == 1) printf("generated_text,%s\n", tok.decode(generated).c_str());
+    if (show_text && batch > 1) {
+        // equivalence check: all sequences must have produced identical token streams
+        bool same = true;
+        for (long v = 1; v < batch; ++v) if (gen_ids[v] != gen_ids[0]) { same = false; break; }
+        printf("batch_equivalence,seqs=%ld,identical=%s\n", batch, same ? "yes" : "no");
+        if (!same) {
+            for (long v = 0; v < batch; ++v) {
+                printf("batch_seq_ids,%ld", v);
+                for (long id : gen_ids[v]) printf(",%ld", id);
+                printf("\n");
+            }
+        }
+        printf("generated_text,%s\n", tok.decode(gen_ids[0]).c_str());
+    }
     printf("verify,steps_checked=%ld,argmax_mismatches=%ld,near_ties=%ld,worst_logit_rel=%.4g,validate=%d\n", checked, mismatches, ties, worst_rel, validate);
-    const double steady_tps = sum_steady_s > 0 ? (double)n_steady / sum_steady_s : 0;
+    const double steady_tps = sum_steady_s > 0 ? (double)n_steady / sum_steady_s : 0;          // steps/s
     const double gen_tps = sum_gen_s > 0 ? (double)n_gen_s / sum_gen_s : 0;
     const double cold_per_tok = n_steady_cold ? (double)steady_cold_bytes / n_steady_cold / 1073741824.0 : 0;
-    printf("summary,%s,gen_tokens=%zu,steady_tok_per_s=%.3f,best_tok_per_s=%.3f,overall_gen_tok_per_s=%.3f,cold_GiB_per_token=%.3f,min_free_vram_MiB=%ld,ram_avail_MiB=%ld,swap_used_MiB=%ld\n",
-           (validate && mismatches) ? "FAIL" : "PASS", generated.size(), steady_tps, best_tok_s > 0 ? 1.0 / best_tok_s : 0.0, gen_tps,
-           cold_per_tok, free_min, meminfo_mib("MemAvailable:"), meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:"));
+    printf("summary,%s,batch=%ld,gen_steps=%zu,steady_steps_per_s=%.3f,steady_aggregate_tok_per_s=%.3f,best_step_aggregate_tok_per_s=%.3f,overall_aggregate_tok_per_s=%.3f,cold_GiB_per_step=%.3f,cold_GiB_per_token=%.4f,min_free_vram_MiB=%ld,ram_avail_MiB=%ld,swap_used_MiB=%ld\n",
+           (validate && mismatches) ? "FAIL" : "PASS", batch, generated.size(), steady_tps,
+           steady_tps * batch, best_tok_s > 0 ? batch / best_tok_s : 0.0, gen_tps * batch,
+           cold_per_tok, n_steady ? cold_per_tok / batch : 0.0,
+           free_min, meminfo_mib("MemAvailable:"), meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:"));
     return (validate && mismatches) ? 1 : 0;
 }

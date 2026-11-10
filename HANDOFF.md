@@ -123,3 +123,21 @@ free, zero NVMe in steady state. Reproduce:
 taskset -c 0-3 benchmarks/real_decode --model /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf   --prompt-ids "248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198"   --gen-tokens 16 --ctx 256 --hot-mib 8192 --cache-mib 5553 --readers 4
 ```
 Next: batch-16 real decode; approximate-layer drafting for the bytes/token KPI.
+
+## E039 (this session) — batched real decode, 13.2 aggregate tok/s at 0.77 GiB/token
+
+--batch B in real_decode.cu: NB-template GEMV shares each weight read across B sequences;
+per-sequence KV + SSM states; all kernels batched. 27B: batch 4 = 10.70 agg tok/s, batch 8 =
+13.17 agg tok/s (0.772 GiB cold/token, 7x less than single-stream), all sequences token-for-
+token identical to the validated batch-1/llama.cpp output; 2 GiB VRAM floor held (batch 8 runs
+hot 7424/cache 6144; batch 16 would need 2.36 GiB of SSM states and busts the floor). Critical
+fix: six elementwise kernels had grid (x, B) with flat indexing — every blockIdx.y block did
+the same y[i] += x[i] (non-atomic RMW race, nondeterministic lost updates). Use global index
+(by*gridDim.x+bx)*blockDim.x+tid in any new batched elementwise kernel. Also fixed: delta-net
+qkv stride (dense [B][10240]), KV stride units, logits scatter, prefill handoff, k_l2_heads
+batching. Reproduce batch 8:
+```
+taskset -c 0-3 benchmarks/real_decode --model /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf \
+  --prompt-ids "248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198" \
+  --gen-tokens 16 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4 --batch 8
+```

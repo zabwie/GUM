@@ -44,3 +44,13 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
 30. **Next:** batch-16 real decode (amortize the 5.42 GiB/token cold set across sequences, E033-style)
     for aggregate serving throughput; then approximate-layer drafting + exact verification to cut
     bytes/accepted-token (the E036 KPI).
+
+31. **Completed (E039, measured):** Batched real decode: --batch B (power of 2) with NB-template
+    dp4a GEMV, per-sequence KV/SSM/conv states, batched kernels. 27B: batch 4 = 10.70 aggregate
+    tok/s (1.36 GiB cold/token), batch 8 = 13.17 (0.772 GiB/token, 7x less than single-stream),
+    both token-for-token equivalent to the validated sequence across all sequences; 2 GiB VRAM
+    floor held (batch 8: hot 7424/cache 6144; batch 16 busts the floor on SSM states). Key fix:
+    flat-index RMW race in six elementwise kernels (grid (x, B) blocks all writing the same
+    indices — nondeterministic lost updates) + delta-net qkv stride. Raw: results/e039-*.
+32. **Next:** tensor-core int8 MMQ kernel (batch-8 step time is compute+copy mixed); approximate-
+    layer drafting for the bytes/accepted-token KPI; optional fp16 SSM states for batch 16.

@@ -68,6 +68,14 @@ greedy output vs llama.cpp CPU (validated on both the 0.6B, 24/24 tokens, and th
 node dumps from a patched out-of-tree llama.cpp copy). The decisive bug was the delta-net k-head
 mapping (h % n_group, not h/3); full list in EXPERIMENTS.md E038.
 
-Next: (1) batch-16 real decode (E033-style amortization on the real graph) for serving aggregate
-throughput; (2) approximate-layer drafting + exact verification to cut the 5.42 GiB/token cold set
-(E036's naive MTP did not cut traffic); (3) optional tensor-core int8 MMQ kernel for batch compute.
+E039 (batched real decode) is complete: --batch B amortizes the cold set across sequences.
+27B measured: batch 4 = 10.70 aggregate tok/s (1.36 GiB cold/token), batch 8 = 13.17 (0.772
+GiB/token), both token-equivalent to the validated batch-1 sequence, 2 GiB VRAM floor held
+(batch 8 needs hot 7424/cache 6144; batch 16 busts the floor on SSM states). The decisive fix
+was a flat-index read-modify-write race in six elementwise kernels (grid (x, B) blocks all
+touching the same indices) plus the delta-net qkv stride; full list in EXPERIMENTS.md E039.
+
+Next: (1) tensor-core int8 MMQ kernel to cut batched compute (step time at batch 8 is
+compute+copy mixed); (2) approximate-layer drafting + exact verification to cut bytes/token
+further (E036 KPI); (3) optional: fp16 SSM states to fit batch 16 under the VRAM floor
+(numerics revalidation required).

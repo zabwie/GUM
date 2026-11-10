@@ -424,3 +424,64 @@ proxy (5.42 GiB/token at ~19 GB/s effective vs 24.6 GB/s isolated H2D = 78% effi
 the 4.0 tok/s proxy is per-token compute/launch overhead in the real graph. Batch>1 (E033-style)
 and approximate-layer drafting remain the levers for aggregate throughput. Raw:
 results/e038-real-decode-27b-*.txt, results/e038-validate-06b-*.txt.
+
+
+## E039 — Batched real decode: amortizing the cold set (2026-11-10)
+
+**Goal.** Cut the 5.42 GiB/token cold-set cost of E038 by sharing each weight read across B
+decode sequences (E033-style amortization on the real graph).
+
+**Implementation.** `benchmarks/real_decode.cu` gained a `--batch B` dimension (power of two,
+1..64): the dp4a Q4_0 GEMV is templated on NB (ported from streamed_decode, one weight read
+shared by NB activation vectors), every activation buffer is [B][...], KV cache and SSM/conv
+states are per-sequence ([B][layer][...]), and all non-GEMV kernels take a gridDim.y = B
+sequence axis. Prompts: ';'-separated equal-length sequences, replicated to B for equivalence
+testing. Lockstep decode; per-sequence greedy sampling and EOS.
+
+**Bugs found (each verified by per-layer/per-op dumps before fixing):**
+1. **Flat-index RMW race (the big one).** The six elementwise kernels (k_add, k_silu_mul,
+   k_sigmoid, k_gate_ssm, k_sigmoid_mul, k_attn_gate_apply) used grid (x, B) with a flat
+   `i = blockIdx.x*blockDim.x + threadIdx.x` index — every blockIdx.y block processed the SAME
+   index range, so `y[i] += x[i]` became a non-atomic read-modify-write race across B blocks.
+   Lost/duplicated updates produced rare nondeterministic token divergence (batch 4: mostly
+   correct; batch 8: always wrong). Fixed with the global index
+   `(blockIdx.y*gridDim.x + blockIdx.x)*blockDim.x + threadIdx.x`. Isolated in a standalone
+   kernel: 4-block `+=` on one address yields 1-4 effective adds depending on timing.
+2. **k_delta_net q/k/v stride.** The kernel advanced q16/k16 by vs*ngroup*S and v by vs*H*S,
+   but the conv output is dense [B][qkv_out=10240] — v>=1 read seq0's K slice as its Q.
+   Fixed with an explicit qkv_seq_stride = m.qkv_out.
+3. **KV-cache stride units.** kv_seq_stride was bytes, added to a float* (4x overshoot,
+   illegal access at batch 8). Fixed to float units.
+4. **Logits scatter.** The output-head GEMV used the max_rows buffer pitch instead of n_vocab,
+   scattering batch vectors across the logits buffer.
+5. **Prefill handoff.** The first sampled token was dropped (argmax taken before prefill end).
+6. **k_l2_heads not batched** (all sequences normalized seq0's data).
+
+**Validation.** Batch-8 replicated-prompt runs are token-for-token identical to the validated
+batch-1/llama.cpp sequence: 0.6B 6/6 runs, 27B equivalent=yes (all 8 sequences), seq0 =
+"<think>\nThe user is asking a simple factual question about the capital of France,". Per-op
+dumps confirm qkv/beta/conv/dnout/gatednorm are bit-identical across sequences at batch 8.
+compute-sanitizer memcheck/initcheck/racecheck: 0 errors (note: racecheck cannot catch the
+global-memory RMW race; the standalone reproducer did).
+
+**Results (27B, iommu=pt, taskset 0-3, 16 gen steps, all PASS, equivalence=yes).**
+
+| batch | hot/cache MiB | step time | aggregate tok/s | cold GiB/token | min free VRAM |
+|---|---|---|---|---|---|
+| 1 (E038) | 8192/5553 | 0.295 s | 3.39 | 5.42 | 2876 MiB |
+| 4 | 8192/5553 | 0.374 s | **10.70** | 1.356 | 2189 MiB |
+| 8 | 7424/6144 | 0.607 s | **13.17** | **0.772** | 2223 MiB |
+
+Batch 8 is the compliant maximum: batch 16 needs 2.36 GiB of SSM states and busts the 2 GiB
+VRAM floor even with the hot arena trimmed (the first batch-8 attempt at hot 8192 ran at
+14.8 tok/s but 1254 MiB free — below floor — and was re-run at hot 7424). The cold set is now
+0.772 GiB/token — 7x less than single-stream — and aggregate throughput is 3.9x single-stream
+and 12.7x llama.cpp's MTP arm (1.04 t/s). Step time is now compute+copy mixed: the copy grew
+5.42->6.17 GiB/step (smaller hot arena) while batched compute scales with B, so marginal
+efficiency declines beyond batch 8 without further kernel work (tensor-core MMQ, E028 item).
+
+**Interpretation limits.** Aggregate tok/s is serving-style (8 independent sequences), not
+single-user latency; single-stream remains ~3.4 tok/s and is PCIe-bound. All batch sequences
+here are replicated for equivalence; diverse prompts are supported (equal lengths) and expected
+to show the same throughput. Raw: results/e039-real-decode-27b-batch8*.txt,
+results/e039-real-decode-27b-batch4-*.txt.
