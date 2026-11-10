@@ -108,25 +108,40 @@ is achieved and validated; the goal is now single-user speed.
 
 ## 5. Honest ceilings on this hardware (lossless, single-user)
 
+**E040 MEASURED the verification ceiling (2026-11-10) — the amortization is near-perfect.**
+Multi-position verify, one sequence, cold set streamed once per step, teacher-forced tokens
+(130/130 argmax checks match across B ∈ {1,2,4,8}):
+
+| positions/step | mean step | tok/s (upper bound) | marginal cost/position |
+|---|---|---|---|
+| 1 | 0.348 s | 2.88 | — |
+| 2 | 0.355 s | 5.64 | +7 ms |
+| 4 | 0.364 s | 10.98 | +3 ms |
+| 8 | 0.383 s | **20.87** | **+5 ms** |
+
+The external estimate (+28 ms for 5 positions) was nearly right; my E039-based correction
+(+150-250 ms) was pessimistic — serving-batch overhead (per-sequence states, cache appends)
+does not apply to single-sequence verification. Consequences:
+
 | Configuration | Ceiling |
 |---|---|
-| Dense streaming (today) | ~4.4 tok/s (measured 3.39) |
-| Speculation, measured acceptance, current compute | ~6-8 tok/s |
-| Speculation + compute work (4.4) + acceptance 3.5+ | ~10-13 tok/s |
-| Everything perfect (γ=5, α=4, zero draft, minimal verify compute) | ~15 tok/s |
-| 40 tok/s | NOT reachable lossless on 12 GB — needs ≥22 GB VRAM (model fully hot: dense ~20-25, speculative 40+) or quality loss |
+| Dense streaming (today) | ~4.4 tok/s (measured 3.39; verify-path 2.88 — the verify pass pays a small attention/sync tax) |
+| Speculation at measured acceptance E[N]=2.84, γ=7 | **~6.2 tok/s** (T_iter ≈ 0.455 s) |
+| Speculation at acceptance 4 (PLD fusion / better drafting) | ~9.4 tok/s |
+| Speculation at acceptance 5+ + compute cuts (E043) | ~12-14 tok/s |
+| Zero-draft, 100%-acceptance bound at γ=7 | ~20.9 tok/s (measured) |
+| 40 tok/s | NOT reachable lossless on 12 GB — needs ≥22 GB VRAM or quality loss |
 
 ## 6. Experiment ladder (E040 onward)
 
-- **E040 — verification ceiling (do first, mostly de-risked by E039).** Extend real_decode to
-  multi-position verify: γ+1 rows of one sequence through the full graph with the cold set
-  streamed once. Requires: causal multi-position attention (each row attends to cache +
-  preceding draft rows), delta-net position loop inside the kernel (sequential state update,
-  tiny compute), logits for all rows. Measure T_verify(B) for B ∈ {1,2,4,6,8} with
-  pre-accepted candidates (upper bound, zero draft cost).
-  **Acceptance: T_verify(5) ≤ T_decode(1) + 120 ms** (i.e. amortization is real; external
-  estimates assume +28 ms — we expect +150-250 ms; this experiment settles the dispute).
-- **E041 — MTP-head drafter in VRAM.** Decode the qwen35 nextn head (eh_proj/enorm/hnorm +
+- **E040 — COMPLETE (2026-11-10).** Multi-position verify implemented in real_decode.cu
+  (`--multi B --feed-ids ...`): causal per-row attention boundaries, sequential delta-net and
+  conv state updates inside the kernels, per-row RoPE/positions, teacher-forced argmax checks.
+  Result: amortization near-perfect (table in §5); 0 soft mismatches; the verify path is the
+  foundation for E041/E042. Note: the summary's cold_GiB_per_step field reports the total over
+  all steps (incl. the skipped warm-up); true per-step cold = 6.17 GiB (hot 7424 config),
+  0.77 GiB/position at B=8.
+- **E041 — MTP-head drafter in VRAM (NEXT).** Decode the qwen35 nextn head (eh_proj/enorm/hnorm +
   dense block, own small KV) from VRAM; greedy self-verification first (accept if draft token
   == target argmax), then full rejection sampling. Measure real α on our decode loop.
 - **E042 — PLD drafter.** n-gram lookup drafts; same verify path. Compare acceptance by

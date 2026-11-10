@@ -371,15 +371,17 @@ __global__ void k_l2_heads(float* x, int nh, int hd, float eps, long seq_stride)
 }
 // standard (neox half-split) RoPE, text positions: pair (x_i, x_i+n_rot/2), theta = pos*base^(-2i/n_rot)
 // q: [nh_q][hd] (qwen35: only first hd of each (hd+hd_gate) slice — pass stride), k: [nh_k][hd]
-__global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, int n_rot, float base, int q_stride, int style) {
+__global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, int n_rot, float base, int q_stride, int style, int row_pos) {
     const int h = blockIdx.x;
     const long v = blockIdx.y;
     q += v * (size_t)nh_q * q_stride;
     k += v * (size_t)nh_k * hd;
     const int half = n_rot / 2;
     float* dst = h < nh_q ? q + (size_t)h * q_stride : k + (size_t)(h - nh_q) * hd;
+    // multi-position verify: row v sits at position pos+v; otherwise all rows share pos
+    const int p = pos + (row_pos ? (int)v : 0);
     for (int i = threadIdx.x; i < half; i += blockDim.x) {
-        const float theta = (float)pos * powf(base, -2.f * (float)i / (float)n_rot);
+        const float theta = (float)p * powf(base, -2.f * (float)i / (float)n_rot);
         const float c = cosf(theta), s = sinf(theta);
         const int ia = style ? 2 * i : i;
         const int ib = style ? 2 * i + 1 : i + half;
@@ -391,7 +393,7 @@ __global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, 
 // GQA decode attention for one token at position pos (cache already contains pos+1 entries
 // for this layer after append). K/V cache: [n_kh][max_ctx][hd]. out: [nh_q][hd].
 __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, const float* q,
-                              int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride, long kv_seq_stride) {
+                              int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride, long kv_seq_stride, int row_pos) {
     extern __shared__ float sh[];   // pos+1 scores
     const int h = blockIdx.x;
     const long v = blockIdx.y;
@@ -403,7 +405,8 @@ __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, cons
     const float* qh = q + (size_t)h * q_stride;
     const float* Kk = Kc + (size_t)kh * n_ctx_max * hd;
     const float* Vk = Vc + (size_t)kh * n_ctx_max * hd;
-    const int np = pos + 1;
+    // multi-position verify: row v is at position pos+v and attends cache[0..pos+v]
+    const int np = pos + 1 + (row_pos ? (int)v : 0);
     for (int t = 0; t < np; ++t) {
         float p = 0.f;
         for (int i = threadIdx.x; i < hd; i += blockDim.x) p += qh[i] * Kk[(size_t)t * hd + i];
@@ -458,6 +461,44 @@ __global__ void k_delta_net(float* state, const float* q16, const float* k16, co
     for (int i = 0; i < S; ++i) row[i] += dj * kh[i];
     float o = 0.f; for (int i = 0; i < S; ++i) o += row[i] * qh[i];
     out[(size_t)h * S + j] = o * scale;
+}
+// multi-position verify: ONE sequence's conv over B positions, sequential state shifts.
+// x/out: [B][C] rows are positions; grid (C/256).
+__global__ void k_conv1d_silu_multi(float* cstate, const float* x, const float* w, float* out, int C, int B) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= C) return;
+    float s0 = cstate[c * 3 + 0], s1 = cstate[c * 3 + 1], s2 = cstate[c * 3 + 2];
+    for (int p = 0; p < B; ++p) {
+        const float xc = x[(size_t)p * C + c];
+        const float sum = w[c * 4 + 0] * s0 + w[c * 4 + 1] * s1 + w[c * 4 + 2] * s2 + w[c * 4 + 3] * xc;
+        s0 = s1; s1 = s2; s2 = xc;
+        out[(size_t)p * C + c] = sum / (1.f + expf(-sum));
+    }
+    cstate[c * 3 + 0] = s0; cstate[c * 3 + 1] = s1; cstate[c * 3 + 2] = s2;
+}
+// multi-position gated delta net for ONE sequence: state is [H][S*S] (transposed), updated
+// sequentially over B positions; grid (H). q/k/v: [B][qkv_out] slices; g/beta: [B][H]; out: [B][H*S].
+__global__ void k_delta_net_multi(float* state, const float* qkv, const float* g, const float* beta, float* out,
+                                  int S, int H, int ngroup, float scale, long qkv_stride, long out_stride, int B) {
+    const int h = blockIdx.x;
+    const int j = threadIdx.x;
+    if (j >= S) return;
+    const int hk = h % ngroup;   // ggml: iv1 % n_k_heads
+    float* st = state + (size_t)h * S * S;
+    for (int p = 0; p < B; ++p) {
+        const float* qkvp = qkv + (size_t)p * qkv_stride;
+        const float* kh = qkvp + (size_t)S * ngroup + (size_t)hk * S;
+        const float* qh = qkvp + (size_t)hk * S;
+        const float* vh = qkvp + 2 * (size_t)S * ngroup + (size_t)h * S;
+        float* row = st + (size_t)j * S;
+        const float eg = expf(g[(size_t)p * H + h]);
+        for (int i = 0; i < S; ++i) row[i] *= eg;
+        float dot = 0.f; for (int i = 0; i < S; ++i) dot += row[i] * kh[i];
+        const float dj = (vh[j] - dot) * beta[(size_t)p * H + h];
+        for (int i = 0; i < S; ++i) row[i] += dj * kh[i];
+        float o = 0.f; for (int i = 0; i < S; ++i) o += row[i] * qh[i];
+        out[(size_t)p * out_stride + (size_t)h * S + j] = o * scale;
+    }
 }
 // conv1d(k=4) + silu, decode step: window = conv_state[c][0..2], x[c]; shifts state.
 // w layout F32 [4, C]: w[c*4 + j].
@@ -810,8 +851,9 @@ static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq,
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     std::string model, prompt, prompt_ids_s, out_ids_path;
-    long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1;
+    long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1, multi = 0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0;
+    std::string feed_ids_s;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i]; const char* v = argv[i + 1];
         if (k == "--model") model = v;
@@ -820,6 +862,8 @@ int main(int argc, char** argv) {
         else if (k == "--ctx") ctx = atol(v);
         else if (k == "--gen-tokens") gen_tokens = atol(v);
         else if (k == "--batch") batch = atol(v);
+        else if (k == "--multi") multi = atol(v);
+        else if (k == "--feed-ids") feed_ids_s = v;
         else if (k == "--prompt") prompt = v;
         else if (k == "--prompt-ids") prompt_ids_s = v;
         else if (k == "--validate") validate = atoi(v);
@@ -836,6 +880,13 @@ int main(int argc, char** argv) {
     if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
     if (validate && batch != 1) { fprintf(stderr, "--validate requires --batch 1\n"); return 2; }
     g_batch = batch;
+    if (multi > 0) {
+        // E040 verify mode: one sequence, `multi` positions per step (B rows share one
+        // cold-set transfer); batch buffers are reused as position rows
+        if (validate) { fprintf(stderr, "--validate requires multi mode off\n"); return 2; }
+        batch = multi;
+        if (batch & (batch - 1)) { fprintf(stderr, "--multi must be a power of two\n"); return 2; }
+    }
     g_swap0 = meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:"); safety("start");
 
     GgufKV kv; std::vector<GTensor> gtensors; uint64_t data_start = 0;
@@ -1079,6 +1130,16 @@ int main(int argc, char** argv) {
         if (ids.empty()) { fprintf(stderr, "empty prompt\n"); return 2; }
         prompts.push_back(ids);
     }
+    std::vector<long> feed;   // E040: teacher-forced continuation (the model's own tokens)
+    if (!feed_ids_s.empty()) {
+        size_t p = 0;
+        while (p < feed_ids_s.size()) {
+            size_t q = feed_ids_s.find(',', p);
+            if (q == std::string::npos) q = feed_ids_s.size();
+            feed.push_back(atol(feed_ids_s.substr(p, q - p).c_str()));
+            p = q + 1;
+        }
+    }
     while (prompts.size() < (size_t)batch) prompts.push_back(prompts[0]);   // replicate for equivalence tests
     if ((long)prompts.size() != batch) { fprintf(stderr, "need exactly %ld prompt sequences (';'-separated)\n", batch); return 2; }
     for (long v = 1; v < batch; ++v)
@@ -1164,6 +1225,7 @@ int main(int argc, char** argv) {
     std::vector<long> generated;        // argmax tokens produced
     long cur_pos = 0;                   // sequence position for rope/kv
 
+    const int row_pos = multi > 0 ? 1 : 0;   // E040: rows are positions of one sequence
     auto run_token = [&](const std::vector<long>& toks, int pass, double* tok_s_out, uint64_t* cold_out) { (void)dbg_dump;
         std::atomic<size_t> released{0};
         std::atomic<long> ready[kStage]; for (auto& r : ready) r = 0;
@@ -1287,14 +1349,21 @@ int main(int argc, char** argv) {
                 const long conv_seq_stride = m.n_recr * m.qkv_out * (m.sss_conv - 1);
                 const long ssm_seq_stride = m.n_recr * m.sss_dt * Sv * Sv;
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("qkv0", yA, m.qkv_out); dbg("zraw0", yB, m.sss_inner); dbg("beta0", t_g48a, m.sss_dt); dbg("alpharaw0", t_g48b, m.sss_dt); if (B > 1) { dbg2("qkv0", yA, m.qkv_out, m.qkv_out, 1); dbg2("beta0", t_g48a, m.sss_dt, 64, 1); } }
-                k_conv1d_silu<<<dim3((unsigned)((m.qkv_out + 255) / 256), (unsigned)B), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, conv_seq_stride);
+                if (row_pos)
+                    k_conv1d_silu_multi<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, (int)B);
+                else
+                    k_conv1d_silu<<<dim3((unsigned)((m.qkv_out + 255) / 256), (unsigned)B), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, conv_seq_stride);
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("convout0", t_conv, m.qkv_out); if (B > 1) dbg2("convout0", t_conv, m.qkv_out, m.qkv_out, 1); }
                 const long Sdim = m.sss_state;
                 const long conv_slice_stride = A == "qwen35" ? m.qkv_out : 0;
                 k_l2_heads<<<dim3((unsigned)m.sss_group, (unsigned)B), 128, 0, stc>>>(t_conv, (int)m.sss_group, (int)Sdim, (float)m.eps, conv_slice_stride);
                 // K lives at [Sdim*group, 2*Sdim*group) — V (at 2*Sdim*group) must NOT be normalized
                 k_l2_heads<<<dim3((unsigned)m.sss_group, (unsigned)B), 128, 0, stc>>>(t_conv + Sdim * m.sss_group, (int)m.sss_group, (int)Sdim, (float)m.eps, conv_slice_stride);
-                k_delta_net<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_conv + Sdim * m.sss_group,
+                if (row_pos)
+                    k_delta_net_multi<<<(unsigned)m.sss_dt, 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_v, t_g48a, t_dn,
+                                                                     (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, (long)m.qkv_out, (long)m.sss_inner, (int)B);
+                else
+                    k_delta_net<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_conv + Sdim * m.sss_group,
                                                                  t_conv + 2 * Sdim * m.sss_group, t_v, t_g48a, t_dn, (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, ssm_seq_stride, (long)m.qkv_out);
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("dnout0", t_dn, m.sss_inner); if (B > 1) { dbg2("dnout0", t_dn, m.sss_inner, m.sss_inner, 1); dbg2("vsl", t_conv + 2 * m.sss_state * m.sss_group, 8, m.qkv_out, 1); dbg2("vsl0", t_conv + 2 * m.sss_state * m.sss_group, 8, m.qkv_out, 0); dbg2("gsl", t_v, 8, 4096, 1); dbg2("gsl0", t_v, 8, 4096, 0); } }
                 k_gated_norm<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(t_att, t_dn, S(L + ".ssm_norm.weight"), yB, (int)m.sss_dt, (int)Sv, (float)m.eps);
@@ -1313,7 +1382,7 @@ int main(int argc, char** argv) {
                 // are half-split (ops.cpp rope switch). qwen35 = IMROPE = half-split; for text the
                 // mrope section positions are all equal, so it is plain half-split RoPE.
                 const int rope_style = 0;
-                k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style);
+                k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style, row_pos);
                 const long li = A == "qwen35" ? il / 4 : il;
                 const long kv_seq_stride = (long)m.n_attn * 2 * m.n_kv * ctx * m.head_v;   // FLOATS per sequence (kv_per_layer is bytes)
                 float* Kc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer);
@@ -1323,13 +1392,14 @@ int main(int argc, char** argv) {
                 for (long v = 0; v < B; ++v) {
                     float* Ks = Kc + v * kv_seq_stride;
                     float* Vs = Vc + v * kv_seq_stride;
+                    const long p = cur_pos + (row_pos ? v : 0);
                     for (long h = 0; h < nh_k; ++h) {
-                        check(cudaMemcpyAsync(Ks + ((size_t)h * ctx + cur_pos) * hd, yB + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append k");
-                        check(cudaMemcpyAsync(Vs + ((size_t)h * ctx + cur_pos) * hd, t_v + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append v");
+                        check(cudaMemcpyAsync(Ks + ((size_t)h * ctx + p) * hd, yB + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append k");
+                        check(cudaMemcpyAsync(Vs + ((size_t)h * ctx + p) * hd, t_v + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append v");
                     }
                 }
                 if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("vc" + std::to_string(il)).c_str(), Vc, nh_k * hd); }
-                k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + 1) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride);
+                k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + (row_pos ? B : 1)) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride, row_pos);
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); if (B > 1) { dbg2(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd, nh_q * hd, 1); dbg2(("vv" + std::to_string(il)).c_str(), t_v, nh_k * hd, nh_k * hd, 1); } }
                 if (A == "qwen35") k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
                 mat(L + ".attn_output.weight", t_att, nh_q * hd, yA, 0, max_rows);
@@ -1367,7 +1437,7 @@ int main(int argc, char** argv) {
         uint64_t cb = 0; for (int idx : cold_list) cb += items[idx].bytes;
         *cold_out = cb;
         if (fail.load()) exit(1);
-        ++cur_pos;
+        cur_pos += row_pos ? B : 1;   // multi-position verify advances B positions per step
     };
 
     // ---- run: prompt then greedy generation ----
@@ -1400,6 +1470,51 @@ int main(int argc, char** argv) {
     double sum_gen_s = 0; long n_gen_s = 0;
     size_t max_plen = 0;
     for (long v = 0; v < batch; ++v) { plen[v] = prompts[v].size(); max_plen = std::max(max_plen, plen[v]); }
+    if (multi > 0) {
+        // ---- E040: verification-ceiling benchmark ----
+        // One sequence; teacher-forced tokens (prompt + --feed-ids, which should be the
+        // model's own greedy continuation) processed `multi` positions per step. The cold
+        // set streams ONCE per step; every position is "accepted" by construction, so
+        // B / T_step is the zero-draft-cost upper bound on speculative throughput.
+        std::vector<long> seq = prompts[0];
+        seq.insert(seq.end(), feed.begin(), feed.end());
+        const long Bp = batch;
+        if ((long)seq.size() % Bp) seq.resize(seq.size() / Bp * Bp);
+        if ((long)seq.size() < 2 * Bp) { fprintf(stderr, "need at least %ld tokens in prompt+feed\n", 2 * Bp); return 2; }
+        printf("verify_mode,positions_per_step=%ld,seq_len=%zu,steps=%zu\n", Bp, seq.size(), seq.size() / Bp);
+        long soft_mism = 0, soft_checked = 0;
+        double best_step = 1e30, sum_step = 0; long n_steps = 0;
+        for (size_t base = 0; base + Bp <= seq.size(); base += Bp) {
+            std::vector<long> toks(seq.begin() + base, seq.begin() + base + Bp);
+            double s; uint64_t cold;
+            run_token(toks, (int)(base / Bp), &s, &cold);
+            // teacher-forced check: row p's argmax should predict seq[base+p+1]
+            for (long p = 0; p < Bp && base + Bp + p < seq.size(); ++p) {
+                const long pred = argmax(&logits_h[(size_t)p * m.n_vocab]);
+                ++soft_checked;
+                if (pred != seq[base + Bp + p]) {
+                    const float* lg = &logits_h[(size_t)p * m.n_vocab];
+                    const double gap = lg[seq[base + Bp + p]] - lg[pred];
+                    if (gap > 0.25) { ++soft_mism; fprintf(stderr, "VERIFY MISMATCH step %zu row %ld: pred=%ld(%s) want=%ld(%s) gap=%.4f\n",
+                        base / Bp, p, pred, pred < (long)tok.vocab.size() ? tok.vocab[pred].c_str() : "?",
+                        seq[base + Bp + p], seq[base + Bp + p] < (long)tok.vocab.size() ? tok.vocab[seq[base + Bp + p]].c_str() : "?", gap); }
+                }
+            }
+            const long fv = free_vram_mib();
+            if (fv >= 0 && fv < free_min) free_min = fv;
+            safety("verify");
+            steady_cold_bytes += cold;
+            if (base >= Bp) { sum_step += s; ++n_steps; if (s < best_step) best_step = s; }   // skip first (cold caches)
+            printf("verify_step,%zu,positions=%ld,seconds=%.4f,tok_per_s=%.3f,cold_bytes=%llu,free_vram_MiB=%ld\n",
+                   base / Bp, Bp, s, (double)Bp / s, (unsigned long long)cold, fv);
+        }
+        const double mean_step = n_steps ? sum_step / n_steps : 0;
+        printf("verify_summary,positions_per_step=%ld,steps=%ld,mean_step_s=%.4f,best_step_s=%.4f,mean_tok_per_s=%.3f,best_tok_per_s=%.3f,cold_GiB_per_step=%.3f,cold_GiB_per_token=%.4f,soft_mismatches=%ld,soft_checked=%ld,min_free_vram_MiB=%ld\n",
+               Bp, n_steps, mean_step, best_step, mean_step > 0 ? Bp / mean_step : 0, best_step > 0 ? Bp / best_step : 0,
+               (double)steady_cold_bytes / 1073741824.0, n_steps ? ((double)steady_cold_bytes / n_steps / Bp / 1073741824.0) : 0,
+               soft_mism, soft_checked, free_min);
+        return 0;
+    }
     for (size_t i = 0; i < max_plen; ++i) {
         std::vector<long> toks(batch);
         for (long v = 0; v < batch; ++v) toks[v] = i < plen[v] ? prompts[v][i] : prompts[v].back();
