@@ -1,4 +1,4 @@
-# Vanta — Session Handoff (2026-11-10, post E043)
+# Vanta — Session Handoff (2026-11-10, post E049)
 
 Repo: `/home/zabwie/gpu-unified-memory-research` (git; latest see `git log -1`). Read AGENT.md
 first for the operating mentality. RESEARCH_PLAN.md is the strategy; EXPERIMENTS.md the
@@ -43,23 +43,50 @@ RAM/swap floors.
   delta-net state (KV alone is not enough; this is a genuine contribution for hybrid models).
 - **CPU fp32 reference decoder** (`--validate 1`) for correctness gates (0.6B-scale models).
 
-## Performance ledger (27B, single-user, lossless — honest, post E043)
+## Performance ledger (27B, single-user, lossless-gated — post E049)
 
 | path | tok/s | vs dense |
 |---|---|---|
-| dense (E038) | 3.39 | 1× |
-| dense, 13-token chat prompt (E043 re-measure) | 2.81 | — |
-| spec chat γ=8 (E043, 3.8% accept) | 2.46 | 0.9× |
-| spec agent-trace γ=8 (E043, 14.8% accept) | 3.63 | 1.3× |
-| spec agent-trace γ=16 (E043, 7.6% accept) | 1.91 | 0.7× |
-| verify bound at 8 positions (E040 measured) | 18.6 | — |
-| verify bound deep γ=32 (E040 curve extrapolation) | ~50 | — |
+| dense (8704/5150, no NVMe tier) | 3.53 | 1x |
+| spec PLD-only g=8 | 2.9-3.3 | ~1x |
+| spec MTP g=16, chat prompt (78% accept) | 9.3-10.0 | 3.4x |
+| spec hybrid g=16, chat (PLD rarely fires) | 9.22 | 3.3x |
+| spec hybrid g=16, agent trace (34-42% accept) | 5.79 | 1.7x |
+| verify bound g=8, hot 8192 (E047 re-measure) | 20.4 | — |
+| verify bound deep g=32 (curve extrapolation) | ~50 | — |
 
 **⚠ The old "7.26 tok/s chat at 33% acceptance" was measured on a corrupted stream** (E043
 bug 1: the state divergence made the model echo its own repeats, which the n-gram drafter
 then "predicted"). With correct state, PLD drafting quality — not verification — is the
 bottleneck. The verify machinery is now correct and gated; the upside is in drafter quality
 (adaptive-γ, RESEARCH_PLAN).
+
+## THE HEADLINE OPPORTUNITY (owner's insight)
+
+**Agent tool-wrapping is predictable.** Tool-call JSON schemas, fences, keys, echoed context
+— the scaffolding around an agent's text is fixed or repeats from history. The model only
+generates the novel middle. So: deep-γ drafting (16–32 positions, ~0.1 ms/token draft cost)
+verified in one cold-set pass → in-span bursts. E040's measured +7.4 ms/position makes deep
+verification nearly free, and E043 made it correct and gated. What stands between us and the
+burst numbers is now purely **drafter quality** (issue 2): the verify side is solved.
+
+## KNOWN ISSUES — next levers, ranked (post E049)
+
+1. **Copy throughput is THE bound.** nsys: the pass is H2D-copy-bound at 13.6 GB/s effective
+   (median copy 16.6 MB) vs the 24.6 GB/s peak; ALL compute is hidden behind copies. Lifting
+   copies to ~20 GB/s is a 1.5x on every path. Failed attempts (E048, reverted): 64 MiB
+   items, write-combined host buffers. Untried: dual copy streams (check
+   asyncEngineCount first — consumer GPUs may have 1 CE), per-stream copy batching.
+2. **Drafter acceptance on high-entropy content.** MTP gets 78% (chat) but 34% (agent JSON);
+   the hybrid picks PLD only on 6-token matches. Next: tree/beam drafting needs multi-branch
+   verify (rows are one sequence — an architecture change); or p_min adaptive per depth.
+3. **delta-net kernel is 2x off its bandwidth floor** (85 ms/pass vs ~40 ms) — currently
+   FREE (hidden behind copies); only matters after lever 1 lands.
+4. **k_attn_decode is O(context) serial per head** with half the threads idle (hd=128,
+  256 threads) — same story: hidden until copies lift.
+5. **Summary metric bug**: verify mode's cold_GiB_per_step prints the TOTAL (cosmetic).
+6. **E040 soft check**: keep it honest — prompt-region rows are skipped, absolute gap,
+   garbage detector. Never "simplify" it back.
 
 ## THE HEADLINE OPPORTUNITY (owner's insight)
 
@@ -127,10 +154,11 @@ IDS="248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198"
 taskset -c 0-3 benchmarks/real_decode --model $M --prompt-ids "$IDS" \
   --gen-tokens 32 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4 --show-text 0 \
   --out-ids /tmp/expect27.txt
-# speculative, LOSSLESS-GATED (exit 1 on any drift — always run with --expect-ids):
-taskset -c 0-3 benchmarks/real_decode --model $M --prompt-ids "$IDS" \
-  --speculate 8 --gen-tokens 32 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4 \
-  --show-text 0 --expect-ids /tmp/expect27.txt
+# speculative MTP+hybrid, LOSSLESS-GATED (exit 1 on any drift — ALWAYS use --expect-ids):
+taskset -c 0-3 benchmarks/real_decode --model $M \
+  --mtp /home/zabwie/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf --p-min 0.3 \
+  --prompt-ids "$IDS" --speculate 16 --gen-tokens 32 --ctx 256 --hot-mib 8192 --cache-mib 5600 \
+  --readers 4 --show-text 0 --expect-ids /tmp/expect27.txt
 # agent-shaped trace (results/e043-agent-prompt.txt): dense reference first, then --speculate 8
 # verify ceiling (E040):
 ... --multi 8 --feed-ids "$(paste -sd, /tmp/feed27.txt)"
