@@ -1,0 +1,6 @@
+E059,shape=17408x5120,weight_MiB=47.81,row_tile=4,vpw=4,threads=512,smem_KiB=12.50,ref_ms=0.7439,tile_ms=0.7002,speedup=1.062,bitexact_different=0,max_abs=0,max_rel=0
+trial,0,ref_ms=0.7439,tile_ms=0.7003
+trial,1,ref_ms=0.7440,tile_ms=0.7000
+trial,2,ref_ms=0.7441,tile_ms=0.7213
+trial,3,ref_ms=0.7438,tile_ms=0.7002
+trial,4,ref_ms=0.7354,tile_ms=0.6599

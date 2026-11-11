@@ -1,0 +1,6 @@
+<|im_start|>system
+Give a practical, accurate answer with a concrete example.<|im_end|>
+<|im_start|>user
+Write a Go function that merges two sorted streams of timestamped events. Preserve duplicate timestamps and describe how the function should handle cancellation and backpressure.<|im_end|>
+<|im_start|>assistant
+<think>

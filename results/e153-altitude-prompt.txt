@@ -1,0 +1,6 @@
+<|im_start|>system
+Give a practical, accurate explanation with a concrete example.<|im_end|>
+<|im_start|>user
+Why does a sealed bag of chips puff up when you drive up a mountain? Explain what changes inside and outside the bag, and whether temperature alone could produce the same effect.<|im_end|>
+<|im_start|>assistant
+<think>

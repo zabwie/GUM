@@ -1,0 +1,5 @@
+memory.free [MiB], utilization.gpu [%], temperature.gpu
+10656 MiB, 3 %, 50
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=128,batch=1,hot_mib=8864,cache_mib=5600,validate=0
+spec_config,user_sequences=1,max_verify_positions=24,draft_max=10,draft_vocab=32768,p_min=0.250,pld_mode=0,balanced_residency=1,drafter=oracle,mtp_group=1,packed_verify=1
+ABORT before alloc: VRAM plan 9.63 GiB + 2 GiB floor exceeds 11.63 GiB

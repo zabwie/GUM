@@ -1,0 +1,40 @@
+E161 codec feasibility — 2026-11-11
+Planar-codec GPU-unpack benchmark (owner-approved): experiment stops at its
+first gate — the codec does not exist. All samples on real GGUF tensor
+boundaries (gguf-py reader), 2 MiB per plane unless noted.
+
+blk.0.attn_qkv.weight   scale_zstd3=0.947 nib_zstd3=0.948 scale_H0=7.53 bits/byte
+blk.0.ffn_down.weight   scale_zstd3=0.946 nib_zstd3=0.944 scale_H0=7.53
+blk.0.ffn_gate.weight   scale_zstd3=0.947 nib_zstd3=0.945 scale_H0=7.54
+blk.0.ffn_up.weight     scale_zstd3=0.947 nib_zstd3=0.945 scale_H0=7.54
+blk.0.ssm_out.weight    scale_zstd3=0.942 nib_zstd3=0.943 scale_H0=7.49
+blk.3.attn_q.weight     scale_zstd3=0.947 nib_zstd3=0.949 scale_H0=7.53
+
+blk.24.ffn_up.weight (2 MiB planes, strongest compressors):
+  scales   zstd-3 0.9435  zstd-19 0.9433  xz-6 0.9525
+  nibbles  zstd-3 0.9435  zstd-19 0.9434  xz-6 0.9506
+
+FP16 scale field entropies (windows @0.45/0.60/0.80 of file, consistent):
+  exponent(5b) 4.80/5   mantissa-top(2b) 2.00/2   sign(1b) ~1.00/1   mantissa-low(8b) 7.49-7.51/8
+  -> order-0 split ideal ratio 0.893-0.894 (no field-level slack)
+  -> distinct FP16 scale values per 1 MiB window: ~27,000 of 58,254 (14.7 bits — flat dictionary dead)
+
+LZ4 (16 MiB chunks, wire + both planes): ratio 1.000 — no match structure.
+Per-block order-0 entropy (4 MiB window @0.60): scale bytes 0.94-0.998,
+nibble bytes 0.939-0.942 across 256 B - 16 KiB blocks — no locality.
+
+Interpretation:
+- Nibble plane: 3.747 bits/nibble audit bound is real; zstd-19 (0.9434) is
+  within 0.6% of the 0.937 ideal. Ceiling ~6.2%, already harvested by zstd-19.
+- Scale plane: 7.53/8 bits — at its order-0 bound; the E156 audit's 0.56
+  scale ratio and 0.902 planar ratio were sampling artifacts (file-offset
+  windows, not tensor boundaries).
+- Whole-model lossless ceiling: ~5.5%. GPU-decodable share after decode
+  overhead: under ~1 tok/s end-to-end. Acceptance criterion (reproducible
+  end-to-end speedup, exact reconstruction) cannot be met — benchmark
+  correctly not built.
+- Cross-tensor redundancy / repeated structures / cross-layer correlation:
+  ruled out — any such structure would appear in zstd-19/xz; it does not.
+
+Unaffected by this correction: E160's 94%-exposed transfer, 107 ms hidden
+compute per pass, ~13.6 ms sync stalls, 50% byte-cut crossover.

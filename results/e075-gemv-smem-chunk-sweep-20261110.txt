@@ -1,0 +1,17 @@
+v0 current      : 0.509 ms  (65.9 GB/s equiv)
+tiled w=16 cb=128 : 0.698 ms  (48.1 GB/s equiv)  bitexact=YES
+tiled w=16 cb= 64 : 0.735 ms  (45.7 GB/s equiv)  bitexact=YES
+tiled w=16 cb= 32 : 0.779 ms  (43.1 GB/s equiv)  bitexact=YES
+E075 pair-tile cb=32: 0.520 ms (64.6 GB/s equiv) bitexact=YES smem_KiB=20.0
+E075 pair-tile cb=64: 0.503 ms (66.7 GB/s equiv) bitexact=YES smem_KiB=40.0
+E075 pair-tile cb=96: 0.623 ms (53.9 GB/s equiv) bitexact=YES smem_KiB=60.0
+E075 pair-tile cb=128: 0.554 ms (60.6 GB/s equiv) bitexact=YES smem_KiB=80.0
+E075 pair-rowtile rows=32 cb=64: 0.551 ms (60.9 GB/s equiv) bitexact=YES
+mr    R=2      : 0.871 ms  (38.5 GB/s equiv)  bitexact=YES
+mr    R=4      : 0.696 ms  (48.2 GB/s equiv)  bitexact=YES
+mr    R=8      : 0.742 ms  (45.2 GB/s equiv)  bitexact=YES
+dn v0  (48x128) : 3.421 ms
+dn t  (48x4x32): 0.790 ms  out_bitexact=YES state_bitexact=YES
+       speedup vs v0: 4.3x
+dn t2 (fused) : 0.743 ms  out_bitexact=YES state_bitexact=YES
+       speedup vs v0: 4.6x

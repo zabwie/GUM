@@ -27,6 +27,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -34,17 +35,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
-static constexpr size_t kMaxItem = 32u << 20;
+static constexpr size_t kMaxItem = 16u << 20;
 static constexpr size_t kStageBytes = kMaxItem + 8192;
 static constexpr int kStage = 8;
 static constexpr int kSlots = 8;   // E047: deeper slot ring
 static constexpr uint64_t kMapMargin = 64ull << 20;
-static constexpr int kGGML_F32 = 0, kGGML_F16 = 1, kGGML_Q4_0 = 2;  // ggml enum: Q4_0=2 (8 is Q8_0)
+static constexpr int kGGML_F32 = 0, kGGML_F16 = 1, kGGML_Q4_0 = 2, kGGML_Q8_0 = 8;
 
 static void check(cudaError_t s, const char* w) {
     if (s != cudaSuccess) { fprintf(stderr, "%s: %s\n", w, cudaGetErrorString(s)); exit(1); }
@@ -151,10 +153,15 @@ static bool parse_gguf(const char* path, GgufKV& kv, std::vector<GTensor>& tenso
         uint32_t ty; if (fread(&ty, 4, 1, f) != 1) { fclose(f); return false; }
         t.type = (int)ty;
         if (fread(&t.off, 8, 1, f) != 1) { fclose(f); return false; }
-        long esz = t.type == kGGML_F32 ? 4 : t.type == kGGML_F16 ? 2 : t.type == kGGML_Q4_0 ? 18 / 32 * 32 : 0;
-        // exact: Q4_0 block = 18 bytes / 32 elems; F32 4; F16 2
-        long n = 1; for (int d = 0; d < t.nd; ++d) n *= t.ne[d];
-        t.bytes = t.type == kGGML_Q4_0 ? (uint64_t)((n + 31) / 32) * 18 : (uint64_t)n * esz;
+        long n = 1;
+        for (int d = 0; d < t.nd; ++d) n *= t.ne[d];
+        switch (t.type) {
+            case kGGML_F32: t.bytes = (uint64_t)n * 4; break;
+            case kGGML_F16: t.bytes = (uint64_t)n * 2; break;
+            case kGGML_Q4_0: t.bytes = (uint64_t)((n + 31) / 32) * 18; break;
+            case kGGML_Q8_0: t.bytes = (uint64_t)((n + 31) / 32) * 34; break;
+            default: t.bytes = 0; break;
+        }
         tensors.push_back(t);
     }
     long align = 32; auto it = kv.ints.find("general.alignment"); if (it != kv.ints.end()) align = it->second;
@@ -258,23 +265,66 @@ static const GTensor* gt(const Model& m, const char* fmt, long il, char* buf, si
 // ---------------------------------------------------------------------------
 // GPU kernels
 // ---------------------------------------------------------------------------
-// quantize NB activation vectors: x [NB][K], xq [NB][K], xs/xsum [NB][K/32]
-__global__ void k_quant_x(const float* x, long nb, int8_t* xq, float* xs, int* xsum) {
+// quantize NB activation vectors: x [NB][K], xq [NB][K], xmeta [NB][K/32]
+// xmeta packs the quant scale bits and sum correction into one aligned 64-bit load.
+__global__ void k_quant_x(const float* x, long nb, int8_t* xq, int2* xmeta) {
     long b = (long)blockIdx.x * blockDim.x + threadIdx.x; if (b >= nb) return;
     float amax = 0.f; for (int i = 0; i < 32; ++i) amax = fmaxf(amax, fabsf(x[b * 32 + i]));
     float d = amax / 127.f; float id = d > 0.f ? 1.f / d : 0.f; int s = 0;
     for (int i = 0; i < 32; ++i) { int q = __float2int_rn(x[b * 32 + i] * id); xq[b * 32 + i] = (int8_t)q; s += q; }
-    xs[b] = d; xsum[b] = s;
+    xmeta[b] = make_int2(__float_as_int(d), s);
 }
+
+__device__ __forceinline__ void store_quantized_warp(float value, long block, int8_t* xq, int2* meta) {
+    constexpr unsigned all = 0xffffffffu;
+    const int lane = threadIdx.x & 31;
+    float peak = fabsf(value);
+    for (int stride = 16; stride; stride /= 2) peak = fmaxf(peak, __shfl_xor_sync(all, peak, stride));
+    const float scale = peak / 127.f;
+    const float inverse = scale > 0.f ? 1.f / scale : 0.f;
+    const int q = __float2int_rn(value * inverse);
+    xq[block * 32 + lane] = (int8_t)q;
+    int sum = q;
+    for (int stride = 16; stride; stride /= 2) sum += __shfl_down_sync(all, sum, stride);
+    if (!lane) meta[block] = make_int2(__float_as_int(scale), sum);
+}
+
+__global__ void k_rms_quant(int8_t* xq, int2* meta, const float* x, const float* w, int n, float eps) {
+    const long row = blockIdx.x;
+    x += row * n;
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += x[i] * x[i];
+    __shared__ float reduction[8];
+    for (int stride = 16; stride; stride /= 2) ss += __shfl_down_sync(0xffffffffu, ss, stride);
+    if (!(threadIdx.x & 31)) reduction[threadIdx.x / 32] = ss;
+    __syncthreads();
+    if (!threadIdx.x) {
+        float sum = 0.f;
+        for (int i = 0; i < 8; ++i) sum += reduction[i];
+        reduction[0] = rsqrtf(sum / n + eps);
+    }
+    __syncthreads();
+    const float norm = reduction[0];
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        store_quantized_warp(x[i] * norm * w[i], row * (n / 32) + i / 32, xq, meta);
+}
+
+__global__ void k_silu_quant(int8_t* xq, int2* meta, const float* a, const float* b, long count) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const float value = a[i];
+    store_quantized_warp(value / (1.f + expf(-value)) * b[i], i / 32, xq, meta);
+}
+
 // y[v*stride + row] = dot(W_row, xq_v) — NB decode vectors share one weight read;
 // identical math to streamed_decode gemv_q4 (dp4a, E033/E034)
 template <int NB>
-__global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const float* xs, const int* xsum, float* y, long ystride) {
+__global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* xmeta, float* y, long ystride, const int* row_ids = nullptr) {
     const int lane = threadIdx.x & 31;
     const long row = (long)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
     if (row >= rows) return;
     const long nb = K / 32; const size_t rowbytes = (size_t)nb * 18;
-    const uint8_t* r = w + (size_t)row * rowbytes;
+    const uint8_t* r = w + (size_t)(row_ids ? row_ids[row] : row) * rowbytes;
     float acc[NB];
 #pragma unroll
     for (int v = 0; v < NB; ++v) acc[v] = 0.f;
@@ -290,10 +340,11 @@ __global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, 
         for (int v = 0; v < NB; ++v) {
             const int4* xp = (const int4*)(xq + v * (K / 32 * 32) + b * 32);
             const int4 xa = xp[0], xb = xp[1];
+            const int2 meta = xmeta[v * (K / 32) + b];
             int s = 0;
             s = __dp4a((int)lo0, xa.x, s); s = __dp4a((int)lo1, xa.y, s); s = __dp4a((int)lo2, xa.z, s); s = __dp4a((int)lo3, xa.w, s);
             s = __dp4a((int)hi0, xb.x, s); s = __dp4a((int)hi1, xb.y, s); s = __dp4a((int)hi2, xb.z, s); s = __dp4a((int)hi3, xb.w, s);
-            acc[v] += d * xs[v * (K / 32) + b] * (float)(s - 8 * xsum[v * (K / 32) + b]);
+            acc[v] += d * __int_as_float(meta.x) * (float)(s - 8 * meta.y);
         }
     }
 #pragma unroll
@@ -303,10 +354,83 @@ __global__ void k_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, 
         if (lane == 0) y[v * ystride + row] = a;
     }
 }
+
+// NB=16, K>=5120 path. A CTA stages one 64-quanta tile of all activation vectors
+// and their scale/correction metadata. Sixteen row warps reuse the tile before
+// advancing; 8-byte shared banks make the 40-byte per-quanta record conflict-free.
+// Each lane visits K blocks in the same ascending order as k_mat_q4<16>.
+template<int NB>
+__global__ void k_mat_q4_shared(const uint8_t* w, long K, long rows, const int8_t* xq,
+                                      const int2* xmeta, float* y, long ystride) {
+    constexpr int CB = NB <= 16 ? 64 : 32, THREADS = 512;
+    extern __shared__ uint32_t tile[]; // [NB][CB][8 Q4 words + 2 metadata words]
+    const int tid = threadIdx.x, lane = tid & 31;
+    const long nb = K / 32;
+    const size_t rowbytes = (size_t)nb * 18;
+    const long row = (long)blockIdx.x * 16 + (tid >> 5);
+    float acc[NB];
+#pragma unroll
+    for (int v = 0; v < NB; ++v) acc[v] = 0.f;
+    int2* smeta = (int2*)tile;
+
+    for (long c0 = 0; c0 < nb; c0 += CB) {
+        const int cb = (int)min((long)CB, nb - c0);
+        // Four aligned uint2 copies cover the eight activation words per block.
+        for (int i = tid; i < NB * cb * 4; i += THREADS) {
+            const int v = i / (cb * 4), rem = i % (cb * 4), b = rem >> 2, pair = rem & 3;
+            const uint2 value = *((const uint2*)(xq + (size_t)v * K + (size_t)(c0 + b) * 32 + pair * 8));
+            uint32_t* dst = tile + ((size_t)v * CB + b) * 10 + pair * 2;
+            ((uint2*)dst)[0] = value;
+        }
+        for (int i = tid; i < NB * cb; i += THREADS) {
+            const int v = i / cb, b = i % cb;
+            smeta[((size_t)v * CB + b) * 5 + 4] = xmeta[(size_t)v * nb + c0 + b];
+        }
+        __syncthreads();
+
+        if (row < rows) {
+            const uint8_t* r = w + (size_t)row * rowbytes;
+            for (long b = lane; b < cb; b += 32) {
+                const uint16_t* blk = (const uint16_t*)(r + (size_t)(c0 + b) * 18);
+                const float d = __half2float(__ushort_as_half(blk[0]));
+                uint32_t q[4];
+#pragma unroll
+                for (int j = 0; j < 4; ++j) q[j] = (uint32_t)blk[1 + 2 * j] | ((uint32_t)blk[2 + 2 * j] << 16);
+                const uint32_t lo0 = q[0] & 0x0F0F0F0Fu, lo1 = q[1] & 0x0F0F0F0Fu;
+                const uint32_t lo2 = q[2] & 0x0F0F0F0Fu, lo3 = q[3] & 0x0F0F0F0Fu;
+                const uint32_t hi0 = (q[0] >> 4) & 0x0F0F0F0Fu, hi1 = (q[1] >> 4) & 0x0F0F0F0Fu;
+                const uint32_t hi2 = (q[2] >> 4) & 0x0F0F0F0Fu, hi3 = (q[3] >> 4) & 0x0F0F0F0Fu;
+#pragma unroll
+                for (int v = 0; v < NB; ++v) {
+                    const uint32_t* qb = tile + ((size_t)v * CB + b) * 10;
+                    const uint2 a0 = ((const uint2*)qb)[0], a1 = ((const uint2*)qb)[1];
+                    const uint2 a2 = ((const uint2*)qb)[2], a3 = ((const uint2*)qb)[3];
+                    const int2 meta = smeta[((size_t)v * CB + b) * 5 + 4];
+                    int s = 0;
+                    s = __dp4a((int)lo0, (int)a0.x, s); s = __dp4a((int)lo1, (int)a0.y, s);
+                    s = __dp4a((int)lo2, (int)a1.x, s); s = __dp4a((int)lo3, (int)a1.y, s);
+                    s = __dp4a((int)hi0, (int)a2.x, s); s = __dp4a((int)hi1, (int)a2.y, s);
+                    s = __dp4a((int)hi2, (int)a3.x, s); s = __dp4a((int)hi3, (int)a3.y, s);
+                    acc[v] += d * __int_as_float(meta.x) * (float)(s - 8 * meta.y);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (row < rows) {
+#pragma unroll
+        for (int v = 0; v < NB; ++v) {
+            float a = acc[v];
+            for (int o = 16; o > 0; o >>= 1) a += __shfl_down_sync(0xffffffffu, a, o);
+            if (lane == 0) y[(size_t)v * ystride + row] = a;
+        }
+    }
+}
 // rms norm over NB vectors: x/out [NB][n], grid (1, NB)
-__global__ void k_rms_norm(float* out, const float* x, const float* w, int n, float eps) {
+__global__ void k_rms_norm(float* out, const float* x, const float* w, int n, float eps, int out_stride = 0) {
     const long v = blockIdx.y;
-    x += v * n; out += v * n;
+    x += v * n; out += v * (out_stride ? out_stride : n);
     float ss = 0.f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) { float v = x[i]; ss += v * v; }
     __shared__ float red[32];
@@ -371,7 +495,7 @@ __global__ void k_l2_heads(float* x, int nh, int hd, float eps, long seq_stride)
 }
 // standard (neox half-split) RoPE, text positions: pair (x_i, x_i+n_rot/2), theta = pos*base^(-2i/n_rot)
 // q: [nh_q][hd] (qwen35: only first hd of each (hd+hd_gate) slice — pass stride), k: [nh_k][hd]
-__global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, int n_rot, float base, int q_stride, int style, int row_pos) {
+__global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, int n_rot, float base, int q_stride, int style, int row_pos, const int* tree_depth = nullptr) {
     const int h = blockIdx.x;
     const long v = blockIdx.y;
     q += v * (size_t)nh_q * q_stride;
@@ -379,7 +503,7 @@ __global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, 
     const int half = n_rot / 2;
     float* dst = h < nh_q ? q + (size_t)h * q_stride : k + (size_t)(h - nh_q) * hd;
     // multi-position verify: row v sits at position pos+v; otherwise all rows share pos
-    const int p = pos + (row_pos ? (int)v : 0);
+    const int p = pos + (tree_depth ? tree_depth[v] : (row_pos ? (int)v : 0));
     for (int i = threadIdx.x; i < half; i += blockDim.x) {
         const float theta = (float)p * powf(base, -2.f * (float)i / (float)n_rot);
         const float c = cosf(theta), s = sinf(theta);
@@ -393,7 +517,8 @@ __global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, 
 // GQA decode attention for one token at position pos (cache already contains pos+1 entries
 // for this layer after append). K/V cache: [n_kh][max_ctx][hd]. out: [nh_q][hd].
 __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, const float* q,
-                              int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride, long kv_seq_stride, int row_pos) {
+                              int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride, long kv_seq_stride, int row_pos,
+                              const int* tree_depth = nullptr, const int* tree_path = nullptr, int path_stride = 0) {
     extern __shared__ float sh[];   // pos+1 scores
     const int h = blockIdx.x;
     const long v = blockIdx.y;
@@ -406,34 +531,56 @@ __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, cons
     const float* Kk = Kc + (size_t)kh * n_ctx_max * hd;
     const float* Vk = Vc + (size_t)kh * n_ctx_max * hd;
     // multi-position verify: row v is at position pos+v and attends cache[0..pos+v]
-    const int np = pos + 1 + (row_pos ? (int)v : 0);
-    for (int t = 0; t < np; ++t) {
-        float p = 0.f;
-        for (int i = threadIdx.x; i < hd; i += blockDim.x) p += qh[i] * Kk[(size_t)t * hd + i];
-        __shared__ float red[32];
-        for (int o = 16; o > 0; o >>= 1) p += __shfl_down_sync(0xffffffffu, p, o);
-        if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = p;
-        __syncthreads();
-        if (threadIdx.x == 0) {
-            float s = 0.f; for (int i = 0; i < (int)(blockDim.x + 31) / 32; ++i) s += red[i];
-            sh[t] = s * scale;
+    const int np = pos + 1 + (tree_depth ? tree_depth[v] : (row_pos ? (int)v : 0));
+    const int* path = tree_path ? tree_path + v * path_stride : nullptr;
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    for (int t = warp; t < np; t += blockDim.x / 32) {
+        const float* key = Kk + (size_t)(path && t >= pos ? pos + path[t - pos] : t) * hd;
+        float score = 0.f;
+        // Each warp scores a different key while retaining the previous order
+        // of the 32-element reductions and the sum across groups.
+        for (int g = 0; g < (int)blockDim.x / 32; ++g) {
+            float p = 0.f;
+            for (int i = g * 32 + lane; i < hd; i += blockDim.x) p += qh[i] * key[i];
+            for (int o = 16; o > 0; o >>= 1) p += __shfl_down_sync(0xffffffffu, p, o);
+            score += p;
         }
-        __syncthreads();
+        if (lane == 0) sh[t] = score * scale;
     }
+    __syncthreads();
     __shared__ float mx, zsum;
     if (threadIdx.x == 0) {
         float m = sh[0]; for (int t = 1; t < np; ++t) m = fmaxf(m, sh[t]);
-        mx = m; float z = 0.f; for (int t = 0; t < np; ++t) z += expf(sh[t] - m);
+        mx = m;
+    }
+    __syncthreads();
+    for (int t = threadIdx.x; t < np; t += blockDim.x) sh[t] = expf(sh[t] - mx);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float z = 0.f; for (int t = 0; t < np; ++t) z += sh[t];
         zsum = z;
     }
     __syncthreads();
     for (int i = threadIdx.x; i < hd; i += blockDim.x) {
         float acc = 0.f;
-        for (int t = 0; t < np; ++t) acc += expf(sh[t] - mx) * Vk[(size_t)t * hd + i];
+        for (int t = 0; t < np; ++t) acc += sh[t] * Vk[(size_t)(path && t >= pos ? pos + path[t - pos] : t) * hd + i];
         out[(size_t)h * hd + i] = acc / zsum;
     }
 }
-// gated delta net, one token: state[h] is S transposed (s[h][j*S+i] = S[i][j]).
+
+__global__ void k_append_kv(float* keys, float* values, const float* k, const float* v,
+                            int pos, int ctx, int heads, int head_dim, long sequence_stride, bool positions) {
+    const int row = blockIdx.y;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= heads * head_dim) return;
+    const long from = (long)row * heads * head_dim + i;
+    const long to = (long)row * sequence_stride +
+                    ((long)(i / head_dim) * ctx + pos + (positions ? row : 0)) * head_dim + i % head_dim;
+    keys[to] = k[from];
+    values[to] = v[from];
+}
+// gated delta net, one token: state[h] is [i][j], so adjacent threads j load adjacent state.
 // q16/k16: [ngroup][S]; v: [H][S]; g/beta: [H]; out: [H][S].
 __global__ void k_delta_net(float* state, const float* q16, const float* k16, const float* v,
                             const float* g, const float* beta, float* out, int S, int H, int ngroup, float scale,
@@ -450,21 +597,22 @@ __global__ void k_delta_net(float* state, const float* q16, const float* k16, co
     if (j >= S) return;
     // ggml maps v-head -> k-head with iv1 % n_k_heads (ops.cpp gated_delta_net), NOT grouping
     const int hk = h % ngroup;
-    float* row = state + (size_t)h * S * S + (size_t)j * S;
+    float* col = state + (size_t)h * S * S + j;
     const float* kh = k16 + (size_t)hk * S;
     const float* qh = q16 + (size_t)hk * S;
     const float* vh = vv + (size_t)h * S;
     const float eg = expf(g[h]);
-    for (int i = 0; i < S; ++i) row[i] *= eg;
-    float dot = 0.f; for (int i = 0; i < S; ++i) dot += row[i] * kh[i];
+    for (int i = 0; i < S; ++i) col[(size_t)i * S] *= eg;
+    float dot = 0.f; for (int i = 0; i < S; ++i) dot += col[(size_t)i * S] * kh[i];
     const float dj = (vh[j] - dot) * beta[h];
-    for (int i = 0; i < S; ++i) row[i] += dj * kh[i];
-    float o = 0.f; for (int i = 0; i < S; ++i) o += row[i] * qh[i];
+    for (int i = 0; i < S; ++i) col[(size_t)i * S] += dj * kh[i];
+    float o = 0.f; for (int i = 0; i < S; ++i) o += col[(size_t)i * S] * qh[i];
     out[(size_t)h * S + j] = o * scale;
 }
 // multi-position verify: ONE sequence's conv over B positions, sequential state shifts.
 // x/out: [B][C] rows are positions; grid (C/256).
-__global__ void k_conv1d_silu_multi(float* cstate, const float* x, const float* w, float* out, int C, int B) {
+__global__ void k_conv1d_silu_multi(float* cstate, const float* x, const float* w, float* out, int C, int B,
+                                    bool update_state = true) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     float s0 = cstate[c * 3 + 0], s1 = cstate[c * 3 + 1], s2 = cstate[c * 3 + 2];
@@ -474,14 +622,18 @@ __global__ void k_conv1d_silu_multi(float* cstate, const float* x, const float* 
         s0 = s1; s1 = s2; s2 = xc;
         out[(size_t)p * C + c] = sum / (1.f + expf(-sum));
     }
-    cstate[c * 3 + 0] = s0; cstate[c * 3 + 1] = s1; cstate[c * 3 + 2] = s2;
+    if (update_state) {
+        cstate[c * 3 + 0] = s0; cstate[c * 3 + 1] = s1; cstate[c * 3 + 2] = s2;
+    }
 }
-// multi-position gated delta net for ONE sequence: state is [H][S*S] (transposed), updated
-// sequentially over B positions; grid (H). q/k/v: [B][qkv_out] slices; g/beta: [B][H]; out: [B][H*S].
+// Multi-position gated delta net for ONE sequence. State is [H][i][j], with lanes split
+// over j so each serial i-loop touches coalesced state elements. One block covers 32 j
+// values; the 2D grid exposes four blocks/head at S=128 without changing each j's FP order.
+// q/k/v: [B][qkv_out] slices; g/beta: [B][H]; out: [B][H*S].
 __global__ void k_delta_net_multi(float* state, const float* qkv, const float* g, const float* beta, float* out,
                                   int S, int H, int ngroup, float scale, long qkv_stride, long out_stride, int B) {
     const int h = blockIdx.x;
-    const int j = threadIdx.x;
+    const int j = blockIdx.y * blockDim.x + threadIdx.x;
     if (j >= S) return;
     const int hk = h % ngroup;   // ggml: iv1 % n_k_heads
     float* st = state + (size_t)h * S * S;
@@ -490,16 +642,120 @@ __global__ void k_delta_net_multi(float* state, const float* qkv, const float* g
         const float* kh = qkvp + (size_t)S * ngroup + (size_t)hk * S;
         const float* qh = qkvp + (size_t)hk * S;
         const float* vh = qkvp + 2 * (size_t)S * ngroup + (size_t)h * S;
-        float* row = st + (size_t)j * S;
+        float* col = st + j;
         const float eg = expf(g[(size_t)p * H + h]);
-        for (int i = 0; i < S; ++i) row[i] *= eg;
-        float dot = 0.f; for (int i = 0; i < S; ++i) dot += row[i] * kh[i];
+        for (int i = 0; i < S; ++i) col[(size_t)i * S] *= eg;
+        float dot = 0.f; for (int i = 0; i < S; ++i) dot += col[(size_t)i * S] * kh[i];
         const float dj = (vh[j] - dot) * beta[(size_t)p * H + h];
-        for (int i = 0; i < S; ++i) row[i] += dj * kh[i];
-        float o = 0.f; for (int i = 0; i < S; ++i) o += row[i] * qh[i];
-        out[(size_t)p * out_stride + (size_t)h * S + j] = o * scale;
+        for (int i = 0; i < S; ++i) col[(size_t)i * S] += dj * kh[i];
+        if (out) {
+            float o = 0.f; for (int i = 0; i < S; ++i) o += col[(size_t)i * S] * qh[i];
+            out[(size_t)p * out_stride + (size_t)h * S + j] = o * scale;
+        }
     }
 }
+
+__global__ void k_conv_commit(float* state, const float* before, const float* input, int channels, int accepted, const int* path = nullptr) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    for (int i = 0; i < 3; ++i) {
+        const int p = accepted + i - 3;
+        state[3 * c + i] = p < 0 ? before[3 * c + p + 3] : input[(size_t)(path ? path[p] : p) * channels + c];
+    }
+}
+
+template <bool output, bool tree = false>
+__global__ void k_delta_net_128(float* state, const float* qkv, const float* g, const float* beta, float* out,
+                                int H, int ngroup, float scale, long qkv_stride, long out_stride, int B,
+                                const int* path = nullptr, const int* lengths = nullptr,
+                                const int* owners = nullptr, int path_stride = 0, bool update_state = true) {
+    constexpr int S = 128;
+    const int leaf = blockIdx.z;
+    if constexpr (tree) {
+        path += leaf * path_stride;
+        B = lengths[leaf];
+    }
+    const int h = blockIdx.x;
+    const int j = blockIdx.y * 32 + threadIdx.x;
+    const int hk = h % ngroup;
+    float* col = state + (size_t)h * S * S + j;
+    float local[S];
+#pragma unroll
+    for (int i = 0; i < S; ++i) local[i] = col[i * S];
+    for (int p = 0; p < B; ++p) {
+        const int row = path ? path[p] : p;
+        const float* qkvp = qkv + (size_t)row * qkv_stride;
+        const float* qh = qkvp + (size_t)hk * S;
+        const float* kh = qh + S * ngroup;
+        const float* vh = qkvp + 2 * S * ngroup + h * S;
+        const float decay = expf(g[(size_t)row * H + h]);
+        float dot = 0.f;
+#pragma unroll
+        for (int i = 0; i < S; ++i) {
+            local[i] = __fmul_rn(local[i], decay);
+            dot = fmaf(local[i], kh[i], dot);
+        }
+        const float correction = (vh[j] - dot) * beta[(size_t)row * H + h];
+#pragma unroll
+        for (int i = 0; i < S; ++i) local[i] = fmaf(correction, kh[i], local[i]);
+        if constexpr (output) {
+          if (!tree || owners[row] == leaf) {
+            float value = 0.f;
+#pragma unroll
+            for (int i = 0; i < S; ++i) value = fmaf(local[i], qh[i], value);
+            out[(size_t)row * out_stride + h * S + j] = value * scale;
+          }
+        }
+    }
+    if constexpr (!tree) {
+        if (update_state) {
+#pragma unroll
+            for (int i = 0; i < S; ++i) col[i * S] = local[i];
+        }
+    }
+}
+
+static void launch_delta_multi(float* state, const float* qkv, const float* g, const float* beta, float* out,
+                               int S, int H, int groups, float scale, long qkv_stride, long out_stride,
+                               int rows, cudaStream_t stream, const int* path = nullptr, bool update_state = true) {
+    const dim3 grid((unsigned)H, (unsigned)((S + 31) / 32));
+    if (S != 128) {
+        k_delta_net_multi<<<grid, 32, 0, stream>>>(state, qkv, g, beta, out, S, H, groups, scale, qkv_stride, out_stride, rows);
+    } else if (out) {
+        k_delta_net_128<true><<<grid, 32, 0, stream>>>(state, qkv, g, beta, out, H, groups, scale,
+            qkv_stride, out_stride, rows, nullptr, nullptr, nullptr, 0, update_state);
+    } else {
+        k_delta_net_128<false><<<grid, 32, 0, stream>>>(state, qkv, g, beta, out, H, groups, scale, qkv_stride, out_stride, rows, path);
+    }
+}
+__global__ void k_conv_tree(const float* state, const float* x, const float* w, float* out,
+                             int channels, const int* depth, const int* paths, int stride) {
+    const int row = blockIdx.y;
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    const int* path = paths + row * stride;
+    float taps[4];
+    for (int i = 0; i < 4; ++i) {
+        const int d = depth[row] + i - 3;
+        taps[i] = d < 0 ? state[3 * c + d + 3] : x[(size_t)path[d] * channels + c];
+    }
+    const float sum = w[c * 4] * taps[0] + w[c * 4 + 1] * taps[1] +
+                      w[c * 4 + 2] * taps[2] + w[c * 4 + 3] * taps[3];
+    out[(size_t)row * channels + c] = sum / (1.f + expf(-sum));
+}
+
+__global__ void k_compact_kv(float* kv, int ctx, int head_dim, int columns,
+                             int pos, int count, const int* path) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= columns) return;
+    float* column = kv + (size_t)(i / head_dim) * ctx * head_dim + i % head_dim;
+    // Row indices increase along a path, so compaction cannot overwrite a
+    // source row that a later iteration needs.
+    for (int d = 0; d < count; ++d) {
+        if (path[d] != d) column[(size_t)(pos + d) * head_dim] = column[(size_t)(pos + path[d]) * head_dim];
+    }
+}
+
 // conv1d(k=4) + silu, decode step: window = conv_state[c][0..2], x[c]; shifts state.
 // w layout F32 [4, C]: w[c*4 + j].
 __global__ void k_conv1d_silu(float* cstate, const float* x, const float* w, float* out, int C, long state_seq_stride) {
@@ -520,8 +776,9 @@ __global__ void k_sigmoid(float* y, const float* x, int n) {
     const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
     y[i] = 1.f / (1.f + expf(-x[i]));
 }
-__global__ void k_gate_ssm(float* g, const float* alpha, const float* dtb, const float* a, int n) {
-    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
+__global__ void k_gate_ssm(float* g, const float* alpha, const float* dtb, const float* a, int n, int rows) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= (long)rows * n) return;
     const float v = alpha[i] + dtb[i % n];
     const float sp = v > 20.f ? v : log1pf(expf(v));
     g[i] = sp * a[i % n];
@@ -725,12 +982,12 @@ static void cpu_step(CPUModel& cm, long tok, std::vector<float>& logits) {
                 const float* vh = v48 + (size_t)h * S;
                 const float eg = expf(g[h]);
                 for (int j = 0; j < Sv; ++j) {
-                    float* r = row + (size_t)j * Sv;
-                    for (int i = 0; i < Sv; ++i) r[i] *= eg;
-                    float dot = 0.f; for (int i = 0; i < Sv; ++i) dot += r[i] * kh[i];
+                    float* col = row + j;
+                    for (int i = 0; i < Sv; ++i) col[(size_t)i * Sv] *= eg;
+                    float dot = 0.f; for (int i = 0; i < Sv; ++i) dot += col[(size_t)i * Sv] * kh[i];
                     const float dj = (vh[j] - dot) * beta[h];
-                    for (int i = 0; i < Sv; ++i) r[i] += dj * kh[i];
-                    float o = 0.f; for (int i = 0; i < Sv; ++i) o += r[i] * qh[i];
+                    for (int i = 0; i < Sv; ++i) col[(size_t)i * Sv] += dj * kh[i];
+                    float o = 0.f; for (int i = 0; i < Sv; ++i) o += col[(size_t)i * Sv] * qh[i];
                     dout[(size_t)h * Sv + j] = o * scale;
                 }
             }
@@ -832,29 +1089,265 @@ static void cpu_step(CPUModel& cm, long tok, std::vector<float>& logits) {
 
 // NB-dispatched Q4_0 matvec: y[v*ystride + row] for v in [0, g_batch)
 static long g_batch = 1;
-static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const float* xs, const int* xsum,
+static bool g_packed_widths = false;
+static long mat_width(long rows) {
+    if (g_packed_widths && rows > 8 && rows <= 12) return 12;
+    if (g_packed_widths && rows > 16 && rows <= 24) return 24;
+    long width = 1;
+    while (width < rows) width *= 2;
+    return width;
+}
+static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* xmeta,
                           float* y, long ystride, cudaStream_t s) {
     const unsigned g = (unsigned)((rows + 3) / 4);
     switch (g_batch) {
-        case 1: k_mat_q4<1><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
-        case 2: k_mat_q4<2><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
-        case 4: k_mat_q4<4><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
-        case 8: k_mat_q4<8><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
-        case 16: k_mat_q4<16><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
-        case 32: k_mat_q4<32><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
-        case 64: k_mat_q4<64><<<g, 128, 0, s>>>(w, K, rows, xq, xs, xsum, y, ystride); break;
+        case 1: k_mat_q4<1><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride); break;
+        case 2: k_mat_q4<2><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride); break;
+        case 4: k_mat_q4<4><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride); break;
+        case 8: k_mat_q4<8><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride); break;
+        case 12:
+            if (K >= 5120) {
+                constexpr size_t smem = 12 * 64 * 40;
+                k_mat_q4_shared<12><<<(unsigned)((rows + 15) / 16), 512, smem, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            } else k_mat_q4<12><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            break;
+        case 16:
+            if (K >= 5120) {
+                const size_t smem = 16 * 64 * 40;
+                k_mat_q4_shared<16><<<(unsigned)((rows + 15) / 16), 512, smem, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            } else k_mat_q4<16><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            break;
+        case 24:
+            if (K >= 5120) {
+                constexpr size_t smem = 24 * 32 * 40;
+                k_mat_q4_shared<24><<<(unsigned)((rows + 15) / 16), 512, smem, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            } else k_mat_q4<24><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            break;
+        case 32:
+            if (K >= 5120) {
+                const size_t smem = 32 * 32 * 40;
+                k_mat_q4_shared<32><<<(unsigned)((rows + 15) / 16), 512, smem, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            } else k_mat_q4<32><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride);
+            break;
+        case 64: k_mat_q4<64><<<g, 128, 0, s>>>(w, K, rows, xq, xmeta, y, ystride); break;
     }
 }
+
+#include "packed_scale_codec.cuh"
+
+template <int NB, int WARPS, int GROUPS = 1, bool ENCODED = false>
+__global__ void q4_mma(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* xmeta, float* y, long ystride) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    extern __shared__ float partial[];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int group = lane >> 2, thread = lane & 3;
+    const long tile_index = blockIdx.x / GROUPS;
+    const long group_index = blockIdx.x % GROUPS;
+    const long first_row = tile_index * 16;
+    const long nb = K / 32;
+    xq += group_index * NB * K;
+    xmeta += group_index * NB * nb;
+    y += group_index * NB * ystride;
+    float sum[32 / WARPS][NB / 8][4] = {};
+    for (long start = 0; start < nb; start += 32) {
+        const uint8_t* panel = w + ((size_t)tile_index * nb + start) * kRawTile;
+        bool compact = false;
+        if constexpr (ENCODED) {
+            const uint32_t offset = ((const uint32_t*)w)[(tile_index * nb + start) / kPanelTiles];
+            panel = w + (offset & ~1u);
+            compact = offset & 1;
+        }
+#pragma unroll
+        for (int strip = 0; strip < 32 / WARPS; ++strip) {
+            const int k = warp + strip * WARPS;
+            const uint8_t* tile = panel + k * (compact ? kTileQuants : kRawTile);
+            const uint32_t* quants = (const uint32_t*)tile;
+            const uint16_t* scales = (const uint16_t*)(tile + 256);
+            const uint32_t u = quants[group * 4 + thread];
+            const uint32_t v = quants[(group + 8) * 4 + thread];
+            const float da = __half2float(__ushort_as_half(compact ? unpack_scale(panel, k, group) : scales[group]));
+            const float db = __half2float(__ushort_as_half(compact ? unpack_scale(panel, k, group + 8) : scales[group + 8]));
+            constexpr uint32_t mask = 0x0f0f0f0fu;
+#pragma unroll
+            for (int n = 0; n < NB / 8; ++n) {
+                const uint32_t* xp = (const uint32_t*)(xq + (n * 8 + group) * K + (start + k) * 32);
+                const uint32_t xb0 = xp[thread], xb1 = xp[thread + 4];
+                int c0, c1, c2, c3;
+                asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {0,0,0,0};"
+                    : "=r"(c0),"=r"(c1),"=r"(c2),"=r"(c3)
+                    : "r"(u & mask),"r"(v & mask),"r"((u>>4)&mask),"r"((v>>4)&mask),"r"(xb0),"r"(xb1));
+                const int col = n * 8 + 2 * thread;
+                const int2 m0 = xmeta[col * nb + start + k], m1 = xmeta[(col + 1) * nb + start + k];
+                sum[strip][n][0] += da * __int_as_float(m0.x) * (float)(c0 - 8 * m0.y);
+                sum[strip][n][1] += da * __int_as_float(m1.x) * (float)(c1 - 8 * m1.y);
+                sum[strip][n][2] += db * __int_as_float(m0.x) * (float)(c2 - 8 * m0.y);
+                sum[strip][n][3] += db * __int_as_float(m1.x) * (float)(c3 - 8 * m1.y);
+            }
+        }
+    }
+#pragma unroll
+    for (int strip = 0; strip < 32 / WARPS; ++strip) {
+        const int k = warp + strip * WARPS;
+#pragma unroll
+        for (int n = 0; n < NB / 8; ++n) {
+            const int col = n * 8 + 2 * thread;
+            // Rotate each output's 32 partials so the lanes of a writing
+            // warp access different shared-memory banks. Preserve reduction order.
+            const int slot = (k + 8 * thread + group) & 31;
+            partial[(col * 16 + group) * 32 + slot] = sum[strip][n][0];
+            partial[((col + 1) * 16 + group) * 32 + slot] = sum[strip][n][1];
+            partial[(col * 16 + group + 8) * 32 + slot] = sum[strip][n][2];
+            partial[((col + 1) * 16 + group + 8) * 32 + slot] = sum[strip][n][3];
+        }
+    }
+    __syncthreads();
+    for (int o = warp; o < NB * 16; o += WARPS) {
+        const int rotation = 8 * (o / 32) + (o % 8);
+        float total = partial[o * 32 + ((lane + rotation) & 31)];
+        for (int delta = 16; delta; delta >>= 1) total += __shfl_down_sync(0xffffffffu, total, delta);
+        const long row = first_row + o % 16;
+        if (lane == 0 && row < rows) y[(o / 16) * ystride + row] = total;
+    }
+#endif
+}
+
+template <bool ENCODED = false>
+static void launch_packed_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* meta,
+                             float* y, long ystride, cudaStream_t stream) {
+    const unsigned tiles = (rows + 15) / 16;
+    constexpr size_t smem8 = 16 * 8 * 32 * sizeof(float);
+    constexpr size_t smem16 = 16 * 16 * 32 * sizeof(float);
+    if (g_batch <= 8) {
+        q4_mma<8,8,1,ENCODED><<<tiles,256,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
+    } else if (g_batch <= 16) {
+        q4_mma<16,8,1,ENCODED><<<tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride);
+    } else if (g_batch <= 24) {
+        if (K >= 17408) q4_mma<8,8,3,ENCODED><<<3*tiles,256,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
+        else q4_mma<8,16,3,ENCODED><<<3*tiles,512,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
+    } else {
+        if (K >= 17408) q4_mma<16,8,2,ENCODED><<<2*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride);
+        else q4_mma<8,16,4,ENCODED><<<4*tiles,512,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
+    }
+}
+
+static void pack_q4_tiles(uint8_t* destination, const uint8_t* source, long K, long rows) {
+    const long blocks = K / 32;
+    for (long first = 0; first < rows; first += 16) {
+        for (long b = 0; b < blocks; ++b) {
+            uint8_t* tile = destination + ((size_t)(first / 16) * blocks + b) * 288;
+            for (long r = 0; r < 16; ++r) {
+                const uint8_t* from = source + ((size_t)(first + r) * blocks + b) * 18;
+                memcpy(tile + r * 16, from + 2, 16);
+                memcpy(tile + 256 + r * 2, from, 2);
+            }
+        }
+    }
+}
+
+__global__ void k_pack_q4_tiles(uint16_t* destination, const uint16_t* source, int blocks, int tiles) {
+    const int tile = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    if (tile >= tiles) return;
+    const int lane = threadIdx.x & 31;
+    const int row = lane & 15;
+    const int half = lane >> 4;
+    const size_t from = ((size_t)(tile / blocks * 16 + row) * blocks + tile % blocks) * 9;
+    uint16_t* to = destination + (size_t)tile * 144;
+    for (int word = 0; word < 4; ++word) to[row * 8 + half * 4 + word] = source[from + 1 + half * 4 + word];
+    if (!half) to[128 + row] = source[from];
+}
+
+struct LogitMax {
+    float score;
+    int token;
+    unsigned flags;
+};
+
+__device__ __forceinline__ LogitMax combine_max(LogitMax a, LogitMax b) {
+    const unsigned flags = a.flags | b.flags;
+    if (b.score > a.score || (b.score == a.score && b.token < a.token)) a = b;
+    a.flags = flags;
+    return a;
+}
+
+__device__ __forceinline__ LogitMax reduce_max(LogitMax result) {
+    __shared__ LogitMax warp_max[8];
+    constexpr unsigned all = 0xffffffffu;
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x / 32;
+    for (int step = 16; step > 0; step /= 2) {
+        const LogitMax other{__shfl_down_sync(all, result.score, step),
+            __shfl_down_sync(all, result.token, step), __shfl_down_sync(all, result.flags, step)};
+        if (lane + step < 32) result = combine_max(result, other);
+    }
+    if (!lane) warp_max[warp] = result;
+    __syncthreads();
+    if (!warp) {
+        result = lane < 8 ? warp_max[lane] : LogitMax{-INFINITY, 0x7fffffff, 0};
+        for (int step = 4; step > 0; step /= 2) {
+            const LogitMax other{__shfl_down_sync(all, result.score, step),
+                __shfl_down_sync(all, result.token, step), __shfl_down_sync(all, result.flags, step)};
+            if (lane + step < 8) result = combine_max(result, other);
+        }
+    }
+    return result;
+}
+
+__global__ void k_logit_tile_max(const float* logits, int vocab, LogitMax* maxima) {
+    constexpr int tile = 1024;
+    const int row = blockIdx.y;
+    const int start = blockIdx.x * tile;
+    const float* input = logits + (size_t)row * vocab;
+    LogitMax result{-INFINITY, 0x7fffffff, 0};
+    for (int i = threadIdx.x; i < tile && start + i < vocab; i += blockDim.x) {
+        const float value = input[start + i];
+        const LogitMax candidate = isfinite(value) ? LogitMax{value, start + i, value != 0.f ? 1U : 0U}
+            : LogitMax{-INFINITY, 0x7fffffff, 2U};
+        result = combine_max(result, candidate);
+    }
+    result = reduce_max(result);
+    if (!threadIdx.x) maxima[(size_t)row * gridDim.x + blockIdx.x] = result;
+}
+
+__global__ void k_logit_row_max(const LogitMax* tiles, int count, LogitMax* output) {
+    const int row = blockIdx.x;
+    tiles += (size_t)row * count;
+    LogitMax result{-INFINITY, 0x7fffffff, 0};
+    for (int i = threadIdx.x; i < count; i += blockDim.x) result = combine_max(result, tiles[i]);
+    result = reduce_max(result);
+    if (!threadIdx.x) output[row] = result;
+}
+
+__global__ void k_mtp_shift_hidden(const float* previous, const float* target, const int* path,
+                                   float* output, int width, int count) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= width * count) return;
+    const int row = index / width;
+    const int column = index % width;
+    if (row == 0) output[index] = previous[column];
+    else {
+        const int source = path ? path[row - 1] : row - 1;
+        output[index] = target[(size_t)source * width + column];
+    }
+}
+
+#include "eagle4_draft.cuh"
+#include "parallel_draft.cuh"
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    std::string model, prompt, prompt_ids_s, out_ids_path, expect_ids_path, mtp_path;
+    std::string model, prompt, prompt_ids_s, out_ids_path, expect_ids_path, mtp_path, eagle_path;
     long hot_mib = 8192, cache_mib = 5553, ctx = 1024, gen_tokens = 16, batch = 1, multi = 0, speculate = 0;
-    double p_min = 0.0;
-    int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0;
-    std::string feed_ids_s;
+    double p_min = 0.25;
+    long draft_max = 7, draft_vocab = 32768;
+    bool balance_hot = true, explicit_speculate = false;
+    bool explicit_p_min = false, explicit_draft_max = false, explicit_packed = false;
+    int mtp_tree_mode = 1, mtp_group = kMaxDraftGroup, packed_verify = 0;
+    int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0, pld_enabled = 2;
+    std::string feed_ids_s, oracle_ids_path, parallel_path;
+    bool resident_output = false, compress_packed = false;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i]; const char* v = argv[i + 1];
         if (k == "--model") model = v;
@@ -864,7 +1357,7 @@ int main(int argc, char** argv) {
         else if (k == "--gen-tokens") gen_tokens = atol(v);
         else if (k == "--batch") batch = atol(v);
         else if (k == "--multi") multi = atol(v);
-        else if (k == "--speculate") speculate = atol(v);
+        else if (k == "--speculate") { speculate = atol(v); explicit_speculate = true; }
         else if (k == "--feed-ids") feed_ids_s = v;
         else if (k == "--prompt") prompt = v;
         else if (k == "--prompt-ids") prompt_ids_s = v;
@@ -878,20 +1371,100 @@ int main(int argc, char** argv) {
         else if (k == "--verify-hot") verify_hot = atoi(v);
         else if (k == "--out-ids") out_ids_path = v;
         else if (k == "--expect-ids") expect_ids_path = v;
+        else if (k == "--oracle-ids") oracle_ids_path = v;
+        else if (k == "--parallel-draft") parallel_path = v;
+        else if (k == "--resident-output") resident_output = atoi(v) != 0;
+        else if (k == "--compress-packed") compress_packed = atoi(v) != 0;
         else if (k == "--mtp") mtp_path = v;
-        else if (k == "--p-min") p_min = atof(v);
+        else if (k == "--mtp-tree") mtp_tree_mode = atoi(v);
+        else if (k == "--mtp-group") mtp_group = atoi(v);
+        else if (k == "--packed-verify") { packed_verify = atoi(v); explicit_packed = true; }
+        else if (k == "--eagle4") eagle_path = v;
+        else if (k == "--p-min") { p_min = atof(v); explicit_p_min = true; }
+        else if (k == "--draft-max") { draft_max = atol(v); explicit_draft_max = true; }
+        else if (k == "--draft-vocab") draft_vocab = atol(v);
+        else if (k == "--balance-hot") balance_hot = atoi(v) != 0;
+        else if (k == "--pld") pld_enabled = atoi(v);
+    }
+    const bool auto_packed = !explicit_packed && !explicit_speculate && !mtp_path.empty() && mtp_tree_mode == 1 &&
+        batch == 1 && !multi && !validate && getenv("GUM_PACKED_DEFAULT");
+    if (packed_verify == 1 || auto_packed) {
+        cudaDeviceProp device{};
+        check(cudaGetDeviceProperties(&device, 0), "packed verification device");
+        cudaFuncAttributes kernel{};
+        if (device.major >= 8) check(cudaFuncGetAttributes(&kernel, q4_mma<8, 8>), "packed verification kernel");
+        const bool available = device.major >= 8 && kernel.binaryVersion >= 80;
+        if (explicit_packed && !available) {
+            fprintf(stderr, "--packed-verify requires an Ampere or newer build and GPU\n");
+            return 2;
+        }
+        packed_verify = available;
+    }
+    if (!eagle_path.empty() || (!mtp_path.empty() && mtp_tree_mode == 1)) {
+        if (!explicit_p_min) p_min = 0.06;
+        if (!explicit_draft_max) draft_max = packed_verify ? 23 : 15;
+    }
+    if (gen_tokens < 1 || ctx < 1 || hot_mib < 0 || cache_mib < 0 || readers < 1 || draft_max < 0 || draft_vocab < 0 ||
+        pld_enabled < 0 || pld_enabled > 2 || mtp_tree_mode < 0 || mtp_tree_mode > 1 || mtp_group < 1 || mtp_group > kMaxDraftGroup || packed_verify < 0 || packed_verify > 1 || !(p_min >= 0.0 && p_min <= 1.0)) {
+        fprintf(stderr, "invalid context, memory, or drafting setting\n"); return 2;
     }
     if (model.empty()) { fprintf(stderr, "need --model\n"); return 2; }
     if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
     if (validate && batch != 1) { fprintf(stderr, "--validate requires --batch 1\n"); return 2; }
+    if (!explicit_speculate && (!mtp_path.empty() || !eagle_path.empty()) && batch == 1 && !multi && !validate) speculate = packed_verify ? 24 : 16;
+    if ((multi > 0 || speculate > 0) && (batch != 1 || (multi > 0 && speculate > 0))) {
+        fprintf(stderr, "use one sequence and one verification mode\n");
+        return 2;
+    }
     if (multi > 0 || speculate > 0) {
         // E040 verify / E041 speculative mode: one sequence, B rows share one cold-set
         // transfer; batch buffers are reused as position rows
         if (validate) { fprintf(stderr, "--validate requires multi/speculate mode off\n"); return 2; }
         batch = multi > 0 ? multi : speculate;
-        if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--multi/--speculate must be a power of two in 1..64\n"); return 2; }
+        const bool packed_width = speculate == 24 && packed_verify;
+        if (batch < 1 || batch > 64 || ((batch & (batch - 1)) && !packed_width)) {
+            fprintf(stderr, "unsupported verification width\n"); return 2;
+        }
         // note: multi stays 0 — the E040 verify branch checks multi>0; spec mode uses its own loop
     }
+    if (!eagle_path.empty() && (!mtp_path.empty() || !speculate || multi || validate || ctx > 4096)) {
+        fprintf(stderr, "--eagle4 requires single-user speculative mode, no --mtp, and context at most 4096\n");
+        return 2;
+    }
+    const bool mtp_tree = !mtp_path.empty() && speculate > 0 && mtp_tree_mode == 1;
+    const bool parallel_on = !parallel_path.empty();
+    if (parallel_on) resident_output = true;
+    if ((resident_output && (!speculate || !mtp_path.empty() || !eagle_path.empty())) ||
+        (parallel_on && !oracle_ids_path.empty())) {
+        fprintf(stderr, "resident output requires speculative mode with no MTP or EAGLE4; choose one draft source\n");
+        return 2;
+    }
+    struct stat parallel_stat{};
+    if (parallel_on && (stat(parallel_path.c_str(), &parallel_stat) != 0 ||
+                        parallel_stat.st_size <= 0 || parallel_stat.st_size > (128ull << 20))) {
+        fprintf(stderr, "invalid parallel draft file\n");
+        return 2;
+    }
+    std::vector<long> oracle_ids;
+    if (!oracle_ids_path.empty()) {
+        if (speculate < 2 || !explicit_draft_max || draft_max < 1 || draft_max >= speculate ||
+            expect_ids_path.empty() || !eagle_path.empty()) {
+            fprintf(stderr, "--oracle-ids requires --expect-ids and --draft-max in 1..speculate-1, with no EAGLE4\n");
+            return 2;
+        }
+        FILE* f = fopen(oracle_ids_path.c_str(), "r");
+        if (!f) { perror("--oracle-ids"); return 2; }
+        long id;
+        int status;
+        while ((status = fscanf(f, "%ld", &id)) == 1) oracle_ids.push_back(id);
+        fclose(f);
+        if (status != EOF || (long)oracle_ids.size() < gen_tokens) {
+            fprintf(stderr, "invalid or short oracle ID stream\n");
+            return 2;
+        }
+    }
+    const bool oracle = !oracle_ids.empty();
+    const long seqs = (multi > 0 || speculate > 0) ? 1 : batch;
     g_batch = batch;   // MUST follow the multi/speculate adjustment (E040 regression: GEMV<1> skipped rows 1..B-1)
     g_swap0 = meminfo_mib("SwapTotal:") - meminfo_mib("SwapFree:"); safety("start");
 
@@ -937,27 +1510,93 @@ int main(int argc, char** argv) {
     const GTensor* embd = m.by_name["token_embd.weight"];
     const GTensor* outw = m.by_name["output.weight"];
     if (!embd || !outw) { fprintf(stderr, "missing token_embd/output\n"); return 1; }
+    if (std::any_of(oracle_ids.begin(), oracle_ids.end(),
+                    [&](long id) { return id < 0 || id >= m.n_vocab; })) {
+        fprintf(stderr, "oracle ID outside the target vocabulary\n");
+        return 2;
+    }
 
+    std::vector<GTensor> mtp_tensors;
+    uint64_t mtp_data_start = 0;
+    bool share_output = resident_output;
+    if (resident_output && (outw->type != kGGML_Q4_0 || outw->ne[0] != m.n_embd || outw->ne[1] != m.n_vocab)) {
+        fprintf(stderr, "resident output requires the target's Q4_0 output matrix\n");
+        return 2;
+    }
+    if (!mtp_path.empty()) {
+        GgufKV mtp_kv;
+        if (!parse_gguf(mtp_path.c_str(), mtp_kv, mtp_tensors, mtp_data_start)) {
+            fprintf(stderr, "mtp gguf parse failed\n");
+            return 1;
+        }
+        for (const GTensor& t : mtp_tensors) {
+            if (t.name != "output.weight" || t.type != kGGML_Q4_0 || outw->type != t.type ||
+                t.nd != 2 || outw->nd != 2 || t.ne[0] != outw->ne[0] || t.ne[1] != outw->ne[1] ||
+                t.bytes != outw->bytes) continue;
+            const int target_fd = open(model.c_str(), O_RDONLY);
+            const int draft_fd = open(mtp_path.c_str(), O_RDONLY);
+            std::vector<uint8_t> target(1 << 20), draft(target.size());
+            share_output = target_fd >= 0 && draft_fd >= 0;
+            for (uint64_t off = 0; share_output && off < t.bytes; off += target.size()) {
+                const size_t n = std::min<uint64_t>(target.size(), t.bytes - off);
+                share_output = pread(target_fd, target.data(), n, data_start + outw->off + off) == (ssize_t)n &&
+                               pread(draft_fd, draft.data(), n, mtp_data_start + t.off + off) == (ssize_t)n &&
+                               memcmp(target.data(), draft.data(), n) == 0;
+            }
+            if (target_fd >= 0) close(target_fd);
+            if (draft_fd >= 0) close(draft_fd);
+            break;
+        }
+        printf("shared_output,verified=%d,bytes=%llu\n", share_output, (unsigned long long)(share_output ? outw->bytes : 0));
+    }
+
+    if (!eagle_path.empty()) {
+        if (m.arch != "qwen35" || m.n_embd != Eagle4::hidden || m.n_layer != 64 || m.n_vocab != Eagle4::vocab ||
+            m.sss_state != 128 || m.sss_conv != 4 || outw->type != kGGML_Q4_0) {
+            fprintf(stderr, "EAGLE draft architecture does not match the target\n");
+            return 2;
+        }
+        share_output = true;
+    }
     printf("config,model=%s,arch=%s,layers=%ld,recr=%ld,attn=%ld,n_embd=%ld,n_head=%ld,n_kv=%ld,head=%ld,rot=%ld,ffn=%ld,vocab=%ld,ssm_state=%ld,ssm_group=%ld,ssm_dt=%ld,ssm_inner=%ld,rope_base=%.0f,ctx=%ld,batch=%ld,hot_mib=%ld,cache_mib=%ld,validate=%d\n",
            model.c_str(), A.c_str(), m.n_layer, m.n_recr, m.n_attn, m.n_embd, m.n_head, m.n_kv, m.head_v, m.n_rot, m.n_ff,
-           m.n_vocab, m.sss_state, m.sss_group, m.sss_dt, m.sss_inner, m.rope_base, ctx, batch, hot_mib, cache_mib, validate);
+           m.n_vocab, m.sss_state, m.sss_group, m.sss_dt, m.sss_inner, m.rope_base, ctx, seqs, hot_mib, cache_mib, validate);
+    if (speculate > 0) {
+        printf("spec_config,user_sequences=1,max_verify_positions=%ld,draft_max=%ld,draft_vocab=%ld,p_min=%.3f,pld_mode=%d,balanced_residency=%d,drafter=%s,mtp_group=%d,packed_verify=%d\n",
+               speculate, draft_max, draft_vocab, p_min, pld_enabled, balance_hot,
+               oracle ? "oracle" : parallel_on ? "parallel" : !eagle_path.empty() ? "eagle4" :
+               mtp_tree ? "mtp_tree" : !mtp_path.empty() ? "mtp" : "history", mtp_tree ? mtp_group : 1, packed_verify);
+    }
 
+    if (packed_verify && ((!mtp_tree && eagle_path.empty() && !resident_output) || speculate > 32)) {
+        fprintf(stderr, "--packed-verify requires a resident output matrix and up to 32 verification positions\n"); return 2;
+    }
+    if (compress_packed && !packed_verify) {
+        fprintf(stderr, "--compress-packed requires --packed-verify\n");
+        return 2;
+    }
+    g_packed_widths = packed_verify;
     // ---- items: chunk every Q4_0 tensor except the embedding table ----
-    struct Item { std::string tensor; long K, N, row0, rows; uint64_t file_off, bytes, aligned_off, head, read_len; int tier = 0; int64_t res_off = -1; };
+    struct Item { std::string tensor; long K, N, row0, rows; uint64_t file_off, bytes, transfer, aligned_off, head, read_len; int tier = 0; bool packed = false; int64_t res_off = -1; };
     enum { kNvme = 0, kHot = 1, kStaged = 2 };
     std::map<std::string, std::vector<int>> tensor_items;
     std::vector<Item> items; uint64_t total_bytes = 0;
     for (const GTensor& t : gtensors) {
         if (t.type != kGGML_Q4_0 || t.name == "token_embd.weight") continue;
+        if (share_output && t.name == "output.weight") continue;
         if (t.ne[0] % 32) { fprintf(stderr, "tensor %s K not /32\n", t.name.c_str()); return 1; }
         const uint64_t rowbytes = (uint64_t)(t.ne[0] / 32) * 18;
-        const long per = (long)(kMaxItem / rowbytes);
         const std::string tn = t.name;
+        const bool packed = packed_verify && t.ne[0] >= 5120 && t.ne[0] % 1024 == 0 &&
+            t.ne[1] >= 1024 && t.ne[1] % 16 == 0 && tn != "output.weight";
+        const long raw_per = (long)(kMaxItem / rowbytes);
+        const long per = packed ? raw_per / 16 * 16 : raw_per;
         for (long r = 0; r < t.ne[1]; r += per) {
             Item it; it.tensor = tn; it.K = t.ne[0]; it.N = t.ne[1];
-            it.row0 = r; it.rows = std::min<long>(per, t.ne[1] - r);
+            it.row0 = r; it.rows = std::min<long>(per, t.ne[1] - r); it.packed = packed;
             it.file_off = data_start + t.off + (uint64_t)r * rowbytes;
             it.bytes = (uint64_t)it.rows * rowbytes;
+            it.transfer = it.bytes;
             it.aligned_off = it.file_off & ~4095ull; it.head = it.file_off - it.aligned_off;
             it.read_len = align_up(it.head + it.bytes, 4096);
             tensor_items[tn].push_back((int)items.size());
@@ -965,10 +1604,23 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- tier assignment: hot first-fit, then staged RAM cache, rest NVMe ----
+    // Spread the hot budget across the layers in file order. Putting the entire
+    // hot arena at the front of the model leaves PCIe idle while those layers run.
     uint64_t hot_used = 0, staged_used = 0;
+    const uint64_t hot_limit = (uint64_t)hot_mib << 20;
+    const double hot_fraction = total_bytes ? std::min(1.0, (double)hot_limit / total_bytes) : 1.0;
+    uint64_t visited_bytes = 0;
     for (Item& it : items) {
-        if (hot_used + it.bytes + 16 <= (uint64_t)hot_mib << 20) {
+        visited_bytes += it.bytes;
+        if ((!balance_hot || speculate <= 0 || hot_used < visited_bytes * hot_fraction) &&
+            hot_used + it.bytes + 16 <= hot_limit) {
+            it.tier = kHot; it.res_off = (int64_t)hot_used; hot_used = align_up(hot_used + it.bytes, 256);
+        }
+    }
+    // Fill the remaining hot tail space with any whole item that fits.
+    for (Item& it : items) {
+        if (it.tier == kHot) continue;
+        if (hot_used + it.bytes + 16 <= hot_limit) {
             it.tier = kHot; it.res_off = (int64_t)hot_used; hot_used = align_up(hot_used + it.bytes, 256);
         } else if (staged_used + it.bytes + 4096 <= (uint64_t)cache_mib << 20) {
             it.tier = kStaged; it.res_off = (int64_t)staged_used; staged_used = align_up(staged_used + it.bytes, 4096);
@@ -993,15 +1645,23 @@ int main(int argc, char** argv) {
     // E044: in multi/speculate mode the rows are positions of ONE sequence (kv_seq_stride 0,
     // single-slice SSM) — states are sized for 1 sequence, not B. At batch 8 this frees
     // ~1.27 GiB of VRAM (was the reason gamma=16 could not run at the fast hot config).
-    const long seqs = (multi > 0 || speculate > 0) ? 1 : batch;
     const long sss_v = m.sss_dt ? m.sss_inner / m.sss_dt : 0;
     const uint64_t ssm_vram = ((uint64_t)m.n_recr * m.sss_dt * (uint64_t)sss_v * sss_v * 4
                             + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4) * seqs;
     const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * seqs;
-    const uint64_t mtp_reserve = mtp_path.empty() ? 0 : 980ull << 20;   // E046: MTP blob + KV + h_tgt
+    const bool wide_prefill = !eagle_path.empty() || ((mtp_tree || resident_output) && share_output && !dbg_dump);
+    const long prefill_width = wide_prefill ? std::max(32L, speculate) : speculate;
+    const long B = std::max(batch, prefill_width);
+    const uint64_t draft_reserve = !eagle_path.empty() ? Eagle4::device_bytes(ctx, B) :
+        resident_output ? outw->bytes + (uint64_t)parallel_stat.st_size + (4ull << 20) :
+        (mtp_path.empty() ? 0 : (980ull << 20));   // E046: MTP blob + KV + h_tgt
     size_t total_vram = 0;
-    const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + mtp_reserve + (16u << 20);
-    { int dev = 0; cudaDeviceProp prop{}; check(cudaGetDeviceProperties(&prop, dev), "props"); total_vram = prop.totalGlobalMem; }
+    const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + draft_reserve + (16u << 20);
+    {
+        cudaDeviceProp prop{};
+        check(cudaGetDeviceProperties(&prop, 0), "props");
+        total_vram = prop.totalGlobalMem;
+    }
     if (vram_plan + (2ull << 30) > total_vram) {
         fprintf(stderr, "ABORT before alloc: VRAM plan %.2f GiB + 2 GiB floor exceeds %.2f GiB\n",
                 vram_plan / 1073741824.0, total_vram / 1073741824.0);
@@ -1021,9 +1681,8 @@ int main(int argc, char** argv) {
     // multi-chunk tensors write the full N contiguously into yA/yB, so the scratch
     // must cover the largest TENSOR row count, not the largest chunk
     for (const Item& it : items) { max_K = std::max(max_K, it.K); }
-    for (const GTensor& t : gtensors) if (t.type == kGGML_Q4_0 && t.name != "token_embd.weight") max_rows = std::max(max_rows, t.ne[1]);
+    for (const GTensor& t : gtensors) if (t.type == kGGML_Q4_0 && t.name != "token_embd.weight" && t.name != "output.weight") max_rows = std::max(max_rows, t.ne[1]);
     max_rows += 16;
-    const long B = batch;   // all activation buffers are [B][...] stacked
     float *x, *t_norm, *yA, *yB, *t_v, *t_att, *t_dn, *t_conv, *t_g48a, *t_g48b, *logits, *t_ffnh;
     check(cudaMalloc((void**)&x, B * m.n_embd * 4), "x");
     check(cudaMalloc((void**)&t_norm, B * m.n_embd * 4), "t_norm");
@@ -1036,11 +1695,25 @@ int main(int argc, char** argv) {
     check(cudaMalloc((void**)&t_g48a, B * 64 * 4), "t_g48a");
     check(cudaMalloc((void**)&t_g48b, B * 64 * 4), "t_g48b");
     check(cudaMalloc((void**)&t_ffnh, B * (A == "qwen35" ? 17408 : 3072) * 4), "t_ffnh");
-    check(cudaMalloc((void**)&logits, B * m.n_vocab * 4), "logits");
-    int8_t* xq; float* xs; int* xsum;
-    check(cudaMalloc((void**)&xq, B * max_K), "xq");
-    check(cudaMalloc((void**)&xs, B * max_K / 32 * 4), "xs");
-    check(cudaMalloc((void**)&xsum, B * max_K / 32 * 4), "xsum");
+    const bool compact_target_logits = speculate > 0 && !dbg_dump;
+    const long logit_rows = compact_target_logits ? speculate : B;
+    check(cudaMalloc((void**)&logits, logit_rows * m.n_vocab * sizeof(float)), "logits");
+    const int logit_tiles = (m.n_vocab + 1023) / 1024;
+    LogitMax *tile_maxima = nullptr, *row_maxima = nullptr;
+    std::vector<LogitMax> target_maxima(compact_target_logits ? B : 0);
+    if (compact_target_logits) {
+        check(cudaMalloc(&tile_maxima, logit_rows * logit_tiles * sizeof(LogitMax)), "logit tiles");
+        check(cudaMalloc(&row_maxima, logit_rows * sizeof(LogitMax)), "logit maxima");
+    }
+    const uint64_t xq_bytes = (uint64_t)B * max_K;
+    const uint64_t qmeta_bytes = (uint64_t)B * max_K / 32 * sizeof(int2);
+    const uint64_t meta_off = align_up(xq_bytes, 256);
+    const uint64_t activation_bytes = meta_off + qmeta_bytes;
+    uint8_t* activation_buf = nullptr;
+    check(cudaMalloc((void**)&activation_buf, activation_bytes), "activation arena");
+    check(cudaMemset(activation_buf, 0, activation_bytes), "initialize padded activation rows");
+    int8_t* xq = (int8_t*)activation_buf;
+    int2* xmeta = (int2*)(activation_buf + meta_off);
     // small F32 tensors -> one device blob
     uint64_t small_bytes = 0;
     std::vector<std::pair<std::string, const GTensor*>> smalls;
@@ -1086,6 +1759,30 @@ int main(int argc, char** argv) {
     int fd = open(model.c_str(), O_RDONLY | (o_direct ? O_DIRECT : 0)); if (fd < 0) { perror("open o_direct"); return 1; }
     int fdc = open(model.c_str(), O_RDONLY); if (fdc < 0) { perror("open"); return 1; }
     cudaStream_t st, stc; check(cudaStreamCreate(&st), "stream"); check(cudaStreamCreate(&stc), "compute stream");
+    check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<16>, cudaSharedMemBankSizeEightByte), "GEMV shared bank mode");
+    if (B >= 12) check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<12>, cudaSharedMemBankSizeEightByte), "12-position GEMV shared bank mode");
+    if (B >= 24) check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<24>, cudaSharedMemBankSizeEightByte), "24-position GEMV shared bank mode");
+    if (B >= 32) check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<32>, cudaSharedMemBankSizeEightByte), "wide GEMV shared bank mode");
+    // E052: keep the small, repeatedly-read quantized activation working set in L2 while
+    // one-pass model weights stream through. xq/xmeta share one arena so the window
+    // covers all three arrays. Skip cleanly if the configured batch exceeds the device's
+    // persisting-cache window.
+    cudaDeviceProp l2prop{}; check(cudaGetDeviceProperties(&l2prop, 0), "L2 cache properties");
+    if (l2prop.persistingL2CacheMaxSize > 0 && activation_bytes <= (uint64_t)l2prop.persistingL2CacheMaxSize) {
+        check(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, (size_t)l2prop.persistingL2CacheMaxSize), "persisting L2 limit");
+        cudaStreamAttrValue window{};
+        window.accessPolicyWindow.base_ptr = activation_buf;
+        window.accessPolicyWindow.num_bytes = (size_t)activation_bytes;
+        window.accessPolicyWindow.hitRatio = 1.0f;
+        window.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+        window.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+        check(cudaStreamSetAttribute(stc, cudaStreamAttributeAccessPolicyWindow, &window), "activation L2 window");
+        printf("activation_l2_window,bytes=%llu,persisting_limit=%d\n",
+               (unsigned long long)activation_bytes, l2prop.persistingL2CacheMaxSize);
+    } else {
+        printf("activation_l2_window,disabled=capacity,bytes=%llu,persisting_limit=%d\n",
+               (unsigned long long)activation_bytes, l2prop.persistingL2CacheMaxSize);
+    }
     cudaEvent_t ev[kStage], evc[kSlots]; for (auto& e : ev) check(cudaEventCreate(&e), "event"); for (auto& e : evc) check(cudaEventCreate(&e), "event");
     for (auto& e : evc) check(cudaEventRecord(e, stc), "evc prime");
     check(cudaStreamSynchronize(stc), "evc prime sync");
@@ -1115,7 +1812,7 @@ int main(int argc, char** argv) {
         push_tensor("blk." + std::to_string(il) + ".ffn_up.weight");
         push_tensor("blk." + std::to_string(il) + ".ffn_down.weight");
     }
-    push_tensor("output.weight");
+    if (!share_output) push_tensor("output.weight");
 
     // ---- tokenizer ----
     Tok tok;
@@ -1198,29 +1895,53 @@ int main(int argc, char** argv) {
 
     // ---- load hot arena once (it is read in place every token thereafter) ----
     {
+        const auto hot_start = std::chrono::steady_clock::now();
         std::vector<uint8_t> bounce(kMaxItem + 8192);
+        std::vector<uint8_t> repacked(packed_verify && verify_hot ? kMaxItem : 0);
+        uint8_t* raw_device = slots;
+        if (packed_verify && !raw_device) check(cudaMalloc(&raw_device, kMaxItem), "hot pack scratch");
         long n_hot_items = 0;
         for (size_t i = 0; i < items.size(); ++i) {
             Item& it = items[i]; if (it.tier != kHot) continue;
             const ssize_t got = pread(fdc, bounce.data(), it.bytes, (off_t)it.file_off);
             if (got < (ssize_t)it.bytes) { fprintf(stderr, "hot pread %s\n", it.tensor.c_str()); return 1; }
+            if (it.packed) {
+                check(cudaMemcpyAsync(raw_device, bounce.data(), it.bytes, cudaMemcpyHostToDevice, stc), "hot raw upload");
+                const int blocks = (int)(it.K / 32);
+                const int tiles = (int)(it.rows / 16) * blocks;
+                k_pack_q4_tiles<<<(tiles + 3) / 4, 128, 0, stc>>>(
+                    reinterpret_cast<uint16_t*>(hot + it.res_off), reinterpret_cast<const uint16_t*>(raw_device), blocks, tiles);
+                check(cudaGetLastError(), "hot pack kernel");
+                check(cudaStreamSynchronize(stc), "hot pack sync");
+                ++n_hot_items;
+                continue;
+            }
             check(cudaMemcpy(hot + it.res_off, bounce.data(), it.bytes, cudaMemcpyHostToDevice), "hot load");
             ++n_hot_items;
         }
+        if (raw_device != slots) check(cudaFree(raw_device), "free hot pack scratch");
         if (verify_hot) {
             long bad = 0;
+            std::vector<uint8_t> roundtrip(kMaxItem);
             for (size_t i = 0; i < items.size(); ++i) {
                 Item& it = items[i]; if (it.tier != kHot) continue;
                 const ssize_t got = pread(fdc, bounce.data(), it.bytes, (off_t)it.file_off);
-                check(cudaMemcpy(bounce.data() + kMaxItem, hot + it.res_off, it.bytes, cudaMemcpyDeviceToHost), "hot verify d2h");
-                if (got < (ssize_t)it.bytes || memcmp(bounce.data(), bounce.data() + kMaxItem, it.bytes) != 0) {
+                check(cudaMemcpy(roundtrip.data(), hot + it.res_off, it.bytes, cudaMemcpyDeviceToHost), "hot verify d2h");
+                const uint8_t* expect = bounce.data();
+                if (it.packed && got == (ssize_t)it.bytes) {
+                    pack_q4_tiles(repacked.data(), bounce.data(), it.K, it.rows);
+                    expect = repacked.data();
+                }
+                if (got < (ssize_t)it.bytes || memcmp(expect, roundtrip.data(), it.bytes) != 0) {
                     fprintf(stderr, "HOT MISMATCH item %zu tensor %s rows %ld-%ld\n", i, it.tensor.c_str(), it.row0, it.row0 + it.rows);
                     ++bad;
                 }
             }
             printf("hot_verify,items=%ld,bad=%ld\n", n_hot_items, bad);
+            if (bad) return 1;
         }
-        printf("hot_load,items=%ld,GiB=%.2f\n", n_hot_items, hot_used / 1073741824.0);
+        printf("hot_load,items=%ld,GiB=%.2f,seconds=%.4f,gpu_pack=%d\n", n_hot_items, hot_used / 1073741824.0,
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - hot_start).count(), packed_verify);
     }
 
     // ---- decode loop ----
@@ -1230,7 +1951,7 @@ int main(int argc, char** argv) {
     const float dn_scale = 1.f / sqrtf((float)Sv);
     const long emb_nb = m.n_embd / 32;
     uint8_t* emb_buf = nullptr; check(cudaHostAlloc((void**)&emb_buf, (size_t)B * emb_nb * 18 + 4096, cudaHostAllocPortable), "emb buf");
-    std::vector<float> emb_row((size_t)B * m.n_embd), logits_h((size_t)B * m.n_vocab);
+    std::vector<float> emb_row((size_t)B * m.n_embd), logits_h((size_t)(compact_target_logits ? 1 : B) * m.n_vocab);
 
     // ---- E046: MTP (nextn) drafter ----
     // The qwen3.5 nextn block (blk.64 in the mtp gguf): hnorm(h) + enorm(emb(token)) ->
@@ -1242,37 +1963,42 @@ int main(int argc, char** argv) {
     // hidden per position (h_tgt); the MTP block is synced over accepted rows with h
     // shifted one position back, then drafts recursively (h = the MTP's own output).
     bool mtp_on = false;
+    float* mtp_tree_hidden = nullptr;
+    float* mtp_tree_inputs = nullptr;
+    int *mtp_tree_depth = nullptr, *mtp_tree_path = nullptr;
+    const bool eagle_on = !eagle_path.empty();
+    const uint8_t* output_device = nullptr;
+    Eagle4 eagle;
+    ParallelDraft parallel;
     uint8_t *mtp_dev = nullptr, *mtp_small_dev = nullptr;
-    float *mtp_kv_dev = nullptr, *h_tgt_dev = nullptr;
+    float *mtp_kv_dev = nullptr, *mtp_last_hidden = nullptr;
     float *mtp_cat = nullptr, *mtp_normed = nullptr, *mtp_resid = nullptr, *mtp_hout = nullptr, *mtp_hout2 = nullptr;
     std::map<std::string, uint64_t> mtp_off, mtp_small_off;
     uint64_t mtp_vram = 0;
     if (!mtp_path.empty()) {
-        GgufKV mkv; std::vector<GTensor> mt; uint64_t mstart = 0;
-        if (!parse_gguf(mtp_path.c_str(), mkv, mt, mstart)) { fprintf(stderr, "mtp gguf parse failed\n"); return 1; }
         uint64_t q4tot = 0, f32tot = 0;
         std::vector<std::pair<std::string, const GTensor*>> q4s, f32s;
-        for (const GTensor& t : mt) {
+        for (const GTensor& t : mtp_tensors) {
             if (t.type == kGGML_Q4_0 && t.name != "token_embd.weight") { q4s.push_back({t.name, &t}); q4tot += align_up(t.bytes, 256); }
             else if (t.type == kGGML_F32) { f32s.push_back({t.name, &t}); f32tot += align_up(t.bytes, 256); }
         }
-        mtp_vram = q4tot + f32tot + (uint64_t)m.n_kv * ctx * m.head_v * 8 + (uint64_t)ctx * m.n_embd * 4;
+        mtp_vram = q4tot + f32tot + (uint64_t)m.n_kv * ctx * m.head_v * 8 + (uint64_t)m.n_embd * 4;
         check(cudaMalloc((void**)&mtp_dev, q4tot), "mtp q4 blob");
         check(cudaMalloc((void**)&mtp_small_dev, f32tot), "mtp f32 blob");
         check(cudaMalloc((void**)&mtp_kv_dev, (size_t)m.n_kv * ctx * m.head_v * 8), "mtp kv");
         check(cudaMemset(mtp_kv_dev, 0, (size_t)m.n_kv * ctx * m.head_v * 8), "mtp kv zero");
-        check(cudaMalloc((void**)&h_tgt_dev, (size_t)ctx * m.n_embd * 4), "h_tgt");
-        check(cudaMemset(h_tgt_dev, 0, (size_t)ctx * m.n_embd * 4), "h_tgt zero");
+        check(cudaMalloc(&mtp_last_hidden, m.n_embd * sizeof(float)), "last target hidden state");
+        check(cudaMemset(mtp_last_hidden, 0, m.n_embd * sizeof(float)), "initial target hidden state");
         check(cudaMalloc((void**)&mtp_cat, (size_t)B * 2 * m.n_embd * 4), "mtp cat");
         check(cudaMalloc((void**)&mtp_normed, (size_t)B * m.n_embd * 4), "mtp normed");
         check(cudaMalloc((void**)&mtp_resid, (size_t)B * m.n_embd * 4), "mtp resid");
         check(cudaMalloc((void**)&mtp_hout, (size_t)B * m.n_embd * 4), "mtp hout");
-        check(cudaMalloc((void**)&mtp_hout2, (size_t)m.n_embd * 4), "mtp hout2");
+        check(cudaMalloc((void**)&mtp_hout2, (size_t)(mtp_tree ? mtp_group : 1) * m.n_embd * 4), "mtp hout2");
         { uint64_t o = 0; std::vector<uint8_t> hb;
           for (auto& p : q4s) {
               hb.resize(p.second->bytes);
               FILE* f = fopen(mtp_path.c_str(), "rb");
-              if (fseek(f, (long)(mstart + p.second->off), SEEK_SET) || fread(hb.data(), 1, p.second->bytes, f) != p.second->bytes) { fprintf(stderr, "mtp read %s\n", p.first.c_str()); return 1; }
+              if (!f || fseek(f, (long)(mtp_data_start + p.second->off), SEEK_SET) || fread(hb.data(), 1, p.second->bytes, f) != p.second->bytes) { fprintf(stderr, "mtp read %s\n", p.first.c_str()); return 1; }
               fclose(f);
               check(cudaMemcpy(mtp_dev + o, hb.data(), p.second->bytes, cudaMemcpyHostToDevice), "mtp q4 h2d");
               mtp_off[p.first] = o; o = align_up(o + p.second->bytes, 256);
@@ -1281,14 +2007,46 @@ int main(int argc, char** argv) {
           for (auto& p : f32s) {
               hb.resize(p.second->bytes);
               FILE* f = fopen(mtp_path.c_str(), "rb");
-              if (fseek(f, (long)(mstart + p.second->off), SEEK_SET) || fread(hb.data(), 1, p.second->bytes, f) != p.second->bytes) { fprintf(stderr, "mtp read %s\n", p.first.c_str()); return 1; }
+              if (!f || fseek(f, (long)(mtp_data_start + p.second->off), SEEK_SET) || fread(hb.data(), 1, p.second->bytes, f) != p.second->bytes) { fprintf(stderr, "mtp read %s\n", p.first.c_str()); return 1; }
               fclose(f);
               check(cudaMemcpy(mtp_small_dev + o, hb.data(), p.second->bytes, cudaMemcpyHostToDevice), "mtp f32 h2d");
               mtp_small_off[p.first] = o; o = align_up(o + p.second->bytes, 256);
           } }
         mtp_on = true;
+        if (share_output) output_device = mtp_dev + mtp_off.at("output.weight");
         printf("mtp_plan,q4_MiB=%.0f,f32_MiB=%.0f,total_MiB=%.0f\n", q4tot / 1048576.0, f32tot / 1048576.0, mtp_vram / 1048576.0);
     }
+
+    if (eagle_on || resident_output) {
+        uint8_t* head = nullptr;
+        check(cudaMalloc(&head, outw->bytes), "target output tensor");
+        std::vector<uint8_t> buffer(kMaxItem);
+        for (uint64_t off = 0; off < outw->bytes; off += buffer.size()) {
+            const size_t bytes = std::min<uint64_t>(buffer.size(), outw->bytes - off);
+            if (pread(fdc, buffer.data(), bytes, data_start + outw->off + off) != (ssize_t)bytes) {
+                fprintf(stderr, "target output read failed\n"); return 1;
+            }
+            check(cudaMemcpy(head + off, buffer.data(), bytes, cudaMemcpyHostToDevice), "target output upload");
+        }
+        output_device = head;
+        if (eagle_on) eagle.load(eagle_path, (int)ctx, (int)B, stc);
+        if (parallel_on && !parallel.load(parallel_path, m.n_embd, m.n_vocab)) {
+            fprintf(stderr, "parallel draft checkpoint could not be loaded\n");
+            return 2;
+        }
+    }
+    auto eagle_embeddings = [&](const std::vector<long>& ids) {
+        for (size_t row = 0; row < ids.size(); ++row) {
+            const ssize_t bytes = emb_nb * 18;
+            if (pread(fdc, emb_buf + row * bytes, bytes, data_start + embd->off + ids[row] * bytes) != bytes) {
+                fprintf(stderr, "EAGLE embedding read failed\n");
+                exit(1);
+            }
+            cpu_dequant_row_q4(emb_buf + row * bytes, m.n_embd, emb_row.data() + row * m.n_embd);
+        }
+        check(cudaMemcpy(eagle.embeddings, emb_row.data(), ids.size() * m.n_embd * sizeof(float),
+            cudaMemcpyHostToDevice), "EAGLE embeddings");
+    };
 
     double best_tok_s = 1e30, sum_steady_s = 0; long n_steady = 0; long free_min = free_after_alloc;
     uint64_t steady_cold_bytes = 0; long n_steady_cold = 0;
@@ -1298,7 +2056,35 @@ int main(int argc, char** argv) {
     long cur_pos = 0;                   // sequence position for rope/kv
 
     const int row_pos = (multi > 0 || speculate > 0) ? 1 : 0;   // rows are positions of one sequence
-    auto run_token = [&](const std::vector<long>& toks, long B, int pass, double* tok_s_out, uint64_t* cold_out) { (void)dbg_dump;
+    const size_t replay_qkv = (size_t)batch * m.qkv_out;
+    const size_t replay_gate = (size_t)batch * m.sss_dt;
+    const size_t replay_layer = 2 * (replay_qkv + replay_gate);
+    float* replay_inputs = nullptr;
+    if (speculate > 0 && m.n_recr) {
+        check(cudaMalloc((void**)&replay_inputs, m.n_recr * replay_layer * sizeof(float)), "recurrent replay inputs");
+    }
+    int *tree_depth = nullptr, *tree_paths = nullptr, *tree_leaves = nullptr;
+    int *tree_lengths = nullptr, *tree_owners = nullptr;
+    int tree_leaf_count = 0;
+    if (eagle_on || mtp_tree) {
+        check(cudaMalloc(&tree_depth, B * sizeof(int)), "tree depths");
+        check(cudaMalloc(&tree_paths, B * B * sizeof(int)), "tree paths");
+        check(cudaMalloc(&tree_leaves, B * B * sizeof(int)), "tree leaf paths");
+        check(cudaMalloc(&tree_lengths, B * sizeof(int)), "tree leaf lengths");
+        check(cudaMalloc(&tree_owners, B * sizeof(int)), "tree output owners");
+    }
+    if (mtp_tree) {
+        check(cudaMalloc(&mtp_tree_hidden, (size_t)batch * m.n_embd * sizeof(float)), "MTP tree hidden states");
+        check(cudaMalloc(&mtp_tree_depth, mtp_group * sizeof(int)), "MTP draft depth");
+        check(cudaMalloc(&mtp_tree_path, (size_t)mtp_group * batch * sizeof(int)), "MTP draft path");
+        if (mtp_group > 1) check(cudaMalloc(&mtp_tree_inputs, (size_t)mtp_group * m.n_embd * sizeof(float)), "MTP branch inputs");
+    }
+    const bool reuse_quant = packed_verify;
+    const bool fuse_quant = reuse_quant && !dbg_dump;
+    const bool defer_recurrent = replay_inputs && Sv == 128;
+    auto run_token = [&](const std::vector<long>& toks, long B, int pass, double* tok_s_out, uint64_t* cold_out,
+                         bool record_recurrent = false, bool tree = false, long head_row = -1) {
+        g_batch = mat_width(B);
         std::atomic<size_t> released{0};
         std::atomic<long> ready[kStage]; for (auto& r : ready) r = 0;
         std::atomic<bool> fail{false};
@@ -1328,6 +2114,7 @@ int main(int argc, char** argv) {
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<std::thread> pool;
         for (long t = 0; t < readers; ++t) pool.emplace_back([&, t]() {
+            std::vector<uint8_t> repacked, encoded;
             for (size_t k = (size_t)t; k < cold_list.size(); k += (size_t)readers) {
                 const int idx = cold_list[k]; Item& it = items[idx];
                 const bool in_pin = (uint64_t)it.res_off + it.bytes <= pin_bytes;
@@ -1340,11 +2127,28 @@ int main(int argc, char** argv) {
                     // the old unconditional staged_cache read returned never-written bytes
                     // for them. Only triggered on a pass-0 re-entry with populated caches
                     // (spec cycle 0): pass>=1 reads pinned items via direct_pin instead.
-                    memcpy(stage[b] + it.head, (in_pin ? pinned_cache : staged_cache) + it.res_off, it.bytes);
+                    memcpy(stage[b] + it.head, (in_pin ? pinned_cache : staged_cache) + it.res_off, it.transfer);
                 } else {
                     const ssize_t got = pread(fd, stage[b], it.read_len, (off_t)it.aligned_off);
                     if (got < (ssize_t)(it.head + it.bytes)) { fprintf(stderr, "pread %zd < %llu\n", got, (unsigned long long)(it.head + it.bytes)); fail = true; return; }
-                    if (it.tier == kStaged) { memcpy((in_pin ? pinned_cache : staged_cache) + it.res_off, stage[b] + it.head, it.bytes); cached[idx] = 1; }
+                    if (it.packed) {
+                        repacked.resize(it.bytes);
+                        pack_q4_tiles(repacked.data(), stage[b] + it.head, it.K, it.rows);
+                        const uint8_t* packed = repacked.data();
+                        if (compress_packed && it.tier == kStaged) {
+                            it.transfer = encode_scale_panels(encoded, packed, it.bytes);
+                            if (it.transfer < it.bytes) {
+                                if (!verify_scale_panels(encoded.data(), packed, it.bytes)) {
+                                    fprintf(stderr, "compressed scale round trip mismatch\n");
+                                    fail = true;
+                                    return;
+                                }
+                                packed = encoded.data();
+                            }
+                        }
+                        memcpy(stage[b] + it.head, packed, it.transfer);
+                    }
+                    if (it.tier == kStaged) { memcpy((in_pin ? pinned_cache : staged_cache) + it.res_off, stage[b] + it.head, it.transfer); cached[idx] = 1; }
                 }
                 ready[b].store((long)k + 1);
             }
@@ -1352,16 +2156,24 @@ int main(int argc, char** argv) {
         size_t cold_k = 0;
         std::vector<int> pending;
         auto S = [&](const std::string& tn) -> const float* { return (const float*)(small_dev + m.small_off.at(tn)); };
-        auto mat = [&](const std::string& tn, const float* xin, long K, float* out, long out_row0, long ystride) {
+        auto mat = [&](const std::string& tn, const float* xin, long K, float* out, long out_row0, long ystride,
+                       bool reuse = false) {
             const long nb = K / 32;
             // batched GEMV writes y[v*ystride + row]; consumers index dense [B][N], so the
             // stride must be this tensor's own row count — NOT the max_rows buffer pitch
             ystride = m.by_name.at(tn)->ne[1];
-            k_quant_x<<<dim3((unsigned)((nb * B + 127) / 128)), 128, 0, stc>>>(xin, nb * B, xq, xs, xsum);
+            if (!reuse || !reuse_quant)
+                k_quant_x<<<dim3((unsigned)((nb * B + 127) / 128)), 128, 0, stc>>>(xin, nb * B, xq, xmeta);
             for (int idx : tensor_items.at(tn)) {
                 Item& it = items[idx];
+                auto multiply = [&](const uint8_t* weights) {
+                    if (it.transfer < it.bytes)
+                        launch_packed_q4<true>(weights, it.K, it.rows, xq, xmeta, out + out_row0 + it.row0, ystride, stc);
+                    else if (it.packed) launch_packed_q4(weights, it.K, it.rows, xq, xmeta, out + out_row0 + it.row0, ystride, stc);
+                    else launch_mat_q4(weights, it.K, it.rows, xq, xmeta, out + out_row0 + it.row0, ystride, stc);
+                };
                 if (it.tier == kHot) {
-                    launch_mat_q4(hot + it.res_off, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0, ystride, stc);
+                    multiply(hot + it.res_off);
                     continue;
                 }
                 const bool in_pin = (uint64_t)it.res_off + it.bytes <= pin_bytes;
@@ -1376,10 +2188,10 @@ int main(int argc, char** argv) {
                     csrc = pinned_cache + it.res_off;
                 }
                 check(cudaStreamWaitEvent(st, evc[cold_k % kSlots], 0), "slot wait");
-                check(cudaMemcpyAsync(dst, csrc, it.bytes, cudaMemcpyHostToDevice, st), "copy");
+                check(cudaMemcpyAsync(dst, csrc, it.transfer, cudaMemcpyHostToDevice, st), "copy");
                 check(cudaEventRecord(ev[cold_k % kStage], st), "ev");
                 check(cudaStreamWaitEvent(stc, ev[cold_k % kStage], 0), "wait copy");
-                launch_mat_q4(dst, it.K, it.rows, xq, xs, xsum, out + out_row0 + it.row0, ystride, stc);
+                multiply(dst);
                 check(cudaEventRecord(evc[cold_k % kSlots], stc), "evc");
                 pending.push_back((int)cold_k);
                 if (pending.size() >= 6) {   // E047: deeper release window
@@ -1410,23 +2222,32 @@ int main(int argc, char** argv) {
         const dim3 grid1(1, (unsigned)B);
         for (long il = 0; il < m.n_layer; ++il) {
             const std::string L = "blk." + std::to_string(il);
-            k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S(L + ".attn_norm.weight"), (int)m.n_embd, (float)m.eps);
+            if (fuse_quant) k_rms_quant<<<(unsigned)B, 256, 0, stc>>>(xq, xmeta, x,
+                S(L + ".attn_norm.weight"), (int)m.n_embd, (float)m.eps);
+            else k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S(L + ".attn_norm.weight"), (int)m.n_embd, (float)m.eps);
             if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("emb" + std::to_string(il)).c_str(), x, m.n_embd); dbg(("norm" + std::to_string(il)).c_str(), t_norm, m.n_embd); }
             if (A == "qwen35" && m.is_recr[il]) {
                 // gated delta net path (linear attention with persistent state)
-                mat(L + ".attn_qkv.weight", t_norm, m.n_embd, yA, 0, max_rows);
-                mat(L + ".attn_gate.weight", t_norm, m.n_embd, yB, 0, max_rows);
-                mat(L + ".ssm_beta.weight", t_norm, m.n_embd, t_g48a, 0, max_rows);
+                mat(L + ".attn_qkv.weight", t_norm, m.n_embd, yA, 0, max_rows, fuse_quant);
+                mat(L + ".attn_gate.weight", t_norm, m.n_embd, yB, 0, max_rows, true);
+                mat(L + ".ssm_beta.weight", t_norm, m.n_embd, t_g48a, 0, max_rows, true);
                 if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("betaraw", t_g48a, m.sss_dt, 48, 1); dbg2("betaraw0", t_g48a, m.sss_dt, 48, 0); }
-                mat(L + ".ssm_alpha.weight", t_norm, m.n_embd, t_g48b, 0, max_rows);
-                k_sigmoid<<<dim3((unsigned)((m.sss_dt * B + 63) / 64), (unsigned)B), 64, 0, stc>>>(t_g48a, t_g48a, (int)m.sss_dt);
-                k_gate_ssm<<<dim3((unsigned)((m.sss_dt * B + 63) / 64), (unsigned)B), 64, 0, stc>>>(t_v, t_g48b, S(L + ".ssm_dt.bias"), S(L + ".ssm_a"), (int)m.sss_dt);
+                mat(L + ".ssm_alpha.weight", t_norm, m.n_embd, t_g48b, 0, max_rows, true);
+                k_sigmoid<<<(unsigned)((m.sss_dt * B + 63) / 64), 64, 0, stc>>>(t_g48a, t_g48a, (int)(m.sss_dt * B));
+                k_gate_ssm<<<(unsigned)((m.sss_dt * B + 63) / 64), 64, 0, stc>>>(t_v, t_g48b,
+                    S(L + ".ssm_dt.bias"), S(L + ".ssm_a"), (int)m.sss_dt, (int)B);
                 const long ri = il - (il + 1) / 4;   // recurrent-layer index (pattern 1,1,1,0)
                 const long conv_seq_stride = m.n_recr * m.qkv_out * (m.sss_conv - 1);
                 const long ssm_seq_stride = m.n_recr * m.sss_dt * Sv * Sv;
+                float* saved = record_recurrent && replay_inputs ? replay_inputs + ri * replay_layer : nullptr;
+                if (saved) check(cudaMemcpyAsync(saved, yA, (size_t)B * m.qkv_out * sizeof(float), cudaMemcpyDeviceToDevice, stc), "save conv input");
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("qkv0", yA, m.qkv_out); dbg("zraw0", yB, m.sss_inner); dbg("beta0", t_g48a, m.sss_dt); dbg("alpharaw0", t_g48b, m.sss_dt); if (B > 1) { dbg2("qkv0", yA, m.qkv_out, m.qkv_out, 1); dbg2("beta0", t_g48a, m.sss_dt, 64, 1); } }
-                if (row_pos)
-                    k_conv1d_silu_multi<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, (int)B);
+                if (tree)
+                    k_conv_tree<<<dim3((unsigned)((m.qkv_out + 255) / 256), (unsigned)B), 256, 0, stc>>>(
+                        conv_dev + ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"),
+                        t_conv, (int)m.qkv_out, tree_depth, tree_paths, (int)batch);
+                else if (row_pos)
+                    k_conv1d_silu_multi<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, (int)B, !saved || !defer_recurrent);
                 else
                     k_conv1d_silu<<<dim3((unsigned)((m.qkv_out + 255) / 256), (unsigned)B), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, conv_seq_stride);
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("convout0", t_conv, m.qkv_out); if (B > 1) dbg2("convout0", t_conv, m.qkv_out, m.qkv_out, 1); }
@@ -1435,9 +2256,19 @@ int main(int argc, char** argv) {
                 k_l2_heads<<<dim3((unsigned)m.sss_group, (unsigned)B), 128, 0, stc>>>(t_conv, (int)m.sss_group, (int)Sdim, (float)m.eps, conv_slice_stride);
                 // K lives at [Sdim*group, 2*Sdim*group) — V (at 2*Sdim*group) must NOT be normalized
                 k_l2_heads<<<dim3((unsigned)m.sss_group, (unsigned)B), 128, 0, stc>>>(t_conv + Sdim * m.sss_group, (int)m.sss_group, (int)Sdim, (float)m.eps, conv_slice_stride);
-                if (row_pos)
-                    k_delta_net_multi<<<(unsigned)m.sss_dt, 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_v, t_g48a, t_dn,
-                                                                     (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, (long)m.qkv_out, (long)m.sss_inner, (int)B);
+                if (saved) {
+                    check(cudaMemcpyAsync(saved + replay_qkv, t_conv, (size_t)B * m.qkv_out * sizeof(float), cudaMemcpyDeviceToDevice, stc), "save delta inputs");
+                    check(cudaMemcpyAsync(saved + 2 * replay_qkv, t_v, (size_t)B * m.sss_dt * sizeof(float), cudaMemcpyDeviceToDevice, stc), "save delta decay");
+                    check(cudaMemcpyAsync(saved + 2 * replay_qkv + replay_gate, t_g48a, (size_t)B * m.sss_dt * sizeof(float), cudaMemcpyDeviceToDevice, stc), "save delta beta");
+                }
+                if (tree)
+                    k_delta_net_128<true, true><<<dim3((unsigned)m.sss_dt, 4, tree_leaf_count), 32, 0, stc>>>(
+                        ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_v, t_g48a, t_dn,
+                        (int)m.sss_dt, (int)m.sss_group, dn_scale, m.qkv_out, m.sss_inner, (int)B,
+                        tree_leaves, tree_lengths, tree_owners, (int)batch);
+                else if (row_pos)
+                    launch_delta_multi(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_v, t_g48a, t_dn,
+                                       (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, m.qkv_out, m.sss_inner, (int)B, stc, nullptr, !saved || !defer_recurrent);
                 else
                     k_delta_net<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_conv + Sdim * m.sss_group,
                                                                  t_conv + 2 * Sdim * m.sss_group, t_v, t_g48a, t_dn, (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, ssm_seq_stride, (long)m.qkv_out);
@@ -1447,9 +2278,9 @@ int main(int argc, char** argv) {
                 mat(L + ".ssm_out.weight", t_att, m.sss_inner, yA, 0, max_rows);
             } else {
                 // full attention path with KV cache
-                mat(L + ".attn_q.weight", t_norm, m.n_embd, yA, 0, max_rows);
-                mat(L + ".attn_k.weight", t_norm, m.n_embd, yB, 0, max_rows);
-                mat(L + ".attn_v.weight", t_norm, m.n_embd, t_v, 0, max_rows);
+                mat(L + ".attn_q.weight", t_norm, m.n_embd, yA, 0, max_rows, fuse_quant);
+                mat(L + ".attn_k.weight", t_norm, m.n_embd, yB, 0, max_rows, true);
+                mat(L + ".attn_v.weight", t_norm, m.n_embd, t_v, 0, max_rows, true);
                 if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("v" + std::to_string(il)).c_str(), t_v, nh_k * hd); }
                 const int q_stride = A == "qwen35" ? 2 * (int)hd : (int)hd;
                 k_rms_heads<<<dim3((unsigned)nh_q, (unsigned)B), 128, 0, stc>>>(yA, S(L + ".attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, q_stride);
@@ -1458,7 +2289,7 @@ int main(int argc, char** argv) {
                 // are half-split (ops.cpp rope switch). qwen35 = IMROPE = half-split; for text the
                 // mrope section positions are all equal, so it is plain half-split RoPE.
                 const int rope_style = 0;
-                k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style, row_pos);
+                k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style, row_pos, tree ? tree_depth : nullptr);
                 const long li = A == "qwen35" ? il / 4 : il;
                 // batch mode: one slice per sequence; multi/verify mode: rows are positions of
                 // ONE sequence and must share slice 0 (full-history causal attention)
@@ -1467,50 +2298,65 @@ int main(int argc, char** argv) {
                 float* Vc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer + kv_per_layer);
                 // NOTE: appends must run on the compute stream — they read yB/t_v produced
                 // by GEMVs on stc (a copy-stream race here corrupted every layer >= 1)
-                for (long v = 0; v < B; ++v) {
-                    float* Ks = Kc + v * kv_seq_stride;
-                    float* Vs = Vc + v * kv_seq_stride;
-                    const long p = cur_pos + (row_pos ? v : 0);
-                    for (long h = 0; h < nh_k; ++h) {
-                        check(cudaMemcpyAsync(Ks + ((size_t)h * ctx + p) * hd, yB + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append k");
-                        check(cudaMemcpyAsync(Vs + ((size_t)h * ctx + p) * hd, t_v + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "kv append v");
-                    }
-                }
+                k_append_kv<<<dim3((unsigned)((nh_k * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(
+                    Kc, Vc, yB, t_v, (int)cur_pos, (int)ctx, (int)nh_k, (int)hd, kv_seq_stride, row_pos);
                 if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("vc" + std::to_string(il)).c_str(), Vc, nh_k * hd); }
-                k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + (row_pos ? B : 1)) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride, row_pos);
+                k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + (row_pos ? B : 1)) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride, row_pos,
+                    tree ? tree_depth : nullptr, tree ? tree_paths : nullptr, (int)batch);
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); if (B > 1) { dbg2(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd, nh_q * hd, 1); dbg2(("vv" + std::to_string(il)).c_str(), t_v, nh_k * hd, nh_k * hd, 1); } }
                 if (A == "qwen35") k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
                 mat(L + ".attn_output.weight", t_att, nh_q * hd, yA, 0, max_rows);
                 if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("wo0", yA, m.n_embd, m.n_embd, 1); dbg2("xpre0", x, m.n_embd, m.n_embd, 1); }
             }
-            k_add<<<dim3((unsigned)((m.n_embd * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(x, yA, (int)m.n_embd);
+            k_add<<<(unsigned)((m.n_embd * B + 255) / 256), 256, 0, stc>>>(x, yA, (int)(m.n_embd * B));
             if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("res0", x, m.n_embd, m.n_embd, 1); }
             if (dbg_dump && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("attn_out" + std::to_string(il)).c_str(), x, m.n_embd); if (B > 1) for (long vv = 1; vv < std::min<long>(B, 2); ++vv) dbg2(("attnout" + std::to_string(il)).c_str(), x, m.n_embd, m.n_embd, vv); }
             const std::string ln2 = A == "qwen35" ? L + ".post_attention_norm.weight" : L + ".ffn_norm.weight";
-            k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S(ln2), (int)m.n_embd, (float)m.eps);
-            mat(L + ".ffn_gate.weight", t_norm, m.n_embd, yA, 0, max_rows);
-            mat(L + ".ffn_up.weight", t_norm, m.n_embd, yB, 0, max_rows);
-            k_silu_mul<<<dim3((unsigned)((m.n_ff * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_ffnh, yA, yB, (int)m.n_ff);
-            mat(L + ".ffn_down.weight", t_ffnh, m.n_ff, yA, 0, max_rows);
-            k_add<<<dim3((unsigned)((m.n_embd * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(x, yA, (int)m.n_embd);
+            if (fuse_quant) k_rms_quant<<<(unsigned)B, 256, 0, stc>>>(xq, xmeta, x, S(ln2), (int)m.n_embd, (float)m.eps);
+            else k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S(ln2), (int)m.n_embd, (float)m.eps);
+            mat(L + ".ffn_gate.weight", t_norm, m.n_embd, yA, 0, max_rows, fuse_quant);
+            mat(L + ".ffn_up.weight", t_norm, m.n_embd, yB, 0, max_rows, true);
+            if (fuse_quant) k_silu_quant<<<(unsigned)((m.n_ff * B + 255) / 256), 256, 0, stc>>>(xq, xmeta, yA, yB, m.n_ff * B);
+            else k_silu_mul<<<(unsigned)((m.n_ff * B + 255) / 256), 256, 0, stc>>>(t_ffnh, yA, yB, (int)(m.n_ff * B));
+            mat(L + ".ffn_down.weight", t_ffnh, m.n_ff, yA, 0, max_rows, fuse_quant);
+            k_add<<<(unsigned)((m.n_embd * B + 255) / 256), 256, 0, stc>>>(x, yA, (int)(m.n_embd * B));
+            if (eagle_on) eagle.tap((int)il, x, (int)B);
             if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("ffn_out" + std::to_string(il)).c_str(), x, m.n_embd); }
             if ((il & 7) == 0) safety("token");
         }
-        k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S("output_norm.weight"), (int)m.n_embd, (float)m.eps);
-        if (dbg_dump && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("final_norm", t_norm, m.n_embd); }
-        mat("output.weight", t_norm, m.n_embd, logits, 0, m.n_vocab);
+        // Prompt chunks only need the last row's prediction at the handoff.
+        // The MTP cache still consumes every final-normalized target row.
+        if (mtp_on || head_row == -1)
+            k_rms_norm<<<grid1, 256, 0, stc>>>(t_norm, x, S("output_norm.weight"), (int)m.n_embd, (float)m.eps);
+        else if (head_row >= 0)
+            k_rms_norm<<<1, 256, 0, stc>>>(t_norm + head_row * m.n_embd, x + head_row * m.n_embd,
+                S("output_norm.weight"), (int)m.n_embd, (float)m.eps);
+        if (share_output && head_row != -2) {
+            const long rows = head_row >= 0 ? 1 : B;
+            const float* input = t_norm + std::max(0L, head_row) * m.n_embd;
+            const long blocks = m.n_embd / 32 * rows;
+            g_batch = mat_width(rows);
+            k_quant_x<<<(unsigned)((blocks + 127) / 128), 128, 0, stc>>>(input, blocks, xq, xmeta);
+            launch_mat_q4(output_device, m.n_embd, m.n_vocab, xq, xmeta, logits, m.n_vocab, stc);
+        } else if (!share_output) {
+            mat("output.weight", t_norm, m.n_embd, logits, 0, m.n_vocab);
+        }
+        if (compact_target_logits && head_row != -2) {
+            const long rows = head_row >= 0 ? 1 : B;
+            k_logit_tile_max<<<dim3(logit_tiles, (unsigned)rows), 256, 0, stc>>>(logits, (int)m.n_vocab, tile_maxima);
+            k_logit_row_max<<<(unsigned)rows, 256, 0, stc>>>(tile_maxima, logit_tiles, row_maxima);
+            check(cudaMemcpyAsync(target_maxima.data() + std::max(0L, head_row), row_maxima,
+                rows * sizeof(LogitMax), cudaMemcpyDeviceToHost, stc), "target argmax d2h");
+        }
         check(cudaGetLastError(), "kernel");
         check(cudaStreamSynchronize(stc), "sync c");
         check(cudaStreamSynchronize(st), "sync copy");
         released.store(cold_list.size() + (size_t)kStage);
         for (auto& th : pool) th.join();
-        check(cudaMemcpy(logits_h.data(), logits, B * m.n_vocab * 4, cudaMemcpyDeviceToHost), "logits d2h");
-        // E046: stash the final-normed hidden per position — the MTP block's h input is
-        // the PREVIOUS position's h_tgt (llama.cpp shifts it right by one)
-        if (mtp_on && row_pos) {
-            for (long v = 0; v < B && cur_pos + v < ctx; ++v)
-                check(cudaMemcpyAsync(h_tgt_dev + (size_t)(cur_pos + v) * m.n_embd, t_norm + (size_t)v * m.n_embd,
-                                      m.n_embd * 4, cudaMemcpyDeviceToDevice, stc), "h_tgt stash");
+        if (!compact_target_logits && head_row != -2) {
+            const long rows = head_row >= 0 ? 1 : B;
+            check(cudaMemcpy(logits_h.data() + std::max(0L, head_row) * m.n_vocab, logits,
+                rows * m.n_vocab * sizeof(float), cudaMemcpyDeviceToHost), "logits d2h");
         }
         if (dbg_dump) {
             long t1 = 0;
@@ -1519,7 +2365,7 @@ int main(int argc, char** argv) {
         }
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         *tok_s_out = s;
-        uint64_t cb = 0; for (int idx : cold_list) cb += items[idx].bytes;
+        uint64_t cb = 0; for (int idx : cold_list) cb += items[idx].transfer;
         *cold_out = cb;
         if (fail.load()) exit(1);
         cur_pos += row_pos ? B : 1;   // multi-position verify advances B positions per step
@@ -1532,7 +2378,7 @@ int main(int argc, char** argv) {
     float *ssm_snap = nullptr, *conv_snap = nullptr;
     const uint64_t ssm_bytes = (size_t)m.n_recr * m.sss_dt * Sv * Sv * 4;
     const uint64_t conv_bytes = (size_t)m.n_recr * m.qkv_out * (m.sss_conv - 1) * 4;
-    if (speculate > 0 && m.n_recr) {
+    if (speculate > 0 && m.n_recr && !defer_recurrent) {
         check(cudaMalloc((void**)&ssm_snap, ssm_bytes), "ssm snap");
         check(cudaMalloc((void**)&conv_snap, conv_bytes), "conv snap");
     }
@@ -1542,6 +2388,24 @@ int main(int argc, char** argv) {
         long best = 0; float bv = lg[0];
         for (long i = 1; i < m.n_vocab; ++i) if (lg[i] > bv) { bv = lg[i]; best = i; }
         return best;
+    };
+    auto target_argmax = [&](const float* lg) {
+        const long id = argmax(lg);
+        if (!std::isfinite(lg[id]) || (lg[id] == 0.f &&
+            std::all_of(lg, lg + m.n_vocab, [](float value) { return value == 0.f; }))) {
+            fprintf(stderr, "invalid target logits\n");
+            exit(1);
+        }
+        return id;
+    };
+    auto target_id = [&](long row) -> long {
+        if (!compact_target_logits) return target_argmax(logits_h.data() + row * m.n_vocab);
+        const LogitMax result = target_maxima[row];
+        if (result.flags != 1 || result.token < 0 || result.token >= m.n_vocab) {
+            fprintf(stderr, "invalid target logits\n");
+            exit(1);
+        }
+        return result.token;
     };
     long ties = 0;
     auto cmp_step = [&](const std::vector<float>& cl, const char* tag, long step) {
@@ -1567,6 +2431,10 @@ int main(int argc, char** argv) {
     double sum_gen_s = 0; long n_gen_s = 0;
     size_t max_plen = 0;
     for (long v = 0; v < batch; ++v) { plen[v] = prompts[v].size(); max_plen = std::max(max_plen, plen[v]); }
+    if (!max_plen || ctx <= 0 || max_plen > (size_t)ctx || (size_t)gen_tokens > (size_t)ctx - max_plen) {
+        fprintf(stderr, "context is too small for the prompt and generation limit\n");
+        return 2;
+    }
     if (multi > 0 && speculate == 0) {
         // ---- E040: verification-ceiling benchmark ----
         // One sequence; teacher-forced tokens (prompt + --feed-ids, which should be the
@@ -1631,293 +2499,521 @@ int main(int argc, char** argv) {
     // want_logits, the head GEMV runs for row `logit_row` and its logits land in logits[0].
     auto mtp_S = [&](const std::string& tn) -> const float* { return (const float*)(mtp_small_dev + mtp_small_off.at(tn)); };
     const long mtp_kv_layer = m.n_kv * ctx * m.head_v;
+    std::vector<int> draft_ids;
+    std::vector<char> draft_seen(mtp_on ? m.n_vocab : 0);
+    int* draft_device = nullptr;
+    const long common = std::clamp(draft_vocab, 0L, m.n_vocab);
+    auto add_draft_id = [&](long token) {
+        if (token >= 0 && token < m.n_vocab && !draft_seen[token]) {
+            draft_seen[token] = true;
+            draft_ids.push_back((int)token);
+        }
+    };
+    if (mtp_on && common && common < m.n_vocab) {
+        for (long token = 0; token < common; ++token) add_draft_id(token);
+        for (long token : prompts[0]) add_draft_id(token);
+        add_draft_id(m.eos_id);
+        check(cudaMalloc(&draft_device, m.n_vocab * sizeof(int)), "draft vocabulary");
+        check(cudaMemcpy(draft_device, draft_ids.data(), draft_ids.size() * sizeof(int), cudaMemcpyHostToDevice), "draft ids");
+    }
+    struct MtpBranchBatch {
+        int first;
+        int stride;
+        int max_depth;
+        std::vector<int> depth;
+        std::vector<int> paths;
+    };
     auto mtp_forward = [&](const float* h_in, const std::vector<long>& toks, long B, long pos0,
-                           float* h_out, bool want_logits, long logit_row) {
+                           float* h_out, bool want_logits, long logit_row, bool shortlist = false,
+                           const MtpBranchBatch* grouped = nullptr) {
+        g_batch = mat_width(B);
+        const int storage = (int)pos0 + (grouped ? grouped->first : 0);
+        if (grouped) {
+            check(cudaMemcpyAsync(mtp_tree_depth, grouped->depth.data(), B * sizeof(int), cudaMemcpyHostToDevice, stc), "MTP depths upload");
+            check(cudaMemcpyAsync(mtp_tree_path, grouped->paths.data(), grouped->paths.size() * sizeof(int), cudaMemcpyHostToDevice, stc), "MTP paths upload");
+        }
         for (long v = 0; v < B; ++v) {
             if (pread(fdc, emb_buf + (size_t)v * emb_nb * 18, emb_nb * 18, (off_t)(data_start + embd->off + (uint64_t)toks[v] * emb_nb * 18)) != (ssize_t)(emb_nb * 18)) { fprintf(stderr, "mtp embd pread\n"); exit(1); }
             cpu_dequant_row_q4(emb_buf + (size_t)v * emb_nb * 18, m.n_embd, &emb_row[(size_t)v * m.n_embd]);
         }
         check(cudaMemcpy(x, emb_row.data(), B * m.n_embd * 4, cudaMemcpyHostToDevice), "mtp emb h2d");
         // enorm(emb) -> cat[..n_embd), hnorm(h) -> cat[n_embd..): concat is [e; h]
-        k_rms_norm<<<dim3(1, (unsigned)B), 256, 0, stc>>>(mtp_cat, x, mtp_S("blk.64.nextn.enorm.weight"), (int)m.n_embd, (float)m.eps);
-        k_rms_norm<<<dim3(1, (unsigned)B), 256, 0, stc>>>(mtp_cat + m.n_embd, h_in, mtp_S("blk.64.nextn.hnorm.weight"), (int)m.n_embd, (float)m.eps);
+        k_rms_norm<<<dim3(1, (unsigned)B), 256, 0, stc>>>(mtp_cat, x, mtp_S("blk.64.nextn.enorm.weight"), (int)m.n_embd, (float)m.eps, (int)(2 * m.n_embd));
+        k_rms_norm<<<dim3(1, (unsigned)B), 256, 0, stc>>>(mtp_cat + m.n_embd, h_in, mtp_S("blk.64.nextn.hnorm.weight"), (int)m.n_embd, (float)m.eps, (int)(2 * m.n_embd));
         const dim3 grid1m(1, (unsigned)B);
-        k_quant_x<<<dim3((unsigned)((2 * m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_cat, 2 * m.n_embd / 32 * B, xq, xs, xsum);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.nextn.eh_proj.weight"), 2 * m.n_embd, m.n_embd, xq, xs, xsum, mtp_resid, m.n_embd, stc);
+        k_quant_x<<<dim3((unsigned)((2 * m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_cat, 2 * m.n_embd / 32 * B, xq, xmeta);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.nextn.eh_proj.weight"), 2 * m.n_embd, m.n_embd, xq, xmeta, mtp_resid, m.n_embd, stc);
         k_rms_norm<<<grid1m, 256, 0, stc>>>(mtp_normed, mtp_resid, mtp_S("blk.64.attn_norm.weight"), (int)m.n_embd, (float)m.eps);
-        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_normed, m.n_embd / 32 * B, xq, xs, xsum);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_q.weight"), m.n_embd, 12288, xq, xs, xsum, yA, 12288, stc);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_k.weight"), m.n_embd, 1024, xq, xs, xsum, yB, 1024, stc);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_v.weight"), m.n_embd, 1024, xq, xs, xsum, t_v, 1024, stc);
-        k_rms_heads<<<dim3((unsigned)nh_q, (unsigned)B), 128, 0, stc>>>(yA, mtp_S("blk.64.attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, 2 * (int)hd);
+        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_normed, m.n_embd / 32 * B, xq, xmeta);
+        if (h_out) launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_q.weight"), m.n_embd, 12288, xq, xmeta, yA, 12288, stc);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_k.weight"), m.n_embd, 1024, xq, xmeta, yB, 1024, stc);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_v.weight"), m.n_embd, 1024, xq, xmeta, t_v, 1024, stc);
+        if (h_out) k_rms_heads<<<dim3((unsigned)nh_q, (unsigned)B), 128, 0, stc>>>(yA, mtp_S("blk.64.attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, 2 * (int)hd);
         k_rms_heads<<<dim3((unsigned)nh_k, (unsigned)B), 128, 0, stc>>>(yB, mtp_S("blk.64.attn_k_norm.weight"), (int)nh_k, (int)hd, (float)m.eps, (int)hd);
-        k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)pos0, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, 2 * (int)hd, 0, 1);
-        for (long v = 0; v < B; ++v) {
-            const long p = pos0 + v;
-            for (long h = 0; h < nh_k; ++h) {
-                check(cudaMemcpyAsync(mtp_kv_dev + ((size_t)h * ctx + p) * hd, yB + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "mtp kv append k");
-                check(cudaMemcpyAsync(mtp_kv_dev + mtp_kv_layer + ((size_t)h * ctx + p) * hd, t_v + v * nh_k * hd + h * hd, hd * 4, cudaMemcpyDeviceToDevice, stc), "mtp kv append v");
-            }
+        k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB,
+            (int)pos0, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot,
+            (float)m.rope_base, 2 * (int)hd, 0, 1, grouped ? mtp_tree_depth : nullptr);
+        k_append_kv<<<dim3((unsigned)((nh_k * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(
+            mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yB, t_v, storage, (int)ctx, (int)nh_k, (int)hd, 0, true);
+        if (!h_out) {
+            check(cudaGetLastError(), "mtp KV kernel");
+            return;
         }
-        k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((pos0 + B) * 4), stc>>>(t_att, mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yA, (int)pos0, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, 2 * (int)hd, 0, 1);
+        const long score_rows = pos0 + (grouped ? grouped->max_depth + 1 : B);
+        k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)(score_rows * sizeof(float)), stc>>>(
+            t_att, mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yA, (int)pos0, (int)ctx,
+            (int)nh_q, (int)nh_k, (int)hd, attn_scale, 2 * (int)hd, 0, 1,
+            grouped ? mtp_tree_depth : nullptr, grouped ? mtp_tree_path : nullptr, grouped ? grouped->stride : 0);
         k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
-        k_quant_x<<<dim3((unsigned)((nh_q * hd / 32 * B + 127) / 128)), 128, 0, stc>>>(t_att, nh_q * hd / 32 * B, xq, xs, xsum);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_output.weight"), nh_q * hd, m.n_embd, xq, xs, xsum, yA, m.n_embd, stc);
-        // k_add is flat-indexed over [B*n]: its grid must be ((n*B+255)/256, B) like the
-        // main path — dim3(1, B) covers only the first 256*B flat elements (E046 bug)
-        const dim3 addgrid_m((unsigned)((m.n_embd * B + 255) / 256), (unsigned)B);
-        k_add<<<addgrid_m, 256, 0, stc>>>(mtp_resid, yA, (int)m.n_embd);
+        k_quant_x<<<dim3((unsigned)((nh_q * hd / 32 * B + 127) / 128)), 128, 0, stc>>>(t_att, nh_q * hd / 32 * B, xq, xmeta);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_output.weight"), nh_q * hd, m.n_embd, xq, xmeta, yA, m.n_embd, stc);
+        const unsigned addgrid_m = (unsigned)((m.n_embd * B + 255) / 256);
+        k_add<<<addgrid_m, 256, 0, stc>>>(mtp_resid, yA, (int)(m.n_embd * B));
         k_rms_norm<<<grid1m, 256, 0, stc>>>(mtp_normed, mtp_resid, mtp_S("blk.64.post_attention_norm.weight"), (int)m.n_embd, (float)m.eps);
-        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_normed, m.n_embd / 32 * B, xq, xs, xsum);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_gate.weight"), m.n_embd, m.n_ff, xq, xs, xsum, yA, m.n_ff, stc);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_up.weight"), m.n_embd, m.n_ff, xq, xs, xsum, yB, m.n_ff, stc);
-        k_silu_mul<<<dim3((unsigned)((m.n_ff * B + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_ffnh, yA, yB, (int)m.n_ff);
-        k_quant_x<<<dim3((unsigned)((m.n_ff / 32 * B + 127) / 128)), 128, 0, stc>>>(t_ffnh, m.n_ff / 32 * B, xq, xs, xsum);
-        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_down.weight"), m.n_ff, m.n_embd, xq, xs, xsum, yA, m.n_embd, stc);
-        k_add<<<addgrid_m, 256, 0, stc>>>(mtp_resid, yA, (int)m.n_embd);
+        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 * B + 127) / 128)), 128, 0, stc>>>(mtp_normed, m.n_embd / 32 * B, xq, xmeta);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_gate.weight"), m.n_embd, m.n_ff, xq, xmeta, yA, m.n_ff, stc);
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_up.weight"), m.n_embd, m.n_ff, xq, xmeta, yB, m.n_ff, stc);
+        if (fuse_quant) k_silu_quant<<<(unsigned)((m.n_ff * B + 255) / 256), 256, 0, stc>>>(xq, xmeta, yA, yB, m.n_ff * B);
+        else {
+            k_silu_mul<<<(unsigned)((m.n_ff * B + 255) / 256), 256, 0, stc>>>(t_ffnh, yA, yB, (int)(m.n_ff * B));
+            k_quant_x<<<(unsigned)((m.n_ff / 32 * B + 127) / 128), 128, 0, stc>>>(t_ffnh, m.n_ff / 32 * B, xq, xmeta);
+        }
+        launch_mat_q4(mtp_dev + mtp_off.at("blk.64.ffn_down.weight"), m.n_ff, m.n_embd, xq, xmeta, yA, m.n_embd, stc);
+        k_add<<<addgrid_m, 256, 0, stc>>>(mtp_resid, yA, (int)(m.n_embd * B));
         k_rms_norm<<<grid1m, 256, 0, stc>>>(h_out, mtp_resid, mtp_S("blk.64.nextn.shared_head_norm.weight"), (int)m.n_embd, (float)m.eps);
         if (want_logits) {
-            k_quant_x<<<dim3((unsigned)((m.n_embd / 32 + 127) / 128)), 128, 0, stc>>>(h_out + (size_t)logit_row * m.n_embd, m.n_embd / 32, xq, xs, xsum);
-            launch_mat_q4(mtp_dev + mtp_off.at("output.weight"), m.n_embd, m.n_vocab, xq, xs, xsum, logits, m.n_vocab, stc);
-            check(cudaMemcpyAsync(logits_h.data(), logits, m.n_vocab * 4, cudaMemcpyDeviceToHost, stc), "mtp logits d2h");
+            const long rows = grouped ? B : 1;
+            const long blocks = rows * m.n_embd / 32;
+            k_quant_x<<<(blocks + 127) / 128, 128, 0, stc>>>(h_out + (size_t)logit_row * m.n_embd, blocks, xq, xmeta);
+            const uint8_t* weights = mtp_dev + mtp_off.at("output.weight");
+            const long vocab = shortlist ? (long)draft_ids.size() : m.n_vocab;
+            const int* ids = shortlist ? draft_device : nullptr;
+            if (rows == 1) k_mat_q4<1><<<(vocab + 3) / 4, 128, 0, stc>>>(weights, m.n_embd, vocab, xq, xmeta, logits, vocab, ids);
+            else if (rows == 2) k_mat_q4<2><<<(vocab + 3) / 4, 128, 0, stc>>>(weights, m.n_embd, vocab, xq, xmeta, logits, vocab, ids);
+            else k_mat_q4<4><<<(vocab + 3) / 4, 128, 0, stc>>>(weights, m.n_embd, vocab, xq, xmeta, logits, vocab, ids);
+            const size_t count = (size_t)rows * vocab;
+            if (count > logits_h.size()) logits_h.resize(count);
+            check(cudaMemcpyAsync(logits_h.data(), logits, count * sizeof(float), cudaMemcpyDeviceToHost, stc), "mtp logits d2h");
         }
         check(cudaGetLastError(), "mtp kernel");
         check(cudaStreamSynchronize(stc), "mtp sync");
     };
 
+    auto mtp_commit = [&](const std::vector<long>& tokens, long base, int final_row, const int* path, bool dump) {
+        // MTP conditions on the previous target hidden state at each position.
+        // The accepted rows populate its KV cache, then only the last state carries forward.
+        const int count = (int)tokens.size();
+        const long elements = (long)count * m.n_embd;
+        k_mtp_shift_hidden<<<(elements + 255) / 256, 256, 0, stc>>>(mtp_last_hidden, t_norm, path,
+            mtp_hout, (int)m.n_embd, count);
+        check(cudaMemcpyAsync(mtp_last_hidden, t_norm + (size_t)final_row * m.n_embd,
+            m.n_embd * sizeof(float), cudaMemcpyDeviceToDevice, stc), "advance last target hidden state");
+        mtp_forward(mtp_hout, tokens, count, base, dump ? mtp_hout : nullptr, false, -1);
+    };
+
     if (speculate > 0) {
-        // ---- E041/E042/E043: speculative decoding with PLD drafter ----
-        // Lossless greedy speculation: draft tokens from context n-grams (CPU, ~free),
-        // verify all G positions in one cold-set pass, accept the longest target-confirmed
-        // prefix, emit the target's correction token. Output = exact greedy target decode.
-        //
-        // E043 (known-issues #1 fix — the acceptance killer): the old loop carried ONE
-        // token and on a partial accept restored the pre-cycle SSM snapshot. That snapshot
-        // covers positions 0..base-1, but verify rows 0..mt had processed the carried token
-        // AND the accepted drafts — cumulative delta-net/conv updates the restore discards,
-        // while cur_pos = base+mt+1 never reprocessed them. From the first partial accept
-        // the recurrent state diverged from the true greedy decode: logits drifted,
-        // known_next disagreed with the history tail, acceptance capped at ~30%, and the
-        // output stopped being lossless — all silently. Fix = re-feed: a carry buffer
-        // holds ALL confirmed-but-unprocessed tokens; after a rollback they are reprocessed
-        // as the front rows of the next pass. The recomputation is deterministic (same
-        // tokens, same order, same kernels, state restored bit-exact), so it rebuilds the
-        // recurrent state exactly AND re-verifies the carry for free within the same pass.
+        // One sequence. Verify a draft against the unchanged Q4 target, then
+        // commit only the recurrent inputs and attention KV of the accepted prefix.
+        const auto prefill_start = std::chrono::steady_clock::now();
         const long G = speculate;
         std::vector<long> hist = prompts[0];
         std::vector<long> emitted;
-        // prefill: process the prompt in G-position chunks (multi-position path)
-        for (size_t base = 0; base < hist.size(); base += G) {
-            const long nb = std::min<long>(G, (long)hist.size() - base);
+        long known = -1;
+        for (size_t base = 0; base < hist.size(); base += prefill_width) {
+            const long nb = std::min<long>(prefill_width, (long)hist.size() - base);
             std::vector<long> toks(hist.begin() + base, hist.begin() + base + nb);
             double s; uint64_t cold;
-            run_token(toks, nb, (int)(base / G), &s, &cold);
+            const long head_row = share_output && !dbg_dump ? (base + nb == hist.size() ? nb - 1 : -2) : -1;
+            run_token(toks, nb, (int)(base / prefill_width), &s, &cold, false, false, head_row);
+            if (base + nb == hist.size()) {
+                known = target_id(nb - 1);
+                if (parallel_on) parallel.commit(t_norm + (size_t)(nb - 1) * m.n_embd, stc);
+            }
+            if (mtp_on && !oracle) mtp_commit(toks, (long)base, (int)nb - 1, nullptr, dbg_dump);
+            if (eagle_on) {
+                eagle.project((int)base, (int)nb);
+                eagle_embeddings(toks);
+                eagle.attention(eagle.hidden_context + base * m.n_embd, (int)base, (int)nb, false);
+            }
+            // teacher-forced MTP sanity: row r's head argmax should predict the token
+            // after toks[r] for most rows — a low rate means the MTP forward is broken
+            if (mtp_on && !oracle && dbg_dump) {
+                g_batch = 1;
+                long tf_ok = 0, tf_n = 0;
+                for (long r = 0; r + 1 < nb; ++r) {
+                    k_quant_x<<<dim3((unsigned)((m.n_embd / 32 + 127) / 128)), 128, 0, stc>>>(mtp_hout + (size_t)r * m.n_embd, m.n_embd / 32, xq, xmeta);
+                    launch_mat_q4(mtp_dev + mtp_off.at("output.weight"), m.n_embd, m.n_vocab, xq, xmeta, logits, m.n_vocab, stc);
+                    check(cudaStreamSynchronize(stc), "tf sync");
+                    check(cudaMemcpy(logits_h.data(), logits, m.n_vocab * 4, cudaMemcpyDeviceToHost), "tf d2h");
+                    if (argmax(logits_h.data()) == toks[r + 1]) ++tf_ok;
+                    else if (dbg_dump && base == 0 && r < 6)
+                        printf("dbg,mtftfmiss,r=%ld,pred=%ld,want=%ld\n", r, argmax(logits_h.data()), toks[r + 1]);
+                    ++tf_n;
+                }
+                printf("dbg,mtp_tf,pb=%zu,ok=%ld,n=%ld\n", base, tf_ok, tf_n);
+            }
         }
         safety("spec-prefill");
-        // E046 fix: sync the MTP block over the ENTIRE prefill. Without this the MTP KV
-        // for positions 0..plen-1 is empty and every draft step at prompt end attends a
-        // sea of zero KV — proposals become garbage (invisible on a 13-token chat prompt,
-        // fatal on a 153-token agent prompt). Row 0's h input is zeros (llama.cpp's
-        // pending_h initialization); rows r>0 take h_tgt[r-1] (the one-position shift).
-        if (mtp_on) {
-            for (size_t pb = 0; pb < hist.size(); pb += (size_t)G) {
-                const long nb = std::min<long>(G, (long)hist.size() - pb);
-                std::vector<long> ptoks(hist.begin() + pb, hist.begin() + pb + nb);
-                if (pb == 0) {
-                    check(cudaMemsetAsync(mtp_hout, 0, (size_t)nb * m.n_embd * 4, stc), "mtp prefill sync zero");
-                    if (nb > 1) check(cudaMemcpyAsync(mtp_hout + m.n_embd, h_tgt_dev, (size_t)(nb - 1) * m.n_embd * 4, cudaMemcpyDeviceToDevice, stc), "mtp prefill sync shift");
-                    mtp_forward(mtp_hout, ptoks, nb, (long)pb, mtp_hout, false, -1);
-                } else {
-                    mtp_forward(h_tgt_dev + (pb - 1) * m.n_embd, ptoks, nb, (long)pb, mtp_hout, false, -1);
-                }
-                // teacher-forced MTP sanity: row r's head argmax should predict the token
-                // after ptoks[r] for most rows — a low rate means the MTP forward is broken
-                if (dbg_dump) {
-                    long tf_ok = 0, tf_n = 0;
-                    for (long r = 0; r + 1 < nb; ++r) {
-                        k_quant_x<<<dim3((unsigned)((m.n_embd / 32 + 127) / 128)), 128, 0, stc>>>(mtp_hout + (size_t)r * m.n_embd, m.n_embd / 32, xq, xs, xsum);
-                        launch_mat_q4(mtp_dev + mtp_off.at("output.weight"), m.n_embd, m.n_vocab, xq, xs, xsum, logits, m.n_vocab, stc);
-                        check(cudaStreamSynchronize(stc), "tf sync");
-                        check(cudaMemcpy(logits_h.data(), logits, m.n_vocab * 4, cudaMemcpyDeviceToHost), "tf d2h");
-                        if (argmax(logits_h.data()) == ptoks[r + 1]) ++tf_ok;
-                        else if (dbg_dump && pb == 0 && r < 6)
-                            printf("dbg,mtftfmiss,r=%ld,pred=%ld,want=%ld\n", r, argmax(logits_h.data()), ptoks[r + 1]);
-                        ++tf_n;
-                    }
-                    printf("dbg,mtp_tf,pb=%zu,ok=%ld,n=%ld\n", pb, tf_ok, tf_n);
-                }
-            }
-        }
-        // known_next = argmax of the last computed row: the last prefill chunk had
-        // ((size-1) % G) + 1 rows, and its last row predicts the token after the prompt.
-        // (The old min(G, size % G) formula yielded row -1 — an OOB read — whenever the
-        // prompt length was a multiple of G.)
-        const long rows_last = (long)((hist.size() - 1) % (size_t)G) + 1;
-        long known = argmax(&logits_h[(rows_last - 1) * m.n_vocab]);
-        long cycles = 0, tot_emitted = 0, tot_accepted = 0, tot_draft = 0;
-        double tot_t = 0;
-        bool stop = false;
-        std::vector<long> pending_drafts;   // E046: MTP chain output for the NEXT cycle
-        // carry = confirmed-but-unprocessed tokens, at positions cur_pos..cur_pos+L-1.
-        // Invariant at cycle start: device SSM/conv state covers positions 0..cur_pos-1
-        // and hist/emitted end with carry.back() (= known, the newest confirmed token).
-        std::vector<long> carry = { known };
-        // the prefill's known_next is the confirmed token after the prompt — emit it now;
-        // every later cycle's carry front is previous cycles' already-emitted tokens
-        hist.push_back(known); emitted.push_back(known);
-        printf("dbg,known=%ld\n", known);
-        for (long c = 0; c < gen_tokens * 4 && !stop && tot_emitted < gen_tokens; ++c) {
-            // ---- draft: MTP chain (E046) or PLD over history ----
+        check(cudaStreamSynchronize(stc), "spec prefill");
+        const auto decode_start = std::chrono::steady_clock::now();
+        const double prefill_s = std::chrono::duration<double>(decode_start - prefill_start).count();
+        long cycles = 0;
+        long mtp_accepted = 0, mtp_draft = 0, pld_accepted = 0, pld_draft = 0;
+        long eagle_accepted = 0, eagle_draft = 0;
+        long parallel_accepted = 0, parallel_proposed = 0;
+        double verify_s = 0, draft_s = 0, repair_s = 0;
+        auto lookup_drafts = [&](long limit) {
             std::vector<long> drafts;
-            const size_t n0 = hist.size();
-            const long L = (long)carry.size();
-            if (dbg_dump && c < 30) {
-                printf("dbg,draft,n0=%zu,L=%ld,known=%ld,tail=", n0, L, known);
-                for (int t = (int)std::max<size_t>(0, n0 - 6); t < (int)n0; ++t) printf("%ld,", hist[t]);
-                printf("\n");
-            }  // KEEP: drafter alignment debugging (E041 known-issues)
-            if (mtp_on) {
-                // E049 hybrid: a long PLD match predicts a periodic/echo span where the
-                // history continuation is near-certain — and costs nothing to draft. It
-                // overrides the MTP chain (whose speculative steps would be wasted there).
-                // Short/no match: the MTP chain (drafted last cycle) is the better bet.
-                std::vector<long> pld;
-                for (int n = std::min<size_t>(6, n0 - 1); n >= 1 && pld.empty(); --n) {
-                    for (long j = (long)n0 - n - 2; j >= 0 && pld.empty(); --j) {
-                        bool ok = true;
-                        for (int t = 0; t < n; ++t) if (hist[j + t] != hist[n0 - n + t]) { ok = false; break; }
-                        if (!ok) continue;
-                        for (int k = 0; k < G - 1 && j + n + k < (long)n0; ++k) pld.push_back(hist[j + n + k]);
-                        break;
+            const long size = (long)hist.size();
+            for (long n = std::min<long>(6, size - 1); n >= 1 && drafts.empty(); --n) {
+                for (long j = size - n - 2; j >= 0; --j) {
+                    if (!std::equal(hist.begin() + j, hist.begin() + j + n, hist.end() - n)) continue;
+                    const long end = std::min(size, j + n + limit);
+                    drafts.assign(hist.begin() + j + n, hist.begin() + end);
+                    break;
+                }
+            }
+            return drafts;
+        };
+        auto lookup_after_proposal = [&](const std::vector<long>& drafts, long proposal, long limit) {
+            std::vector<long> continuation;
+            const long hlen = (long)hist.size();
+            const long length = hlen + (long)drafts.size();
+            // Only propose continuations seen in the real history. The draft model
+            // must agree with their first token, after at least four matching tokens.
+            long best = 3;
+            for (long j = hlen - 4; j > 0; --j) {
+                if (hist[j] != proposal) continue;
+                long match = 0;
+                while (match < std::min({j, length, 32L})) {
+                    const long p = length - match - 1;
+                    const long token = p < hlen ? hist[p] : drafts[p - hlen];
+                    if (token != hist[j - match - 1]) break;
+                    ++match;
+                }
+                if (match <= best) continue;
+                best = match;
+                continuation.assign(hist.begin() + j, hist.begin() + std::min(hlen, j + limit));
+            }
+            return continuation;
+        };
+        // The first token comes from prompt evaluation. Each later token comes
+        // either from a matched draft or from the target's next-token prediction.
+        hist.push_back(known);
+        emitted.push_back(known);
+        bool stop = known == m.eos_id;
+        while (!stop && (long)emitted.size() < gen_tokens) {
+            const auto cycle_start = std::chrono::steady_clock::now();
+            const long base = cur_pos;
+            const long remaining = gen_tokens - (long)emitted.size();
+            const long limit = std::min(G, remaining) - 1;
+            const long mtp_limit = std::min(limit, draft_max);
+            std::vector<long> drafts = !oracle && !parallel_on && !eagle_on && (!mtp_on || pld_enabled == 1)
+                ? lookup_drafts(limit) : std::vector<long>{};
+            const bool use_pld = !mtp_on || (drafts.size() >= 6);
+            double this_draft_s = 0;
+            long model_drafts = 0;
+            DraftTree tree_drafts;
+            const bool tree_mtp = mtp_tree && !oracle && !use_pld;
+            auto guided_history = [&](const std::vector<long>& prefix, long token, long count) {
+                return pld_enabled == 2 ? lookup_after_proposal(prefix, token, count) : std::vector<long>{};
+            };
+            if (oracle) {
+                const size_t first = emitted.size();
+                if (known != oracle_ids[first - 1]) {
+                    fprintf(stderr, "oracle root differs from target at position %zu\n", first - 1);
+                    return 1;
+                }
+                drafts.assign(oracle_ids.begin() + first, oracle_ids.begin() + first + mtp_limit);
+            } else if (parallel_on) {
+                const auto draft_start = std::chrono::steady_clock::now();
+                const ssize_t bytes = emb_nb * 18;
+                if (pread(fdc, emb_buf, bytes, data_start + embd->off + known * bytes) != bytes) {
+                    fprintf(stderr, "parallel draft embedding read failed\n");
+                    return 1;
+                }
+                cpu_dequant_row_q4(emb_buf, m.n_embd, emb_row.data());
+                drafts = parallel.propose(emb_row.data(), mtp_limit, m.eos_id, stc);
+                model_drafts = (long)drafts.size();
+                this_draft_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - draft_start).count();
+            } else if (eagle_on) {
+                const auto draft_start = std::chrono::steady_clock::now();
+                tree_drafts = eagle.draft(known, m.eos_id, (int)base, (int)limit, (int)mtp_limit, p_min,
+                    [&](long token) { eagle_embeddings({token}); }, guided_history);
+                drafts = std::move(tree_drafts.tokens);
+                model_drafts = (long)std::count(tree_drafts.from_history.begin(), tree_drafts.from_history.end(), false);
+                this_draft_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - draft_start).count();
+            } else if (tree_mtp) {
+                const auto draft_start = std::chrono::steady_clock::now();
+                std::vector<int> ranking(m.n_vocab);
+                tree_drafts = build_draft_tree(m.eos_id, (int)limit, (int)mtp_limit, p_min, mtp_group,
+                    [&](int first, int count, const std::vector<std::vector<int>>& paths, const DraftTree& tree, DraftOptions* options) {
+                        const bool shortlist = first > 0 && draft_device;
+                        const int vocab = shortlist ? (int)draft_ids.size() : (int)m.n_vocab;
+                        MtpBranchBatch input{first, (int)batch, 0, {}, {}};
+                        std::vector<long> tokens;
+                        input.paths.resize((size_t)count * input.stride, -1);
+                        const float* hidden_batch = mtp_tree_inputs;
+                        for (int row = 0; row < count; ++row) {
+                            const int node = first + row;
+                            const auto& path = paths[node];
+                            input.depth.push_back((int)path.size() - 1);
+                            input.max_depth = std::max(input.max_depth, input.depth.back());
+                            std::copy(path.begin(), path.end(), input.paths.begin() + (size_t)row * input.stride);
+                            const float* hidden = node ? mtp_tree_hidden + (size_t)tree.parents[node] * m.n_embd : mtp_last_hidden;
+                            if (count == 1) hidden_batch = hidden;
+                            else check(cudaMemcpyAsync(mtp_tree_inputs + (size_t)row * m.n_embd, hidden,
+                                m.n_embd * sizeof(float), cudaMemcpyDeviceToDevice, stc), "MTP branch input");
+                            tokens.push_back(node ? tree.tokens[node - 1] : known);
+                        }
+                        mtp_forward(hidden_batch, tokens, count, base, mtp_hout2, true, 0, shortlist, &input);
+                        check(cudaMemcpyAsync(mtp_tree_hidden + (size_t)first * m.n_embd, mtp_hout2,
+                            (size_t)count * m.n_embd * sizeof(float), cudaMemcpyDeviceToDevice, stc), "MTP branch results");
+                        const int top = std::min(128, vocab);
+                        for (int row = 0; row < count; ++row) {
+                            const float* logits = logits_h.data() + (size_t)row * vocab;
+                            for (int i = 0; i < vocab; ++i) ranking[i] = i;
+                            std::partial_sort(ranking.begin(), ranking.begin() + top, ranking.begin() + vocab,
+                                [&](int a, int b) { return logits[a] > logits[b] || (logits[a] == logits[b] && a < b); });
+                            const double peak = logits[ranking[0]];
+                            double mass = 0;
+                            for (int i = 0; i < top; ++i) mass += exp((logits[ranking[i]] - peak) / 1.2);
+                            auto& proposal = options[row];
+                            proposal.count = std::min(kDraftFanout, top);
+                            for (int i = 0; i < proposal.count; ++i) {
+                                const int pick = ranking[i];
+                                proposal.choices[i] = {shortlist ? draft_ids[pick] : pick, exp((logits[pick] - peak) / 1.2) / mass};
+                            }
+                        }
+                    }, guided_history);
+                drafts = std::move(tree_drafts.tokens);
+                model_drafts = (long)std::count(tree_drafts.from_history.begin(), tree_drafts.from_history.end(), false);
+                this_draft_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - draft_start).count();
+            } else if (!use_pld) {
+                drafts.clear();
+                const auto mtp_start = std::chrono::steady_clock::now();
+                const float* hidden = mtp_last_hidden;
+                long token = known;
+                for (long k = 0; k < mtp_limit; ++k) {
+                    // Score the full draft vocabulary when anchored by a target
+                    // hidden state. Later draft steps can use the smaller list.
+                    const bool shortlist = draft_device && k > 0;
+                    const long vocab = shortlist ? (long)draft_ids.size() : m.n_vocab;
+                    mtp_forward(hidden, {token}, 1, base + k, mtp_hout2, true, 0, shortlist);
+                    const long index = std::max_element(logits_h.begin(), logits_h.begin() + vocab) - logits_h.begin();
+                    const long proposal = shortlist ? draft_ids[index] : index;
+                    if (p_min > 0.0) {
+                        const double peak = logits_h[index];
+                        double sum = 0.0;
+                        for (long j = 0; j < vocab; ++j) sum += exp((double)logits_h[j] - peak);
+                        if (1.0 / sum < p_min) break;
+                    }
+                    ++model_drafts;
+                    if (pld_enabled == 2 && limit - k >= 4) {
+                        auto continuation = lookup_after_proposal(drafts, proposal, limit - k);
+                        if (continuation.size() >= 4) {
+                            drafts.insert(drafts.end(), continuation.begin(), continuation.end());
+                            break;
+                        }
+                    }
+                    drafts.push_back(proposal);
+                    if (proposal == m.eos_id) break;
+                    token = proposal;
+                    hidden = mtp_hout2;
+                }
+                this_draft_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - mtp_start).count();
+            }
+
+            std::vector<long> feed = {known};
+            feed.insert(feed.end(), drafts.begin(), drafts.end());
+            const auto& parents = tree_drafts.parents;
+            bool tree = false;
+            for (size_t r = 1; r < parents.size(); ++r) tree |= parents[r] != (int)r - 1;
+            std::vector<int> paths;
+            if (tree) {
+                const int rows = (int)feed.size();
+                const int width = (int)G;
+                std::vector<int> depths(rows), owners(rows, -1), leaf_paths, lengths;
+                paths.resize(rows * width, -1);
+                paths[0] = 0;
+                for (int row = 1; row < rows; ++row) {
+                    const int parent = parents[row];
+                    depths[row] = depths[parent] + 1;
+                    std::copy_n(paths.begin() + parent * width, depths[row], paths.begin() + row * width);
+                    paths[row * width + depths[row]] = row;
+                }
+                std::vector<bool> terminal(rows, true);
+                for (int row = 1; row < rows; ++row) terminal[parents[row]] = false;
+                for (int leaf = 0; leaf < rows; ++leaf) {
+                    if (!terminal[leaf]) continue;
+                    for (int d = 0; d <= depths[leaf]; ++d) {
+                        const int row = paths[leaf * width + d];
+                        if (owners[row] < 0) owners[row] = (int)lengths.size();
+                    }
+                    leaf_paths.insert(leaf_paths.end(), paths.begin() + leaf * width, paths.begin() + (leaf + 1) * width);
+                    lengths.push_back(depths[leaf] + 1);
+                }
+                tree_leaf_count = (int)lengths.size();
+                check(cudaMemcpy(tree_depth, depths.data(), rows * sizeof(int), cudaMemcpyHostToDevice), "tree depths");
+                check(cudaMemcpy(tree_paths, paths.data(), paths.size() * sizeof(int), cudaMemcpyHostToDevice), "tree paths");
+                check(cudaMemcpy(tree_leaves, leaf_paths.data(), leaf_paths.size() * sizeof(int), cudaMemcpyHostToDevice), "tree leaf paths");
+                check(cudaMemcpy(tree_lengths, lengths.data(), lengths.size() * sizeof(int), cudaMemcpyHostToDevice), "tree leaf lengths");
+                check(cudaMemcpy(tree_owners, owners.data(), owners.size() * sizeof(int), cudaMemcpyHostToDevice), "tree row owners");
+            }
+            const long rows = (long)feed.size();
+            if (replay_inputs && rows > 1 && !tree && !defer_recurrent) {
+                check(cudaMemcpyAsync(ssm_snap, ssm_dev, ssm_bytes, cudaMemcpyDeviceToDevice, stc), "ssm snapshot");
+                check(cudaMemcpyAsync(conv_snap, conv_dev, conv_bytes, cudaMemcpyDeviceToDevice, stc), "conv snapshot");
+            }
+            double pass_s;
+            uint64_t cold;
+            run_token(feed, rows, (int)cycles + 1, &pass_s, &cold, rows > 1, tree);
+            std::vector<long> prefix{feed[0]};
+            int leaf = 0;
+            for (;;) {
+                known = target_id(leaf);
+                if (known == m.eos_id) break;
+                int child = -1;
+                if (tree) {
+                    for (int r = leaf + 1; r < rows; ++r)
+                        if (parents[r] == leaf && feed[r] == known) { child = r; break; }
+                } else if (leaf + 1 < rows && feed[leaf + 1] == known) {
+                    child = leaf + 1;
+                }
+                if (child < 0) break;
+                leaf = child;
+                prefix.push_back(known);
+            }
+            const long committed = (long)prefix.size();
+            const long accepted = committed - 1;
+            stop = known == m.eos_id;
+            const long new_tokens = accepted + (stop ? 0 : 1);
+            emitted.insert(emitted.end(), prefix.begin() + 1, prefix.end());
+            if (!stop) emitted.push_back(known);
+            hist.insert(hist.end(), emitted.end() - new_tokens, emitted.end());
+            if (oracle && accepted != rows - 1) {
+                fprintf(stderr, "oracle continuation rejected at generated position %zu\n",
+                        emitted.size() - new_tokens + accepted);
+                return 1;
+            }
+            if (draft_device && !oracle) {
+                const size_t old = draft_ids.size();
+                for (auto it = emitted.end() - new_tokens; it != emitted.end(); ++it) add_draft_id(*it);
+                if (draft_ids.size() > old) check(cudaMemcpy(draft_device + old, draft_ids.data() + old,
+                    (draft_ids.size() - old) * sizeof(int), cudaMemcpyHostToDevice), "extend draft vocabulary");
+            }
+            long model_accepted = std::min(accepted, model_drafts);
+            if (eagle_on || tree_mtp) {
+                model_accepted = 0;
+                for (int d = 1; d < committed; ++d) {
+                    const int row = tree ? paths[leaf * G + d] : d;
+                    model_accepted += !tree_drafts.from_history[row - 1];
+                }
+            }
+            if (parallel_on) {
+                parallel_proposed += model_drafts;
+                parallel_accepted += model_accepted;
+            } else if (eagle_on) {
+                eagle_draft += model_drafts;
+                eagle_accepted += model_accepted;
+            } else {
+                mtp_draft += model_drafts;
+                mtp_accepted += model_accepted;
+            }
+            if (!oracle) {
+                pld_draft += rows - 1 - model_drafts;
+                pld_accepted += accepted - model_accepted;
+            }
+
+            double commit_s = 0;
+            if (!stop && (long)emitted.size() < gen_tokens) {
+                const auto commit_start = std::chrono::steady_clock::now();
+                const int* accepted_path = tree ? tree_paths + leaf * G : nullptr;
+                if (tree) {
+                    const int columns = (int)(m.n_attn * 2 * nh_k * hd);
+                    k_compact_kv<<<(columns + 255) / 256, 256, 0, stc>>>(kv_dev, (int)ctx, (int)hd,
+                        columns, (int)base, (int)committed, accepted_path);
+                    const size_t stride = 3 * m.n_embd;
+                    for (long d = 0; eagle_on && d < committed; ++d) {
+                        const int from = paths[leaf * G + d];
+                        if (from == d) continue;
+                        check(cudaMemcpyAsync(eagle.features + d * stride, eagle.features + from * stride,
+                            stride * sizeof(float), cudaMemcpyDeviceToDevice, stc), "commit EAGLE features");
                     }
                 }
-                drafts = (pld.size() >= 6) ? pld : pending_drafts;
-            } else {
-            for (int n = std::min<size_t>(6, n0 - 1); n >= 1 && drafts.empty(); --n) {
-                // j+n < n0-1: exclude the self-match (the pattern's own tail would seed on
-                // itself and propose nothing). The proposal is whatever followed the
-                // previous occurrence — no filter on its identity; the verify pass confirms.
-                for (long j = (long)n0 - n - 2; j >= 0 && drafts.empty(); --j) {
-                    bool ok = true;
-                    for (int t = 0; t < n; ++t) if (hist[j + t] != hist[n0 - n + t]) { ok = false; break; }
-                    if (!ok) continue;
-                    for (int k = 0; k < G - 1 && j + n + k < (long)n0; ++k) drafts.push_back(hist[j + n + k]);
+                if (replay_inputs && (tree || committed < rows || (defer_recurrent && rows > 1))) {
+                    const auto repair_start = std::chrono::steady_clock::now();
+                    if (!tree && !defer_recurrent) check(cudaMemcpyAsync(ssm_dev, ssm_snap, ssm_bytes, cudaMemcpyDeviceToDevice, stc), "ssm rollback");
+                    const size_t conv_layer = (size_t)m.qkv_out * (m.sss_conv - 1);
+                    const size_t ssm_layer = (size_t)m.sss_dt * Sv * Sv;
+                    for (long ri = 0; ri < m.n_recr; ++ri) {
+                        const float* saved = replay_inputs + ri * replay_layer;
+                        k_conv_commit<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(
+                            conv_dev + ri * conv_layer, ((tree || defer_recurrent) ? conv_dev : conv_snap) + ri * conv_layer, saved, (int)m.qkv_out, (int)committed, accepted_path);
+                        launch_delta_multi(
+                            ssm_dev + ri * ssm_layer, saved + replay_qkv, saved + 2 * replay_qkv,
+                            saved + 2 * replay_qkv + replay_gate, nullptr, (int)Sv, (int)m.sss_dt,
+                            (int)m.sss_group, dn_scale, m.qkv_out, m.sss_inner, (int)committed, stc, accepted_path);
+                    }
+                    check(cudaGetLastError(), "replay accepted recurrent prefix");
+                    check(cudaStreamSynchronize(stc), "replay sync");
+                    repair_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - repair_start).count();
                 }
-            }
-            }
-            // feed = carry (front rows re-verify confirmed tokens and rebuild state after
-            // any rollback) + drafts seeded after carry.back(). E045: NO dummy padding —
-            // every padded row cost ~7.4 ms of pass time for a guaranteed-reject position.
-            // The pass width is exactly the rows that can teach us something; with no
-            // drafts this degenerates to a dense-cost step (L rows, L==1 typical).
-            std::vector<long> feed(carry);
-            feed.insert(feed.end(), drafts.begin(), drafts.end());
-            if (feed.size() > (size_t)G) feed.resize(G);
-            const long Bf = (long)std::max<size_t>(feed.size(), 1);
-            const long base = cur_pos;
-            // snapshot recurrent state: delta-net state is cumulative, rejected positions
-            // cannot be overwritten — restore on partial accept, then re-feed (~150 MB D2D, ~1 ms)
-            if (m.n_recr) {
-                check(cudaMemcpy(ssm_snap, ssm_dev, ssm_bytes, cudaMemcpyDeviceToDevice), "ssm snap cp");
-                check(cudaMemcpy(conv_snap, conv_dev, conv_bytes, cudaMemcpyDeviceToDevice), "conv snap cp");
-            }
-            double s; uint64_t cold;
-            run_token(feed, Bf, (int)c, &s, &cold);
-            // row argmaxes
-            std::vector<long> ra(Bf);
-            for (long r = 0; r < Bf; ++r) ra[r] = argmax(&logits_h[(size_t)r * m.n_vocab]);
-            // longest confirmed prefix: row r confirms feed[r+1]
-            long mt = 0;
-            while (mt < Bf - 1 && ra[mt] == feed[mt + 1]) ++mt;
-            // rows 0..L-2 re-verify already-confirmed carry tokens — deterministic
-            // recomputation, guaranteed to match. Clamp so no anomaly can ever truncate
-            // carry: ra[L-1] is the target's own argmax after the confirmed token
-            // feed[L-1], so treating row L-1 as confirmed is lossless regardless.
-            if (mt < L - 1) mt = L - 1;
-            long emitted_here;
-            if (mt == Bf - 1) {
-                // full match: every fed position confirmed; the post-pass state covers them
-                // all. carry rows were emitted earlier; drafts feed[L..Bf-1] confirmed now.
-                for (long r = L; r < Bf; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
-                known = ra[Bf - 1];
-                hist.push_back(known); emitted.push_back(known);
-                emitted_here = Bf - L + 1;       // NEW tokens: drafts feed[L..Bf-1] + correction
-                // cur_pos advanced by Bf (run_token); state covers the whole pass
-                carry.assign(1, known);
-                tot_accepted += Bf - L;
-            } else {
-                // feed[L..mt] confirmed, feed[mt+1] rejected — roll back recurrent state;
-                // rows 0..mt (carry + accepted drafts) and the correction ra[mt] re-feed
-                // next cycle, rebuilding the state exactly
-                if (m.n_recr) {
-                    check(cudaMemcpy(ssm_dev, ssm_snap, ssm_bytes, cudaMemcpyDeviceToDevice), "ssm rollback");
-                    check(cudaMemcpy(conv_dev, conv_snap, conv_bytes, cudaMemcpyDeviceToDevice), "conv rollback");
+                commit_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - commit_start).count();
+                if (eagle_on) {
+                    const auto sync_start = std::chrono::steady_clock::now();
+                    eagle.project((int)base, (int)committed);
+                    eagle_embeddings(prefix);
+                    eagle.attention(eagle.hidden_context + (size_t)base * m.n_embd, (int)base, (int)committed, false);
+                    check(cudaStreamSynchronize(stc), "EAGLE context sync");
+                    this_draft_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - sync_start).count();
                 }
-                for (long r = L; r <= mt; ++r) { hist.push_back(feed[r]); emitted.push_back(feed[r]); }
-                known = ra[mt];
-                hist.push_back(known); emitted.push_back(known);
-                emitted_here = mt - L + 2;       // NEW tokens: drafts feed[L..mt] + correction
-                cur_pos = base;                  // rewound: carry re-feeds from base next cycle
-                carry.assign(feed.begin(), feed.begin() + mt + 1);
-                carry.push_back(known);
-                tot_accepted += mt - L + 1;
+                if (mtp_on && !oracle) {
+                    const auto sync_start = std::chrono::steady_clock::now();
+                    mtp_commit(prefix, base, leaf, accepted_path, false);
+                    check(cudaStreamSynchronize(stc), "mtp KV sync");
+                    this_draft_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - sync_start).count();
+                }
+                if (parallel_on) {
+                    const auto sync_start = std::chrono::steady_clock::now();
+                    parallel.commit(t_norm + (size_t)leaf * m.n_embd, stc);
+                    check(cudaStreamSynchronize(stc), "parallel draft commit");
+                    this_draft_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - sync_start).count();
+                }
+                cur_pos = base + committed;
             }
-            tot_draft += Bf - L;
-            tot_emitted += emitted_here;
-            tot_t += s;
-            ++cycles;
+
+            verify_s += pass_s;
+            draft_s += this_draft_s;
             const long fv = free_vram_mib();
             if (fv >= 0 && fv < free_min) free_min = fv;
             safety("spec");
-            bool hit_eos = false;
-            for (long r = emitted.size() - emitted_here; r < (long)emitted.size(); ++r) if (emitted[r] == m.eos_id) hit_eos = true;
-            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,carry=%ld,seconds=%.4f,tok_per_s_cycle=%.3f,free_vram_MiB=%ld\n",
-                   c, (long)drafts.size(), mt, emitted_here, L, s, emitted_here / s, fv);
-            if (hit_eos || known == m.eos_id) stop = true;
-            // ---- E046: MTP sync over accepted rows + recursive draft chain ----
-            // Sync: rows 0..mt were confirmed; their MTP KV entries are (h_tgt[pos-1],
-            // token) — h_tgt is contiguous in h_tgt_dev, one D2D covers the shifted input.
-            // Draft: step 0 runs at the correction's position with h = h_tgt of the last
-            // accepted position (llama.cpp pending_h); steps 1+ feed back the MTP's own
-            // output. Drafts fill the NEXT cycle's feed after the carry.
-            if (mtp_on && !stop && tot_emitted < gen_tokens) {
-                const long sb = mt + 1;
-                if (base - 1 >= 0 && base + sb <= ctx)
-                    mtp_forward(h_tgt_dev + (size_t)(base - 1) * m.n_embd,
-                                std::vector<long>(feed.begin(), feed.begin() + sb), sb, base, mtp_hout, false, -1);
-                pending_drafts.clear();
-                float* h_chain = h_tgt_dev + (size_t)(base + mt) * m.n_embd;
-                long tok = known;
-                const long nd_max = std::max<long>(0, G - (mt + 2));
-                for (long k = 0; k < nd_max; ++k) {
-                    const long qpos = base + mt + 1 + k;
-                    if (qpos >= ctx) break;
-                    mtp_forward(h_chain, std::vector<long>{tok}, 1, qpos, mtp_hout2, true, 0);
-                    const long d = argmax(logits_h.data());
-                    if (dbg_dump && c < 30 && k < 2) {
-                        long t1 = 0, t2 = 0, t3 = 0;
-                        for (long j = 1; j < m.n_vocab; ++j) { if (logits_h[j] > logits_h[t1]) { t3 = t2; t2 = t1; t1 = j; } else if (logits_h[j] > logits_h[t2]) { t3 = t2; t2 = j; } else if (logits_h[j] > logits_h[t3]) t3 = j; }
-                        printf("dbg,mtpdraft,c=%ld,k=%ld,pos=%ld,top=%ld:%.3f,%ld:%.3f,%ld:%.3f,tok=%ld\n", c, k, qpos, t1, logits_h[t1], t2, logits_h[t2], t3, logits_h[t3], tok);
-                    }
-                    if (p_min > 0.0) {
-                        double mx = -1e30;
-                        for (long j = 0; j < m.n_vocab; ++j) mx = fmax(mx, (double)logits_h[j]);
-                        double z = 0;
-                        for (long j = 0; j < m.n_vocab; ++j) z += exp((double)logits_h[j] - mx);
-                        const double p = exp((double)logits_h[d] - mx) / z;
-                        if (p < p_min) break;
-                    }
-                    pending_drafts.push_back(d);
-                    if (d == m.eos_id) break;
-                    tok = d;
-                    h_chain = mtp_hout2;
-                }
-            }
+            const double cycle_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - cycle_start).count();
+            if (oracle)
+                printf("oracle_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,verify_seconds=%.6f,commit_seconds=%.6f,seconds=%.6f,cold_bytes=%llu,free_vram_MiB=%ld\n",
+                       cycles, rows - 1, accepted, new_tokens, pass_s, commit_s, cycle_s, (unsigned long long)cold, fv);
+            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,verify_seconds=%.4f,%s=%.4f,seconds=%.4f,cold_bytes=%llu,free_vram_MiB=%ld,tree=%d,tree_leaves=%d\n",
+                   cycles++, rows - 1, accepted, new_tokens, pass_s, parallel_on ? "parallel_seconds" : eagle_on ? "eagle_seconds" : "mtp_seconds",
+                   this_draft_s, cycle_s, (unsigned long long)cold, fv, tree, tree ? tree_leaf_count : 1);
         }
+        const double decode_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+        const long tot_emitted = (long)emitted.size() - 1;
+        const long tot_accepted = mtp_accepted + eagle_accepted + pld_accepted + parallel_accepted;
+        const long tot_draft = mtp_draft + eagle_draft + pld_draft + parallel_proposed;
         if (show_text) printf("generated_text,%s\n", tok.decode(emitted).c_str());
-        printf("spec_summary,cycles=%ld,emitted=%ld,mean_emitted_per_cycle=%.3f,draft_acceptance=%.3f,mean_cycle_s=%.4f,tok_per_s=%.3f,min_free_vram_MiB=%ld\n",
-               cycles, tot_emitted, cycles ? (double)tot_emitted / cycles : 0, tot_draft ? (double)tot_accepted / tot_draft : 0,
-               cycles ? tot_t / cycles : 0, tot_t > 0 ? (double)tot_emitted / tot_t : 0, free_min);
+        if (parallel_on)
+            printf("parallel_summary,proposed=%ld,accepted=%ld,mean_prefix=%.4f,mean_draft_s=%.6f\n",
+                   parallel_proposed, parallel_accepted, cycles ? (double)parallel_accepted / cycles : 0,
+                   cycles ? draft_s / cycles : 0);
+        printf("spec_summary,user_sequences=1,cycles=%ld,emitted=%zu,decode_tokens=%ld,mean_emitted_per_cycle=%.3f,draft_acceptance=%.3f,mtp_draft_acceptance=%.3f,mtp_accepted=%ld,mtp_draft=%ld,eagle_draft_acceptance=%.3f,eagle_accepted=%ld,eagle_draft=%ld,pld_draft_acceptance=%.3f,pld_accepted=%ld,pld_draft=%ld,mean_verify_s=%.4f,%s=%.4f,mean_repair_s=%.4f,mean_cycle_s=%.4f,tok_per_s=%.3f,prefill_s=%.4f,request_tok_per_s=%.3f,min_free_vram_MiB=%ld\n",
+               cycles, emitted.size(), tot_emitted, cycles ? (double)tot_emitted / cycles : 0, tot_draft ? (double)tot_accepted / tot_draft : 0,
+               mtp_draft ? (double)mtp_accepted / mtp_draft : 0, mtp_accepted, mtp_draft,
+               eagle_draft ? (double)eagle_accepted / eagle_draft : 0, eagle_accepted, eagle_draft,
+               pld_draft ? (double)pld_accepted / pld_draft : 0, pld_accepted, pld_draft,
+               cycles ? verify_s / cycles : 0, parallel_on ? "mean_parallel_s" : eagle_on ? "mean_eagle_s" : "mean_mtp_s",
+               cycles ? draft_s / cycles : 0, cycles ? repair_s / cycles : 0,
+               cycles ? decode_s / cycles : 0, decode_s > 0 ? (double)tot_emitted / decode_s : 0,
+               prefill_s, (double)emitted.size() / (prefill_s + decode_s), free_min);
         if (out_ids_path.size()) {
             FILE* f = fopen(out_ids_path.c_str(), "w");
             if (f) { for (long id : emitted) fprintf(f, "%ld\n", id); fclose(f); }
@@ -1933,8 +3029,7 @@ int main(int argc, char** argv) {
             const size_t ncmp = std::min(expect.size(), emitted.size());
             size_t bad = ncmp, bad_at = 0;
             for (size_t i = 0; i < ncmp; ++i) if (expect[i] != emitted[i]) { bad_at = i; --bad; break; }
-            const bool clean = bad == ncmp;   // no mismatch in the compared prefix; a longer
-                                              // emitted tail is the expected gen_tokens overshoot
+            const bool clean = bad == ncmp && expect.size() == emitted.size();
             printf("spec_lossless,expected=%zu,emitted=%zu,compared=%zu,mismatches=%zu,first_mismatch=%zu,match=%s\n",
                    expect.size(), emitted.size(), ncmp, ncmp - bad, bad == ncmp ? 0 : bad_at,
                    clean ? "yes" : "no");

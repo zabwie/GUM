@@ -1,0 +1,12 @@
+quant_probe,op=silu,columns=5120,rows=1,reference_us=8.979,fused_us=2.197,bit_exact=1
+quant_probe,op=rms,columns=5120,rows=1,reference_us=14.769,fused_us=13.138,bit_exact=1
+quant_probe,op=silu,columns=5120,rows=16,reference_us=12.534,fused_us=3.764,bit_exact=1
+quant_probe,op=rms,columns=5120,rows=16,reference_us=17.518,fused_us=13.157,bit_exact=1
+quant_probe,op=silu,columns=5120,rows=32,reference_us=18.493,fused_us=5.642,bit_exact=1
+quant_probe,op=rms,columns=5120,rows=32,reference_us=22.610,fused_us=13.875,bit_exact=1
+quant_probe,op=silu,columns=17408,rows=1,reference_us=9.206,fused_us=2.261,bit_exact=1
+quant_probe,op=rms,columns=17408,rows=1,reference_us=28.996,fused_us=40.571,bit_exact=1
+quant_probe,op=silu,columns=17408,rows=16,reference_us=36.197,fused_us=11.476,bit_exact=1
+quant_probe,op=rms,columns=17408,rows=16,reference_us=66.232,fused_us=40.612,bit_exact=1
+quant_probe,op=silu,columns=17408,rows=32,reference_us=66.836,fused_us=21.053,bit_exact=1
+quant_probe,op=rms,columns=17408,rows=32,reference_us=94.075,fused_us=54.784,bit_exact=1

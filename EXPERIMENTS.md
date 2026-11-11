@@ -5,7 +5,7 @@
 - **Date:** 2026-11-08
 - **Question:** What hardware/runtime is available, and is the GPU quiet enough for a controlled first run?
 - **Procedure:** Read CPU, RAM, PCIe sysfs, `nvidia-smi`, installed compiler versions, and NVIDIA address mode. No hardware settings were changed and no CUDA kernel was run.
-- **Observations:** See [HARDWARE.md](HARDWARE.md). RTX 3060 12 GiB, i7-12700K, PCIe 4.0 x16 at 16 GT/s, Linux kernel 7.0.0-38, NVIDIA driver 595.99.02, CUDA toolkits 12.0 and 13.2, HMM address mode. About 19 GiB RAM available; 3.9 GiB memlock allowance.
+- **Observations:** See [HARDWARE.md](docs/HARDWARE.md). RTX 3060 12 GiB, i7-12700K, PCIe 4.0 x16 at 16 GT/s, Linux kernel 7.0.0-38, NVIDIA driver 595.99.02, CUDA toolkits 12.0 and 13.2, HMM address mode. About 19 GiB RAM available; 3.9 GiB memlock allowance.
 - **Resource decision:** GPU showed 54% utilization and active graphics workloads. Deferred GPU execution to avoid contaminating measurements or disrupting the desktop. No performance result is claimed.
 - **Conclusion:** The HMM path is exposed by the installed driver, but actual runtime attributes and memory behavior remain to be queried/measured. The mapped pinned-host path is the first controlled test because it keeps the source physically host-resident.
 
@@ -618,3 +618,1333 @@ The 488 ms cycle is: k_mat_q4 271 ms (55%) + k_delta_net_multi 116 ms (24%) + sm
   cycle → ~13-15 tok/s at today's 34% acceptance; beyond that, acceptance × cold-bytes are
   the terms (consistent with the 20.4 tok/s zero-draft verify bound).
 - Rollback D2D (151 MB × 39) = 35.6 ms TOTAL — the E043 hybrid-state tax is negligible.
+
+## E051-E053 — follow-up kernel probes (2026-11-10)
+
+- **E051 GEMV tile/multi-row probe:** baseline 0.539 ms. Tiled activation variants were 0.594–0.674
+  ms; multi-row amortization R=2/4/8 was 0.730/0.529/0.655 ms. The R=4 result is within noise
+  and does not establish a useful win. All real variants were bit-exact. Raw:
+  `results/e051-kernel-probes-20261110.txt`.
+- **E051 delta-net probe:** transposed state and split-S loops reduced the isolated H48/S128/B17
+  kernel from 3.301 ms to 0.817 ms; the fused variant took 0.747 ms. Output and updated state
+  were bit-exact. Scale-only shared-memory variants in E051b were slower (0.578–0.659 ms vs
+  0.546 ms baseline). Raw: `results/e051b-kernel-probes-20261110.txt`.
+- **E052 GEMV mapping/cache sweep:** shared-weight vector mappings, warp-count/block-size changes,
+  and `__ldg`/`.cg` cache modifiers did not produce a stable GEMV improvement. The CUDA
+  persisting-L2 window did: median 0.5087 → 0.4415 ms (1.152×) on the 11,652×5,120 NB=16
+  microbench, bit-exact. Raw E052a-e are in `results/e052*-20261110.txt`.
+- **E053 weight cache policy:** `.cg` weight loads and `__ldg` activation loads regressed or tied
+  the default path; not integrated. Raw E053a-c are in `results/e053*-20261110.txt`.
+
+## E054-E055 — integrate delta-net layout and persist activation L2 (2026-11-10)
+
+- **E054 delta-net layout:** production state is now `[head][i][j]`; adjacent lanes cover adjacent
+  `j`, while each `j` keeps its original serial `i` accumulation order. Updated the one-token
+  path, multi-token path, CPU reference, and multi-token launch grid. Snapshot/rollback remains a
+  byte copy. The real 27B MTP+PLD run improved 6.990 → 8.803 reported tok/s, cycle 0.4877 →
+  0.3873 s, and passed `--expect-ids` (32 compared, zero mismatches).
+- **E055 activation L2 window:** `xq`, `xs`, and `xsum` share an aligned arena and the compute
+  stream marks it persisting when it fits the device's L2 persisting limit. The same real run
+  reached 9.283 tok/s and 0.3672 s/cycle (5.5% over E054), still lossless. On this GPU the arena
+  was 348,160 bytes and the persisting limit 1,622,016 bytes. Raw:
+  `results/e054-delta-layout-agent-g16-20261110.txt`,
+  `results/e055-l2-window-agent-g16-20261110.txt`.
+
+## E056-E060 — GEMV alternatives tested and rejected (2026-11-10)
+
+- **E056 INT8 WMMA/Tensor Core:** 1.331 ms vs 0.552 ms reference (0.415×); accumulation order
+  also changed. Not integrated. `results/e056-int8-wmma-q4-gemv-20261110.txt`.
+- **E057 shared activation tile with grid-stride rows:** all tested row groups were slower
+  (0.65–0.79×); numerical differences stayed below 1e-6 but were not bit-exact. The direct
+  experiment rules out that implementation. `results/e057-gemv-gridstride-tile-20261110.txt`
+  and `results/e057-rg*-20261110.txt`.
+- **E058 vector-warps:** the four-vector-per-warp variant was bit-exact and 1.13–1.21× faster on
+  selected synthetic shapes, but a broad real-decoder dispatch regressed to 8.629 tok/s. Gating it
+  to K=5120 gave 9.098 tok/s, still below the 9.316 tok/s control. Raw E058 shape and full-run
+  records are `results/e058*-20261110.txt`.
+- **E059 four-row vector-warp tile:** bit-exact, 1.04–1.07× on the tested K=5120 microbench
+  shapes; the full path measured 9.104 tok/s vs a 9.316 tok/s control. Not integrated.
+  `results/e059*-20261110.txt`.
+- **E060 shared activation + vector-warps + grid-stride rows:** 0.45–0.60× reference with a
+  53.75 KiB tile; reducing the chunk to 40 blocks still measured 0.44–0.49×. These candidates
+  changed FP grouping but were deterministic; neither is in production. Raw E060 records are in
+  `results/e060*-20261110.txt`.
+
+The production `k_mat_q4<16>` remains unchanged. No GEMV replacement in this series met the
+end-to-end acceptance bar; the E050 estimate of a 2.5–4× GEMV speedup remains unproven.
+
+## E061-E064 — draft tuning and final lossless run (2026-11-10)
+
+- **E061 confidence cutoff sweep, γ=16:** `p_min=0.1` gave 7.636 tok/s / 27.6% acceptance;
+  `0.5` gave 8.948 / 31.3%; `0.8` gave 8.980 / 29.2%. The existing 0.3 cutoff remains best.
+- **E062 draft width sweep, p_min=0.3:** γ=8 gave 9.171 tok/s / 47.9% acceptance; γ=32 gave
+  7.291 / 17.6%. The γ=16 control was about 9.3 tok/s / 33.8%. All passed the exact-token gate.
+- **E063 PLD lookback 6→12:** no change in draft count, acceptance, or throughput; reverted.
+- **E064 final source:** rebuilt `benchmarks/real_decode.cu` after removing the losing GEMV
+  dispatches. With γ=16, p_min=0.3, hot 8192/cache 5600, the agent trace produced 9.350 reported
+  tok/s, 3.409 emitted tokens/cycle, 0.3646 s/cycle, and 33.8% acceptance. `--expect-ids` passed
+  (32 compared, zero mismatches). Raw: `results/e064-final-state-layout-l2-agent-g16-20261110.txt`.
+
+The requested 20–25 tok/s was **not reached**. Delta-net and activation-cache changes are retained;
+the later E065-E075 work adds a partial GEMV improvement, but GEMV remains the dominant compute
+cost. Wider draft windows and confidence cutoffs did not bridge the remaining gap on this trace.
+The 13–15 tok/s post-fix estimate in E050 assumed a larger, unimplemented GEMV speedup and remains
+an unmeasured projection.
+
+## E065-E075 — packed GEMV metadata and bank-friendly shared tile (2026-11-10)
+
+- **E065 L1 carveout / profiler access:** the `PreferL1` E058 sweep was inconclusive under
+  variable GPU timing and is not integrated. Nsight Compute rejected hardware counters with
+  `ERR_NVGPUCTRPERM`; Nsight Systems remains available for kernel timelines.
+- **E066 packed activation metadata:** combine each activation block's scale bits and integer
+  correction into one aligned `int2`. Across 11,652x5,120, 17,408x5,120, 5,120x17,408, and
+  17,408x17,408 synthetic GEMVs, it was bit-exact and measured 1.10-1.21x vs separate scale/sum
+  arrays. Integrated as `xmeta` in `real_decode.cu`. Three lossless full-path runs had median
+  9.442 tok/s vs 9.337 for the prior binary; the gain is small (~1.1%). Raw shape results:
+  `results/e066a-gemv-packed-meta-20261110.txt` and
+  `results/e066-gemv-packed-meta-shapes-20261110.txt`. The three candidate runs are
+  `results/e067-packed-meta-agent-g16-20261110.txt`, `results/e067b-packed-meta-agent-g16-20261110.txt`,
+  and `results/e067c-packed-meta-agent-g16-20261110.txt`.
+- **E068 shared-tile chunk sweep:** the earlier scalar shared layout remained slower (CB=64
+  0.573 ms vs 0.508 ms baseline); bit-exact, not retained. Raw:
+  `results/e068-gemv-smem-chunk-sweep-20261110.txt`.
+- **E069 bank-friendly packed tile:** stage each 32-value activation block and its `{scale,sum}`
+  metadata into a 40-byte shared record. Pair loads use 8-byte bank mode and an `int2` layout;
+  16 output-row warps reuse one activation tile. CB=64 preserved the original lane accumulation
+  order and was bit-exact. Microbench results: 0.388 vs 0.507 ms at 11,652x5,120; 0.180 vs
+  0.223 ms at 5,120x5,120; 0.532 vs 0.710 ms at 17,408x5,120; 1.675 vs 2.415 ms at
+  17,408x17,408; 0.329 vs 0.433 ms at 5,120x10,240. Raw E069a-d are in `results/`.
+- **E070/E071 integration:** dispatch the shared tile for NB=16 and K>=5120; smaller K keeps the
+  regular kernel. The first 5,120-only run was 9.573 tok/s; the generalized run was 9.629 tok/s,
+  both exact-gated (32 compared, zero mismatches). A subsequent run under lower VRAM headroom was
+  8.799 tok/s, so single-run throughput is variable. The earlier un-profiled control median was
+  9.337 tok/s.
+- **E072/E073 matched timeline:** under the same 32-token profile config, candidate/control mean
+  cycle was 0.3534/0.3609 s and both exact gates passed. Nsight Systems counted 20,242 GEMV
+  launches: summed GEMV time was 4.789 s vs 5.174 s (~7.5% lower); GEMV still used about 80% of
+  kernel time. Delta-net time was essentially unchanged between arms. These profiler runs explain
+  why the isolated 1.2-1.4x GEMV gains translate to only a few percent end-to-end. The timeline
+  reports are `results/e072-wide-gemv-timeline-20261110.nsys-rep` and
+  `results/e073-control-gemv-timeline-20261110.nsys-rep`; stdout is in matching `*-run-*` files.
+- **E074 vector-warps plus shared tile:** output was bit-exact but took 0.983 ms vs 0.508 ms;
+  rejected. **E075 chunk/row-tile sweep:** CB=64 was the best of 32/64/96/128 in the first run
+  (0.389 ms); a later run under GPU activity was noisy and not faster. Row-tile 32 did not beat
+  the CB=64/16-row configuration. The production dispatch remains CB=64, 16 rows/CTA.
+
+Current source therefore retains the transposed delta-net layout, L2 activation window, packed
+activation metadata, and exact-order shared GEMV tile. The requested 20–25 tok/s remains open;
+E071 reached 9.629 tok/s in one run, and the full-path timeline still identifies GEMV as dominant.
+
+## E076 — attribute draft acceptance and time MTP end to end (2026-11-10)
+
+**Question.** The reported 34% “MTP acceptance” combined two drafter sources and timed only the
+target verification pass. Separate MTP from PLD, measure the whole decode cycle, and check whether
+high-confidence MTP can meet the requested 90% acceptance without changing greedy output.
+
+**Measurement fixes and optimization.** `spec_summary` now reports MTP and PLD proposal counts and
+accepted counts separately. Per-cycle timing starts before draft selection and ends after MTP state
+sync and recursive drafting; the prior `tok_per_s` omitted that work. The hybrid path also skips
+building a recursive MTP chain when the next history lookup is already certain to replace it with
+PLD. The MTP KV/state sync still runs, so a later MTP draft starts from the correct history.
+
+**Baseline attribution.** On the same 64-token agent trace, the default hybrid run reported 34.0%
+combined acceptance, but source counters separated it into MTP **7/15 (46.7%)** and PLD **46/141
+(32.6%)**. The small MTP denominator is why the combined statistic was a poor description of MTP
+quality. Corrected end-to-end timing was 8.826 tok/s versus 9.287 verifier-only; after skipping an
+unused MTP chain, MTP time fell from 33.9 to 16.9 ms/cycle in these runs and end-to-end throughput
+rose from 8.518 to 8.826 tok/s. These are single-run comparisons under varying desktop GPU load.
+
+**Acceptance-first setting.** A confidence sweep led to MTP-only with `--p-min 0.97`, γ=8. On the
+128-token agent trace it accepted **61/63 MTP proposals (96.8%)** in two runs and matched all 128
+tokens from the dense reference in both runs. End-to-end throughput was 5.770 and 5.937 tok/s;
+dense was 3.593 tok/s on the same trace. The 0.98 run accepted 57/60 (95.0%) at 5.417 tok/s; 0.99
+accepted 55/56 (98.2%) at 5.357 tok/s. A shorter 0.95 run was 27/32 (84.4%), so 0.97 leaves
+measured margin over the 90% criterion while drafting more often. The default with `--mtp` is now
+`p_min=0.97` and PLD disabled; `--pld 1 --p-min 0.3` restores the faster historical hybrid.
+
+**Fast hybrid comparison.** With `--pld 1 --p-min 0.3`, γ=16, and the same 128-token trace, the
+full output also matched dense exactly. It measured 7.397 end-to-end tok/s, with 30.8% combined
+acceptance (MTP 35/79 = 44.3%; PLD 50/197 = 25.4%). This is the throughput-oriented option; it
+does not meet the 90% acceptance goal on this trace.
+
+**Current bottleneck and limits.** The high-confidence setting favors acceptance over speed. Its
+mean verifier pass was 304 ms/cycle and its MTP work was 16.6 ms/cycle. The matched E072/E073
+timeline still attributes about 80% of kernel time to `k_mat_q4`; the existing CB=64 activation
+tile reduced summed GEMV time about 7.5%, but did not remove the main wall. The 90% result is
+demonstrated on this fixed agent trace and model, not established across arbitrary prompts. Keep
+the exact dense gate for every drafter or kernel change.
+
+Raw evidence: `results/e076-source-split-agent-g16-20261110.txt`,
+`results/e076-e2e-hybrid-agent-g16-20261110.txt`,
+`results/e076-skip-wasted-mtp-agent-g16-20261110.txt`,
+`results/e076-dense-agent-n128-20261110.txt`,
+`results/e076-dense-agent-n128-ids-20261110.txt`,
+`results/e076-default-mtp-agent-g8-n128-20261110.txt`,
+`results/e076-mtp-highconf-agent-g8-p097-n128-20261110.txt`,
+`results/e076-mtp-highconf-agent-g8-p098-n128-20261110.txt`,
+`results/e076-mtp-highconf-agent-g8-n128-fullgate-20261110.txt`, and
+`results/e076-hybrid-fast-agent-g16-n128-fullgate-20261110.txt`.
+
+## E077 — Single-user throughput and balanced residency
+
+The E076 confidence cutoff improved acceptance by withholding proposals. A fresh replay
+with that default measured 6.10 tok/s. The user clarified that throughput is the objective,
+with exact single-sequence output, and set a follow-up target of 40–60 tok/s.
+
+- Fixed MTP context rows overwriting one another and sized GPU matrix dispatch by active
+  positions. KV sync now computes only the projections it needs. The verifier commits an
+  accepted prefix by replaying saved recurrent inputs after rejection. Reprocessing the
+  prefix through the model would require another pass over cold weights.
+- Byte comparison at load verified that the 715,161,600-byte output tensor in both GGUFs
+  is identical. Target and draft share the GPU copy. The target still scores the entire
+  vocabulary. Only recursive draft steps use a shortlist of 32,768 IDs and seen tokens.
+- Batched KV writes, reused attention exponentials, and register-resident delta state
+  shortened the verifier and state repair. MTP can extend a draft with a matching
+  continuation from the actual request history when it agrees on the next token.
+- With the same resident bytes, spreading weights across layers reduced mean verification
+  time from 281.6 to 220.1 ms on the agent trace. Both variants ran 32 cycles with the same
+  proposed and emitted tokens. Generation increased from 13.380 to 16.862 tok/s.
+- The first spread-residency run hit the existing swap guard. A retry after host memory
+  stabilized passed with the same guard settings.
+
+| Normal launch, RTX 3060, one sequence | Generated tok/s | Including prefill | Exact match |
+|---|---:|---:|---:|
+| Agent trace | 16.438 | 11.537 | 128/128 |
+| Rust merge prompt | 13.700 | 11.215 | 128/128 |
+
+The timer starts after prefill for generation rate and includes all drafting, verification
+and state repair. The first token is counted in the prompt-inclusive rate. The gate now
+requires equal lengths as well as equal IDs. The binary installed at
+`benchmarks/real_decode` was built from this source.
+
+The alternate MTP branch was exact but improved the unbalanced-layout comparison only from
+11.527 to 11.628 tok/s and added complexity. Reusing predictions from rejected target rows
+reduced speed to 8.72–9.19 tok/s. Neither is in the launch. An exact packed INT8 Tensor
+Core probe improved FFN down projection at width 8 from 0.377 to 0.236 ms, with little
+change on the common K=5120 shapes. This is isolated kernel evidence.
+
+Raw logs: `results/e077-{agent,coding,coding-dense,balanced-residency,front-loaded-residency,e076-baseline,packed-mma-probe}-20261110.txt`.
+The Rust prompt and its dense IDs are in `results/e077-coding-{prompt,dense-ids}.txt`.
+
+## E078–E085 — Draft depth, verification cost, and GPU memory
+
+All generation runs here used one sequence and checked the full 128-token output
+against the same dense target. Rates are generation after the first token and include
+drafting, verification, and recurrent-state repair. Raw runs use E078–E085 prefixes.
+
+| Experiment | Agent tok/s | Rust tok/s | Agent / Rust tokens per pass |
+|---|---:|---:|---:|
+| E077 native MTP | 16.438 | 13.700 | 3.969 / 3.256 |
+| E078 DFlash 2 with native Q4_K, Q8-converted V/down, and host selectors | 12.782 | 15.639 | 3.629 / 4.233 |
+| E079 linear EAGLE4 | 19.065 | 15.078 | 4.885 / 3.969 |
+| E080 EAGLE4 with one alternate continuation | 20.366 | 17.119 | 5.080 / 4.379 |
+| E082 GPU top-128 candidate selection for E080 | 20.701 | 17.458 | 5.080 / 4.379 |
+| E083 Q8 draft weights and less resident target weight | 17.177 | 15.531 | 4.885 / 4.379 |
+| E084 deferred recurrent writes, reduced scratch | 19.437 | 16.929 | 5.080 / 4.379 |
+| E085 best-first EAGLE4, 16 positions | 20.531 | 18.764 | 5.080 / 4.704 |
+| E085 best-first EAGLE4, 32 positions | 12.908 | 12.210 | 5.292 / 5.080 |
+
+E080 is available via `--eagle4`. The draft has 308.6 MiB of device weights and keeps
+its 682 MiB full output head in a file-backed host mapping. It gathers 128 draft rows
+after scoring the low-rank head. The exact verifier still scores the target's full
+vocabulary. Draft branches have separate attention ancestry and recurrent inputs.
+Only the target-selected path becomes the next context.
+
+At 8064 MiB of resident target weights, E080 took about 229 ms per verifier pass.
+A 48-token, exact-gated Nsight Systems run measured 110.074 GB of streamed H2D
+traffic at 24.66 GB/s during copies. Per pass, 5.242 GB at that rate accounts for
+roughly 213 ms. CUDA kernels ran concurrently with the transfers. The summed
+time in the 16-position Q4 shared-matrix kernel was 2.942 s across the 21 prompt
+and generation passes. The profile is `results/e080-eagle4-timeline-20261111.nsys-rep`.
+
+E081 was a bounded feasibility probe of AVX-VNNI on part of the FFN gate projection.
+The smaller split took 1.061 GB out of the transfer stream. Agent generation reached
+20.524 tok/s with all 128 IDs matching. The larger split moved 2.147 GB and reached
+20.352 tok/s. The dependency waits absorbed most of the copy savings. Neither CPU
+path is installed. E084 reclaimed 180 MiB in matched desktop conditions. Its verifier
+time stayed within 1 ms of E080. E085's 32-position verifier took about 379 ms, making
+the extra candidates too expensive with the original wide kernel.
+
+## E086–E094 — Best-first drafting and prompt prefill
+
+The installed E089 path uses up to 16 target verification positions from a
+best-first EAGLE4 tree. It commits recurrent state after the verifier chooses
+the accepted path. This removes the 150 MiB snapshot and avoids allocating two
+full-vocabulary arrays as layer scratch. The CUDA 13 top-k path reduces draft
+work by transferring only candidate IDs. The output projection runs on the final
+prompt row. A wider, exact-order shared Q4 kernel lets prompt evaluation use
+32 positions per pass while generation keeps its 16-position budget.
+
+| E089, one sequence, 8064 MiB hot | Generated tok/s | Including prefill | Prefill s | Free VRAM MiB | Exact |
+|---|---:|---:|---:|---:|---:|
+| Agent trace | 20.340 | 14.615 | 2.514 | 1130 | 128/128 |
+| Rust merge | 18.784 | 14.826 | 1.872 | 1132 | 128/128 |
+| Science explanation | 15.467 | 12.285 | 2.208 | 1132 | 128/128 |
+
+The plain-language prompt and dense IDs are `results/e080-explanation-{prompt,dense-ids}.txt`.
+The native MTP path still matched the 128-token Rust reference and reached 13.983
+tok/s. Qwen3-0.6B passed its CPU-reference argmax checks (17 positions, zero
+mismatches). E086 compared each wide kernel output to the baseline float output
+exactly. At 32 positions, the selected shared tile took 1.050 vs 1.483 ms on the
+common K=5120, N=17408 shape. Packed INT8 MMA took 0.742 vs 1.013 ms on FFN down.
+
+E091 tested a 24-position exact kernel and wider tree. Mean verification was
+258–261 ms. End-to-end generation fell to 18.506 agent, 17.555 Rust, and 14.866
+explanation tok/s despite an increase in tokens per pass. E092 added the native
+MTP root candidate to EAGLE4 while reducing hot target residency by 256 MiB.
+Results were 20.248 / 17.700 / 14.648 tok/s. E094 used the original BF16 draft
+embeddings from a host mapping and recovered no verifier cycles on these prompts.
+E089 remains installed.
+
+E090 measured a 41.9 MB sample of the original Q4 weights. Planar ANS compressed
+it to 92.4% of its size and decompressed byte-for-byte at about 128 GB/s in
+isolation. The overlapped copy and decompression microbenchmark took 1.575 ms
+versus 1.693 ms for raw copy. E093 integrated compression and a matrix kernel
+that consumes the planar representation directly. It transferred 4.859 GB vs
+5.242 GB per pass, yet mean verification rose from 230 to 252 ms because
+decompression shared the verifier stream. It remained exact and slower
+(18.787 vs 20.478 generated tok/s on the agent trace). Cache preparation
+added 3.184 s before prompt evaluation.
+
+## E095–E102 — Fewer transfer buffers and exact GPU argmax
+
+E102 keeps the unchanged target and a 16-position draft tree. It computes
+the full target vocabulary on the GPU and reduces each verifier row to its
+greedy token before returning it to the CPU. Nonfinite and all-zero logits
+fail the verifier. The smaller 16 MiB transfer buffers save 128 MiB of device
+memory at the same 8064 MiB target residency. The normal launch was tested
+without CPU affinity.
+
+| E102, one sequence | Generated tok/s | Including prefill | Free VRAM MiB | Exact |
+|---|---:|---:|---:|---:|
+| Agent trace | 21.135 | 15.321 | 1280 | 128/128 |
+| Rust merge | 19.334 | 15.701 | 1281 | 128/128 |
+| Science explanation | 15.915 | 12.942 | 1281 | 128/128 |
+
+E095 DSpine ran 18.563 / 15.450 / 12.123 tok/s at 7424 MiB hot with exact output.
+E096 split planar ANS decompression into a separate stream. At 8064 MiB hot,
+it measured 19.699 / 18.828 / 15.563 tok/s and passed the exact gate. Compression
+still added startup preparation and consumed more VRAM. E098's separate copy
+scheduler tied its matched single-thread scheduling control at 20.86 tok/s.
+E099 measured about 24.9 GB/s with one, two, or four H2D streams. Write-combined
+memory gave no gain.
+
+E097 split exact INT8 Tensor Core work across groups of draft positions.
+On FFN down projection at 32 positions, it took 0.640 ms against 1.012 ms
+for the shared DP4A tile. E100 moved the 24-position verifier to about
+229 ms from E091's 260 ms. With the wider tree, it reached 20.796 / 19.620 /
+16.582 generated tok/s with exact output. Packing added startup work and
+prefill was slower. E102 remains the installed launch.
+
+## E103–E105 — Broader proposals on a separate 256-token prompt
+
+E103 tested 64-position prefill with packed INT8 MMA. It reduced that path's
+prefill time compared with its own 32-position packed run, but still had
+startup packing and wider draft costs. E104 broadened the proposal list
+from four to eight and calibrated proposal probabilities at temperature 1.2.
+The target still uses its original full-vocabulary greedy choice. A sharper
+proposal temperature and a separate history branch did not beat the broader
+proposal policy across the measured prompts.
+
+| Installed E105, one sequence | Generated tok/s | Including prefill | Free VRAM MiB | Exact |
+|---|---:|---:|---:|---:|
+| Agent, 128 tokens | 22.013 | 15.763 | 1250 | 128/128 |
+| Rust, 128 tokens | 19.408 | 15.724 | 1252 | 128/128 |
+| Explanation, 128 tokens | 16.929 | 13.634 | 1252 | 128/128 |
+| Held-out event-log design, 256 tokens | 16.619 | 14.581 | 1124 | 256/256 |
+| Same event-log design, 256 MiB less hot | 15.912 | 13.974 | 1383 | 256/256 |
+
+The held-out prompt used context capacity 1024. At the same 8064 MiB hot
+placement, E102 took 68 verifier passes and reached 15.427 tok/s. E105 took
+63 passes with the same 256 target tokens. E105 reduced target residency
+to 7808 MiB in the lower-VRAM run. This placement used `--cache-mib 6200`.
+
+The documented launch is unpinned. The `--prompt` path uses the decoder's
+existing approximate tokenizer. For a model-specific chat template or exact
+external tokenization, provide the rendered prompt IDs via `--prompt-ids`.
+The full token gates compare the speculative and dense paths on the same IDs.
+
+## E106–E119 — Draft quality and real chat input
+
+E106 trained a rank-16 draft-only residual on 15,859 verifier labels from
+24 synthetic prompts. Six separate prompts provided 4,011 validation labels.
+Root top-1 increased from 72.66% to 75.09%. In the runtime, E107 improved
+the Rust prompt from 19.408 to 20.115 tok/s, but fell from 16.619 to 16.140
+on the event-log design and from 16.929 to 16.409 on the explanation. All
+three runs matched the dense reference. The adapter was kept experimental.
+
+E108 ran a separately retrained Q4 native MTP head in linear mode. E109 added
+best-first MTP trees and compacted the accepted target hidden states and KV.
+It preserved exact output. The original MTP checkpoint is still available and
+also benefited from branching. E112's Q8 draft improved some passes but lost
+throughput on the explanation. See `results/e108-*`, `results/e109-*`, and
+`results/e112-*` for individual measurements.
+
+E110 and E119 use the target GGUF's actual chat template and llama.cpp token IDs.
+Both reference outputs come from the dense Q4 runtime. E110's async-queue design
+measured 14.716 generated tok/s on E105 at 8064 MiB hot and 15.047 at 8192 MiB.
+E119's water-tower explanation reached 17.622 on the same E105 launcher at
+8064 MiB hot. All 256 and 128 IDs, respectively, matched their references.
+
+E113–E115 reuse exact quantized activations and fuse RMS/SiLU with quantization.
+The component probe found no bit differences for the tested widths. On E110,
+mean cycle time and total throughput were within measurement noise of the
+control. E116 combined these kernels with packed integer matrix multiply and
+24 verification positions. It used 66 verifier passes on E110 against 72 on
+E105 and reached 15.366 tok/s with all 256 tokens matching.
+
+E117 trained a rank-32 draft correction with the exact fourth-layer feature.
+Validation root top-1 increased from 72.66% to 76.13%. E118 ran those four
+target layers before drafting while leaving the full verifier authoritative.
+The two independent chat runs took the same number of verifier passes as
+E105 and reached 13.942 and 16.948 tok/s. Both were exact. The extra computation
+and forced early-layer residency made it slower.
+
+## E120–E124 — Proposal combinations and native MTP integration
+
+E120 combined EAGLE4 and native MTP trees within the existing verification
+width. It reduced E110's pass count from 72 to 67 and E119's from 30 to 27.
+It reached 14.399 and 17.774 generated tok/s respectively. Extra drafting and
+the smaller target residency needed for both heads outweighed the first gain.
+E121 recycled exact verifier predictions from rejected sibling rows as draft
+proposals. It reached 14.666 and 17.056 with exact output. E122 transferred
+the first eight cold chunks during drafting using the existing GPU buffers.
+On the matched E119 run, about 126 MB moved earlier per cycle, while throughput
+was 17.495 against 17.611 in the control. The other pair ran under different
+desktop memory pressure. E123 fit a 45-coefficient proposal confidence model.
+Its held-out log loss improved from 1.00090 to 0.98732. The two chat runs took
+more full verifier passes and slowed to 14.421 and 16.508 tok/s.
+
+E124 shares the best-first tree builder between EAGLE4 and native MTP, including
+history continuation when the drafter agrees with the first token. Native MTP
+now defaults to this tree with the original checkpoint. `--mtp-tree 0` selects
+the legacy linear MTP path. The EAGLE4 launch remains the same. All values below
+are generated for one sequence. Request rates include prompt evaluation after
+weights load. `Free VRAM` is the minimum observed during each run and also
+reflects desktop allocations.
+
+| E124 native MTP | Generated tok/s | Including prefill | Free VRAM MiB | Exact |
+|---|---:|---:|---:|---:|
+| Agent | 22.235 | 14.913 | 1000 | 128/128 |
+| Rust | 17.497 | 14.090 | 1222 | 128/128 |
+| Explanation | 16.954 | 13.166 | 1222 | 128/128 |
+| Async-queue chat | 15.570 | 13.607 | 904 | 256/256 |
+| Water-tower chat | 17.082 | 13.481 | 906 | 128/128 |
+| Rust, linear MTP control | 14.229 | 11.895 | 1222 | 128/128 |
+
+The EAGLE4 regression run took 24 passes and reached 21.941 generated tok/s
+with all 128 agent IDs matching. The 40–60 generated tok/s target remains open.
+
+## E125–E127 — Wider prefill and the installed single-user launcher
+
+E125 moved native MTP candidate selection to the GPU. It saved 0.7 ms of
+drafting per verifier pass on the async-queue prompt. Measured generation
+stayed at 15.55 tok/s with or without GPU selection. The CPU selector stayed
+in production. Native MTP's 32-position prompt evaluation reduced prefill
+from 2.437 s to about 1.95–2.00 s on the same prompt. E127 installs the wider
+prompt path when the MTP and target output weights are verified identical.
+
+E126 generated EAGLE4 proposals at each position of an exact dense stream.
+The target first reproduced all reference IDs with the forced prefix. Each
+proposal was then scored against the dense continuation. This is a diagnostic
+of proposal coverage. Its pass counts are derived from the trees and exclude
+wall-time costs. On async-queue chat, widths 16, 24, 32 and 64 would need
+72, 66, 64 and 63 passes respectively. The target's next token was missing
+from the first level at 39 of 255 positions even with width 64. The wider
+runtime E116 lost throughput on the agent, Rust and event-log prompts.
+
+E127 sets the local launcher to the original native MTP checkpoint by default
+at 8064 MiB of resident target weights. It passed the full token check on six
+prompts at context capacity 1024. EAGLE4 is available with
+`GUM_DRAFTER=eagle4` and remains faster on the measured Rust and water-tower
+prompts. The native default has the higher minimum measured generation rate
+across this suite and requires the existing native checkpoint.
+
+| E127 native MTP at 8064 MiB hot | Generated tok/s | Including prefill | Free VRAM MiB | Exact |
+|---|---:|---:|---:|---:|
+| Agent | 21.367 | 15.331 | 1023 | 128/128 |
+| Rust | 17.122 | 14.277 | 1030 | 128/128 |
+| Explanation | 16.596 | 13.427 | 1031 | 128/128 |
+| Event-log design | 17.134 | 14.967 | 1034 | 256/256 |
+| Async-queue chat, installed launcher | 15.236 | 13.700 | 1023 | 256/256 |
+| Water-tower chat | 16.609 | 13.771 | 989 | 128/128 |
+
+The installed EAGLE4 option reached 17.591 tok/s and 128/128 on water-tower
+chat. Raising native target residency to 8192 MiB reached 15.492 tok/s on
+async-queue chat, with 902 MiB free in that run. The 0.6B CPU reference test
+checked 17 positions with zero argmax mismatches. All 202 resident chunks
+passed the upload check.
+
+## E128–E130 — Where the draft trees lose the target continuation
+
+E128 repeated the E126 coverage probe with the original MTP head. On async-queue
+chat, native MTP missed the next token at 26 of 255 prefixes, EAGLE4 at 39, and
+both missed at 17. Choosing the longer exact prefix of two independently built
+16-position trees would take 60 passes, compared with 68 for native MTP and 72
+for EAGLE4 individually. That calculation uses both full candidate budgets and
+the known reference. It measures complementary coverage. E120 measures the
+actual cost of combining the drafters within one budget.
+
+E129 rescored EAGLE4's shortlisted tokens using its original BF16 output
+weights while leaving the target and the rest of the draft unchanged. Both
+chat runs matched dense. They slowed to 13.862 and 16.153 generated tok/s, and
+each took more verifier passes than E105.
+
+E130 supplied the true target features at matching draft nodes in the forced
+prefix diagnostic. At width 16, native MTP's async-queue pass count changed
+from 68 to 61 and water-tower from 31 to 22. EAGLE4 changed from 72 to 60 and
+29 to 23. These are diagnostic pass counts with future features supplied by
+the verified reference. The feature capture in E132 is intended to test
+whether a learned correction can recover any of this gain in real decoding.
+
+## E131–E133 — Partial CPU verification and draft-state regression
+
+E131 moved one chunk of each target FFN gate projection to eight AVX-VNNI
+workers, with activation and result transfers on a separate CUDA stream.
+The CPU component matched all 9,288 test outputs bit-for-bit against the
+scalar reduction order. On async-queue chat, both placements removed about
+1.07 GB of streamed weights per verifier pass and matched all 256 dense IDs.
+They reached 14.895 and 14.849 generated tok/s versus 15.166 in the paired
+control. Prefill improved from 1.975 s to 1.713–1.733 s. Generation stayed
+slower, so the installed verifier remains on the GPU.
+
+E132 captured 9,480 native MTP feature forecasts on 30 synthetic prompts
+rendered with the actual chat template. The target reproduced all reference
+tokens during collection. Six prompts were held out. The rank-32 adapter
+raised held-out cosine similarity to the true target features from 0.655 to
+0.725 at the first draft step and from 0.487 to 0.632 at the fourth step.
+The diagonal adapter also improved feature similarity. Neither correction
+improved generation in E133. A 30% blend reached 14.773 and 15.745 on the two
+independent chat prompts, with all IDs matching. Full-strength and diagonal
+corrections were slower. E135 uses the next-token training loss through a
+frozen copy of the native draft block.
+
+## E135–E140 — Grouped native draft branches
+
+E135 trained the draft correction against next-token labels through a frozen
+MTP block. Its training implementation reproduced native CUDA root features
+at 0.999967 cosine similarity on 48 samples. On separate validation prompts,
+the best loss was 1.79335 versus 1.96388 without the correction. The real
+decoder slowed on both chat prompts and the event-log design, with exact
+outputs. E136 trained two recursive steps. It did not improve the validation
+loss over its warm start. E137's native probability cutoff sweep gave no broad
+gain over 0.06.
+
+E138 evaluates up to four ready native MTP branches together so they reuse
+draft weights. The target still verifies one sequence's tree. On async-queue
+chat, drafting fell from 21.1 ms to 9.7 ms per cycle. The 16-position tree
+used the same 68 verifier passes and reached 15.927 generated tok/s. Moving
+straight to a 32-position verifier cut the pass count to 58 but slowed to
+12.239 tok/s with the original verifier matrix kernels.
+
+E140 installs a shared tree builder and grouped native MTP with the same
+16-position target verifier. `--mtp-group 1` evaluates one draft branch at a
+time. All six prompt outputs matched the dense reference. The grouped path
+improved five of the six measured generation rates. The explanation used two
+more passes and went from 16.596 to 16.317 tok/s. The warm EAGLE4 regression
+pair matched at 21.951 and 21.910 tok/s. Linear native MTP also passed.
+
+The installed launcher measured 15.954 on async-queue chat and 23.382 on the
+agent trace. Reducing the hot target budget by 256 MiB gave 15.164 on the same
+chat with 1530 MiB of free GPU memory. The launch with 8064 MiB hot had 1274 MiB
+free in that pair.
+
+## E139–E143 — Wider integer verification and launch overhead
+
+E139 combines grouped native MTP with 24-position integer Tensor Core
+verification. It reached 16.630 tok/s on async-queue chat. A 32-position packed
+verifier still cost too much on that prompt. E141 moves the hot-weight layout
+conversion to the GPU using an existing transfer slot. Its paired hot load
+took 1.194 s instead of 1.731 s. All 535 resident chunks passed the byte check.
+
+E142 cleans up the packed path and exposes it as `--packed-verify 1`. The
+24-position option spends more work per pass and usually needs fewer passes.
+The table uses single-sequence generation and includes process wall time from
+the measured launch. Every emitted ID matched dense.
+
+| E142 packed native MTP | Generated tok/s | Including prefill | Process wall s | Free VRAM MiB | Exact |
+|---|---:|---:|---:|---:|---:|
+| Agent | 23.579 | 16.208 | 10.96 | 1228 | 128/128 |
+| Rust | 18.254 | 14.566 | 11.87 | 1226 | 128/128 |
+| Explanation | 17.189 | 13.485 | 12.56 | 1228 | 128/128 |
+| Event-log design | 18.240 | 15.655 | 19.42 | 1226 | 256/256 |
+| Async-queue chat | 16.611 | 14.659 | 20.56 | 1228 | 256/256 |
+| Water-tower chat | 17.397 | 13.804 | 12.34 | 1228 | 128/128 |
+| Async-queue chat, 256 MiB less hot | 16.084 | 14.227 | 21.15 | 1484 | 256/256 |
+
+On async-queue chat, the paired 16-position path reached 15.949 generated
+tok/s and took 20.96 s of process wall time. The packed mode ran slightly
+longer on some of the shorter prompts because of startup and prefill costs.
+E143 augmented the fixed native draft shortlist from the first proposal's
+full vocabulary. It reduced one pass on water-tower chat and made no material
+change on async-queue chat.
+
+## E144–E149 — Packed verification in the single-user launcher
+
+E144 replaced the native MTP cache of target hidden states with the last
+committed state. Each prompt chunk or accepted path updates the MTP KV cache
+before its target rows are reused. At context capacity 4096 this freed 80 MiB
+in a paired exact run (1018 to 1098 MiB free). Both runs used 62 verifier
+passes and matched all 256 tokens. E145 halved the transfer slot ring and
+lost throughput. The launcher retains eight slots.
+
+The E146 Nsight trace captured 20 generation passes. Verification averaged
+232.3 ms per pass. Weight transfers occupied 214.6 ms at 24.42 GB/s, and GPU
+kernels occupied 198.7 ms with overlap. The verifier transferred 5.242 GB
+per pass. About 10.1 ms elapsed after the final weight transfer on an average
+pass. Drafting occupied 10.8 ms in the corresponding CPU ranges.
+
+The first E147 run of the recovered candidate matched the six references.
+It measured 14.88 tok/s on async-queue chat, alongside 14.91 on the compact
+control. The packed agent result also varied substantially under desktop
+GPU load. E148 allowed 32 positions for a strong history match. One
+such match was used on each of the agent and async-queue runs, and neither
+run reduced verifier pass count. A separate CPU-only diagnostic indexed 4,800
+tokens from 30 independent E132 completions. It found no four-token exact
+retrieval at any prefix of the two chat references. That result applies to
+this small corpus.
+
+E149 distributes writes of partial sums across shared-memory banks in the
+packed integer verifier while keeping the floating-point reduction order.
+The paired kernel test compared 1,802,240 output values over the two FFN
+matrix shapes and widths 8, 16, 24 and 32. All values matched bit-for-bit.
+At width 24 the two shapes took 0.573 vs 0.782 ms and 0.458 vs 0.636 ms in
+that test. In a full 256-token async-queue run, the same 62 verifier passes
+averaged 226.7 vs 241.7 ms against E147. Generation was 16.994 vs 16.008 tok/s.
+The installed-at-start E140 compact control reached 15.669 on the same
+reference in that series.
+
+| Single-user workload | E127 generated tok/s | E149 generated tok/s | E149 including prefill | E149 process wall s | E149 exact |
+|---|---:|---:|---:|---:|---:|
+| Agent trace | 21.367 | 23.868 | 16.712 | 10.83 | 128/128 |
+| Rust merge | 17.122 | 18.578 | 14.821 | 11.79 | 128/128 |
+| Explanation | 16.596 | 17.446 | 13.775 | 12.47 | 128/128 |
+| Event-log design | 17.134 | 18.570 | 16.016 | 19.17 | 256/256 |
+| Async-queue chat | 15.201 | 16.994 | 15.022 | 20.32 | 256/256 |
+| Water-tower chat | 16.609 | 17.586 | 14.092 | 12.30 | 128/128 |
+
+The suite used the launcher at context capacity 1024 and 8064 MiB hot.
+Minimum free VRAM across the six runs was 1032 MiB. The low-hot async-queue
+run reached 16.207 tok/s with 1290 MiB free and 256/256 matching. The EAGLE4
+and linear MTP launcher checks matched all 128 tokens each. The 0.6B CPU
+reference check passed 19 positions with zero counted argmax mismatches
+and one near tie. All 202 hot weight chunks passed the upload check. The
+installed packed launcher also passed all 535 hot chunk checks and matched
+32/32 with a smaller RAM cache that streamed 0.20 GiB per pass from NVMe.
+
+The normal native MTP launcher enables the 24-position path when the GPU
+and compiled kernel support it. `--packed-verify 0` selects the 16-position
+path. The installed launcher repeated async-queue at 16.971 generated and
+15.005 including prefill, with 256/256 exact. The installed 16-position
+override ran at 15.926 generated and also matched all 256 tokens.
+The 40–60 tok/s target remains open. At the measured 242 ms per cycle
+on async-queue, 40 tok/s would require about 9.7 generated tokens per pass,
+versus 4.11 in E149. Raw evidence is in `results/e144-*` through
+`results/e149-*`, including the E146 trace and the E149 kernel parity log.
+
+## E150–E151 — Fixed and adaptive 32-position verification
+
+E150 dispatches the 32-position packed multiply in four groups of eight
+on both FFN shapes. At 32 positions, the async-queue verifier took 244.8
+vs 249.3 ms per pass against E149's original 32-position dispatch. Both
+needed 58 passes and matched all 256 IDs. E150 reached 16.712 tok/s versus
+16.427 for the 32-position control and 16.971 in the 24-position launcher.
+Water-tower chat reached 17.051 versus 17.586 at width 24, with exact IDs.
+
+E151 starts at 24 positions and widens when the best queued proposal
+score implies an upper bound on extra draft utility of at least 8.5%.
+It widened 8 of 61 passes on async-queue, 0 of 30 on water-tower, and
+4 of 22 on the agent trace. All outputs matched. Generation was
+16.898 / 17.437 / 23.343 tok/s, below the measured 24-position default
+on each prompt. The launcher stays at 24. See `results/e150-*` and
+`results/e151-*`.
+
+## E152 — Perfect drafts through the packed verifier
+
+The diagnostic substitutes the next dense-reference IDs for the proposals,
+while retaining the normal 24-position target verifier, full-vocabulary
+greedy comparison, KV writes and recurrent state commit. The native MTP
+allocation and shared output stay in place to preserve the production
+weight placement. MTP proposal and cache update work is excluded.
+
+The test used the async-queue and water-tower chat references at context
+1024 and 8064 MiB hot. The table pools complete, full-width passes with a
+state commit. The target emits one extra greedy token per successful
+pass. The final pass can use fewer rows and skips a state commit.
+
+| Draft tokens | Passes | Verify ms | Commit ms | Full cycle ms | Perfect-draft tok/s | Draft budget at 40 tok/s |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 54 | 220.46 | 2.65 | 223.21 | 31.36 | −48.21 ms |
+| 8 | 42 | 222.69 | 3.13 | 225.94 | 39.83 | −0.94 ms |
+| 10 | 34 | 222.02 | 3.24 | 225.37 | 48.81 | 49.63 ms |
+| 12 | 28 | 225.35 | 3.93 | 229.43 | 56.66 | 95.57 ms |
+| 15 | 22 | 224.98 | 4.33 | 229.46 | 69.73 | 170.54 ms |
+
+All ten runs matched the dense references (1,920 token comparisons).
+Every pass transferred 5,241,526,272 bytes. Full-cycle timing includes
+embeddings, target token selection and commit. Draft budget is
+`25 ms × (draft tokens + 1) − cycle time`, conditional on full acceptance.
+A negative control changed one proposal ID. The verifier rejected it at
+generated position 2 and exited 1. Raw measurements are in `results/e152-*`.
+
+```bash
+nvcc -O2 -std=c++17 -arch=sm_86 -lpthread benchmarks/real_decode.cu -o /tmp/vanta-decode
+target="$HOME/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"
+mtp="$HOME/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"
+fixture=e110-chat
+reference="results/$fixture-dense-ids.txt"
+/tmp/vanta-decode --model "$target" --mtp "$mtp" --packed-verify 1 --speculate 24 \
+  --ctx 1024 --hot-mib 8064 --cache-mib 5600 --pld 0 --show-text 0 \
+  --prompt-ids "$(cat "results/$fixture-prompt-ids.txt")" --gen-tokens "$(wc -l < "$reference")" \
+  --draft-max 10 --oracle-ids "$reference" --expect-ids "$reference"
+```
+
+## E153 — Lightweight parallel Q4 drafter
+
+Two compact learned heads propose ten tokens in one forward pass from the
+previous target hidden state and the current token's exact Q4 embedding.
+The independent variant predicts all positions in parallel. The adjacent
+variant also feeds each position's intermediate features to its successor
+in a residual layer. These are small prototypes inspired by
+[DFlash](https://arxiv.org/abs/2602.06036) and
+[DSpine](https://arxiv.org/abs/2609.36173).
+
+The training labels and hidden states come from the Q4-verified E132
+captures. Training used 3,600 anchors from 24 prompts. Model selection
+used 900 anchors from six other prompts, maximizing the exact prefix
+before the first wrong token. The 1,237-ID training vocabulary covered
+58.39% of validation labels. The independent head averaged 0.448
+matching tokens before its first error, with 21.67% correct at position
+one. The adjacent head averaged 0.463 with 22.89% at position one.
+Neither head matched all ten positions at any validation anchor.
+
+Train or replay the experimental heads with the same target:
+
+```bash
+PYTHONPATH="$HOME/llama.cpp/gguf-py" python3 scripts/train_parallel_draft.py \
+  --captures /tmp/vanta-e132 --model "$target" --output /tmp/e153-models
+fixture=e153-altitude
+/tmp/vanta-decode --model "$target" --parallel-draft models/e153-parallel-adjacent.vpd \
+  --packed-verify 1 --speculate 24 --draft-max 10 --ctx 1024 --hot-mib 8272 --cache-mib 5600 \
+  --prompt-ids "$(cat "results/$fixture-prompt-ids.txt")" --gen-tokens 64 --show-text 0 \
+  --expect-ids "results/$fixture-dense-ids.txt"
+```
+
+The live controls use the installed native MTP policy with 8064 MiB hot.
+The parallel heads use 8272 MiB hot to put the draft-memory savings into
+exact target residency, keeping GPU headroom close to native MTP.
+
+| Fresh prompt | Drafter | Mean accepted prefix | Draft + draft state ms | Generated tok/s | Free VRAM MiB |
+|---|---|---:|---:|---:|---:|
+| Altitude explanation | Native MTP | 3.200 | 10.6 | 17.728 | 996 |
+| Altitude explanation | Independent | 0.086 | 0.3 | 5.060 | 956 |
+| Altitude explanation | Adjacent | 0.068 | 0.4 | 4.967 | 966 |
+| Go stream merge | Native MTP | 2.938 | 10.7 | 16.621 | 997 |
+| Go stream merge | Independent | 0.086 | 0.2 | 5.086 | 1009 |
+| Go stream merge | Adjacent | 0.068 | 0.2 | 4.999 | 976 |
+
+All six live runs matched 64/64 dense IDs. The native control includes its
+history proposals. Prefix means use each decoder's real cycle boundaries.
+The CUDA heads also reproduced 120/120 PyTorch proposal IDs per variant on
+12 saved Q4-state anchors. Both heads miss the acceptance and speed gate.
+The two `.vpd` checkpoints are about 17 MiB each. Training, live measurements
+and dense references are in `results/e153-*`.
+
+## E154 — Extra exact residency and fused scale decoding
+
+The target output matrix was resident directly, using its original Q4_0
+bytes. MTP was absent and the context capacity was 384. This freed enough
+space to place 8824 MiB of the target on the GPU under the existing
+allocation guard. The 8872 MiB request at context 1024 and the 8832 MiB
+request at context 384 were rejected by that guard.
+
+`--compress-packed 1` keeps the four-bit weight payloads unchanged and
+encodes each group of 32 packed tiles' FP16 scales with low bytes, sign
+bits and four-bit deltas from a common high byte. Groups with a wider
+range keep their raw representation. The MMA kernel reconstructs each
+scale in registers as it uses the tile. The CPU checked every encoded
+group against the original packed bytes before using it. The CUDA parity
+test matched all 12,288 float outputs bit-for-bit at widths 8, 12, 16, 24
+and 32 on both common FFN shapes, including mixed raw and encoded groups.
+
+| Prompt | Hot MiB | Codec | H2D GB/pass | Verify ms | Commit ms | Cycle ms | Prefill s | Free VRAM MiB |
+|---|---:|:---:|---:|---:|---:|---:|---:|---:|
+| Async queue | 8064 | Off | 5.242 | 223.55 | 3.92 | 227.61 | 2.139 | 1272 |
+| Async queue | 8064 | On | 5.154 | 217.78 | 3.27 | 221.17 | 2.681 | 1313 |
+| Async queue | 8824 | Off | 4.445 | 187.10 | 3.13 | 190.62 | 1.832 | 556 |
+| Async queue | 8824 | On | 4.370 | 184.22 | 3.07 | 187.40 | 2.489 | 556 |
+| Water tower | 8824 | Off | 4.445 | 188.65 | 3.74 | 192.52 | 1.511 | 443 |
+| Water tower | 8824 | On | 4.370 | 185.23 | 3.42 | 189.11 | 2.175 | 552 |
+
+This table uses complete ten-proposal passes with a state commit. Async
+queue has 23 timed passes per arm and water tower has 11. Every run
+matched its full dense reference. On async queue, a separate seven-proposal
+run at 4.370 GB averaged 187.83 ms over 31 complete passes, leaving
+12.17 ms per pass for a drafter if it can consistently supply seven
+exact proposals and the verifier supplies the eighth token. This is a
+perfect-draft measurement with reduced context capacity.
+
+Reproduce the high-residency configuration from E152 by removing
+`--mtp "$mtp"` and using `--resident-output 1 --ctx 384 --hot-mib 8824
+--compress-packed 1`. Use `--compress-packed 0` for the matched raw
+control. To rerun matrix parity, build `tests/packed_scale_codec.cu` with
+the same NVCC flags used for the decoder. Raw results are in `results/e154-*`.
+
+## E155 — Native MTP with higher residency and the fused codec
+
+The three async-queue runs used the normal grouped native MTP policy,
+packed 24-position verification, context capacity 384 and the same 256-token
+dense reference. Each used 62 verifier passes, emitted 4.113 tokens per
+decode cycle and matched every dense ID.
+
+| Hot MiB | Codec | H2D GB/pass | Verify ms | Cycle ms | Generated tok/s | Including prefill | Prefill s | Free VRAM MiB |
+|---:|:---:|---:|---:|---:|---:|---:|---:|---:|
+| 8064 | Off | 5.242 | 227.8 | 243.7 | 16.874 | 14.891 | 2.079 | 1044 |
+| 8448 | Off | 4.839 | 213.7 | 229.6 | 17.915 | 15.818 | 1.950 | 671 |
+| 8448 | On | 4.758 | 212.8 | 228.9 | 17.968 | 15.175 | 2.678 | 671 |
+
+Extra exact residency improved both generation and request time on this
+prompt and used 373 MiB more measured VRAM. At 8448 MiB the codec saved
+81 MB per pass. Its 0.9 ms verifier gain was small relative to the 0.728 s
+prefill increase on this 256-token workload. Keep it opt-in pending a
+faster cache-preparation path and a larger matched workload suite.
+See `results/e155-*`.
+
+## E156 — Weight traffic audit and the bytes-per-token ledger
+
+The E146 Nsight trace (`results/e146-packed-native-20261111.nsys-rep`) was
+re-audited by reconstructing the Q4_0 chunk layout from the target GGUF and
+matching every H2D weight-copy size, in schedule order, to the
+target-verification NVTX ranges. Every copy size matched exactly, so the
+per-tensor split below is measured, not estimated. Raw evidence:
+`results/weight-traffic-audit-20261111.txt`.
+
+Traffic composition per verifier pass (5.242 GB H2D): 99.98% is Q4 model
+weights. The feed-forward layers alone carry 3.33 GB (ffn_up 22.7%,
+ffn_gate 20.5%, ffn_down 20.4%), ssm_out 14.2%, attn_qkv 14.0%, attn_q 5.7%.
+Each Q4 block is 32 four-bit weights plus a two-byte scale; payload is
+4.66 GB nibbles + 0.58 GB scales per pass.
+
+**Bytes per exact output token ledger** (the metric to track alongside
+tok/s; H2D weight bytes ÷ new tokens):
+
+| Run | Cycles | New tokens | Cold GB | GB/token |
+|---|---:|---:|---:|---:|
+| E149 installed chat | 62 | 255 | 325.0 | 1.274 |
+| E149 agent trace | 22 | 127 | 115.3 | 0.908 |
+| E150 32-position chat | 58 | 255 | 304.0 | 1.192 |
+| E152 oracle d10 chat | 24 | 255 | 125.8 | 0.493 |
+| E152 oracle d15 chat | 16 | 255 | 83.9 | 0.329 |
+
+The E152 oracle rows substitute the known dense continuation, so they isolate
+what a drafter that reliably supplied 10 (or 15) exact proposals would save:
+61% (or 74%) of traffic, and measured 47.4 tok/s (or the d15 equivalent) with
+all 256 IDs exact. They demonstrate headroom; they do not predict a live
+drafter.
+
+**Compression sample:** separating Q4 nibbles from scales and compressing
+with zstd-3 recovered 9.0–9.8% planar / 5.4–5.7% wire on whole chunks from
+both tiers (9.8% separate-planes on the slice sample), byte-exact on every
+zstd round trip. Nibble entropy is 3.747 bits — little headroom beyond
+planar reordering. No GPU decompression timing exists; the forecast of
+roughly 17–19 tok/s from bytes alone is an upper bound until an integrated
+unpack cost is measured.
+
+**Sparsity probe (negative result):** an instrumented temporary E149 build
+checked every 32-value Q4 activation group during generation for a zero
+scale across all live verifier rows: 2.16M ffn_down, 1.27M ffn_up_gate and
+2.93M attention/recurrent groups on chat (0.77M/0.45M/1.04M on agent) —
+zero eligible payload bytes in both runs. Skipping zero blocks recovers
+nothing on this workload. Both probe runs still matched dense exactly
+(256/256, 128/128).
+
+Decision: longer correct drafts are the first lever (the ledger makes the
+drafter's value concrete: every extra exact proposal is worth ~19 ms of
+PCIe at the current cycle); lossless compression of the FFN tensors is the
+second. Track GB/token alongside tok/s from now on.
+
+> **CORRECTED in E161 (2026-11-11):** the compression sample above is an
+> artifact. Re-measured on real tensor boundaries (the GGUF reader's
+> actual `blk.*` tensors, 2 MiB planes): zstd-3 ≈ zstd-19 ≈ xz ≈ **0.943–
+> 0.952 on both scale and nibble planes**; scale-plane order-0 entropy is
+> 7.53 bits/byte and the nibble plane sits at its 3.747-bit/nibble bound.
+> The 0.902 planar / 0.56 scale ratios and the "16% ceiling" quoted below
+> were wrong; the measured whole-model lossless ceiling is **~5.5%**, and
+> the payload is incompressible beyond it. See E161.
+
+### E156a — 8448 MiB residency promotion gate on the second chat
+
+E155's 8448 MiB raw configuration was evaluated on the water-tower chat
+(`e119-chat`, context capacity 384, packed 24-position verifier, native MTP)
+against a matched 8064 MiB control. The desktop shares the GPU, so each arm
+ran twice; single runs on this prompt differ by up to 1.7 tok/s.
+
+| Hot MiB | Generated tok/s (two runs) | Verify ms | GB/pass | Exact IDs |
+|---:|:---:|---:|---:|:---:|
+| 8064 | 17.125, 16.625 | 231.7 / 237.1 | 5.242 | 128/128 both |
+| 8448 | 16.519 (noise-depressed), 18.362 | 237.9 / 214.7 | 4.839 | 128/128 both |
+
+The mean favors 8448 by ~0.5 tok/s and the cleanest run of each arm favors
+it by +1.2, consistent in direction with E155's +1.04 on async-queue. The
+same tree decisions were made in every run (mean 4.233 emitted/cycle, PLD
+25/27 accepted), so the difference is pure transfer time. Promotion is
+limited by allocation: 8448 MiB only fits at context capacity 384
+(prompt + generation ≤ 384), while the launcher default keeps context 1024.
+Keep `--hot-mib 8448 --ctx 384` as a measured short-sequence option; do not
+replace the launcher default until the context trade-off is decided with the
+owner. Raw: `results/e156-e119-chat-hot{8064,8448}-*`.
+
+## E157 — Full-vocabulary tied-head parallel drafter (negative result)
+
+E153's heads could only emit the 1,237 IDs seen in training labels, which
+covered 58.39% of validation labels — a candidate hard cap on position-one
+accuracy. E157 replaced the free head with `logit_t = ℓ·(E_t·P)`: the head
+weights are derived from the target's exact dequantized Q4 embedding matrix
+(248,320 × 5120, frozen) times a trainable 5120×96 projection P, so every
+token in the vocabulary receives a structured logit even when absent from
+training. Stem, forecast and adjacent layers are unchanged from E153; the
+same 30 E132 captures and 24/6 split were used. The CUDA parallel-draft
+loader now accepts vocabulary counts up to the target vocabulary
+(`benchmarks/parallel_draft.cuh`), and the 95 MiB `.vpd` files carry the
+full tied head plus zero biases.
+
+Offline held-out exact-prefix (higher is better; native MTP live prefix is
+about 3.1–3.2 on these prompts):
+
+| Variant | Best prefix | Position-1 accuracy | E153 restricted-vocab |
+|---|---:|---:|---:|
+| Independent | 0.424 (epoch 8) | 21.4% | 0.448 / 21.67% |
+| Adjacent | 0.426 (epoch 13) | 21.7% | 0.463 / 22.89% |
+
+Both variants match E153's accuracy almost exactly — slightly worse, within
+noise. The 58.39% vocabulary coverage was **not** the binding constraint;
+the 384→96 MLP bottleneck is. A one-pass drafter of this family cannot
+outperform its own function class, and more training data or a larger
+vocabulary will not change that.
+
+A live smoke run with the adjacent head (altitude prompt, 64 tokens,
+`--parallel-draft /tmp/e157-models/adjacent.vpd`) loaded the full-vocabulary
+head correctly (`parallel_draft_plan,vocab=248320`), matched all 64 dense
+IDs, and confirmed the offline verdict live: mean 1.068 emitted tokens per
+cycle, draft acceptance 0.007. Live integration was therefore not pursued;
+native MTP remains the installed drafter.
+
+Decision: the parallel one-pass MLP drafter family is exhausted as a path to
+longer drafts. Reaching the 40 tok/s bar at 8448 MiB (≈ 6.5–7.5 exact
+proposals per cycle at the measured 187–229 ms cycles) requires a
+drafter with target-like per-step accuracy — a trained sequential draft
+model (DFlash/EAGLE-class), which is a data- and training-infrastructure
+investment — or the cycle-time levers (residency, compression). The two
+E157 checkpoints remain in `/tmp/e157-models`; the loader change is
+retained as it is backward-compatible. Raw: `results/e157-train-20261111.txt`,
+`results/e157-smoke-altitude-20261111.txt`.
+
+## E158 — Trained sequential drafter and the transition-structure probes (negative)
+
+The owner directive was to pursue 40 tok/s by any means. Three independent
+probes now bound what a drafter can do on novel chat with the data we can
+produce:
+
+1. **Sequential self-conditional transformer** (`scripts/train_sequential_draft.py`):
+   d=2048, 3 blocks (~150M params), rollout attention over its own prefix,
+   residual hidden-state transition, and — the key correction versus E157 —
+   the head is the **target's exact `output.weight` + `output_norm`** (fp16,
+   frozen; the GGUF confirms the output head is separate from the embedding,
+   which retroactively explains E157's flatline). Teacher chains from the
+   E132 captures cover *every* generated position (H[p-1], emb(ref[p])) → H[p]
+   — 3,456 train chains × 16 depths = 55k supervised transitions. An
+   untrained model with the exact head echoes its input with 100% accuracy
+   (head decode validated). After 4 teacher epochs: train loss 0.10
+   (memorized), **held-out depth-1 survival 5.9–8.9%**. The rollout/scheduled-
+   sampling phase OOM'd at batch 32 and was not reached — the generalization
+   failure at depth 1 is already decisive: 55k transitions cannot teach the
+   64-layer hybrid's dynamics to a from-scratch drafter. The published
+   drafters that reach ~4–6 accepted tokens (EAGLE-class) trained on ~10⁶×
+   more target-distribution tokens.
+
+2. **Native MTP chained survival, measured from captures** (val prompts):
+   marginal per depth 0.725 / 0.629 / 0.540 / 0.519 — the head does not
+   collapse; it decays slowly. The live tree converts this to 4.2 emitted
+   via best-first fanout. A drafter that beats the tree needs per-depth
+   marginals ≈ 0.85+ sustained to depth 8 (product ≈ 0.35 at depth 8,
+   mean ≈ 6–7 exact).
+
+3. **Linear transition probe**: ridge (8k samples) predicting
+   H[p]−H[p−1] from [emb, H] and rolling out recursively on val: survival
+   ≈ 1%. The delta is high-rank (rank-256 energy 0.68) with ‖Δ‖ ≈ 0.93·‖H‖ —
+   the hidden state rotates almost fully every token. No shortcut basis.
+
+Consequence: on novel chat, **the native MTP head is the best drafter
+available at our data scale**, and the emitted wall (~4.2/cycle) is not a
+tuning artifact. The 40 tok/s chat target requires either (a) target-scale
+drafter training data — capture throughput is the binding constraint (dense
+capture ≈ 2.5 transitions/s; batched-capture via the multi-sequence decode
+path would be ~12–30× and is the prerequisite infrastructure for any
+further drafter attempt), or (b) accepting that 40 tok/s arrives on
+agent-shaped workloads (PLD-exploitable spans), where E149 already measures
+23.9 tok/s and the ceiling with today's drafter is ~27. Raw:
+`results/e158-train-20261111.txt`, `/tmp/e158-models/seq_draft.pt`.
+
+## E159 — Batched capture infrastructure and the HalfDraft exit-head probe (negative)
+
+The owner reframed the data wall ("data isn't really an issue — walk around
+it, and if we use our own model that isn't an issue"). Two responses were
+built and measured in one session.
+
+**Batched capture (positive, durable infrastructure).** The E132-era capture
+source was instrumented (`/tmp/vanta-e158/real_decode.cu`,
+`VANTA_MID_CAPTURE`/`VANTA_MID_CAPTURE_FILE`) to dump per-position raw
+residuals at layers 8/16/24/32/40/48/56 plus the final pre-norm residual,
+for every lockstep sequence of the `--batch 8` dense path. 30 prompts × 160
+positions × 8 hidden states now capture in **four ~100 s runs (≈ 12.8
+positions/s aggregate, 5× the dense single-stream rate and 6× faster
+wall-clock than sequential runs)**. Validation: decoding each captured final
+residual through the target's exact `output.weight` reproduces the run's own
+next token with 99.4–100% agreement on all 30 prompts, so the capture is
+self-consistent and correctly aligned. (Side note: the E132-era *speculative*
+reference for sample-00 diverges from dense at generated position 74 — the
+current E149-era packed verifier remains exact-gated against dense, but the
+old reference files were evidently produced by the spec path.)
+
+**HalfDraft feasibility (negative).** The proposal: restructure residency so
+the first K layers are fully resident and exact, draft with the target's own
+early layers (compute hidden under the transfer window), and decode through
+a small trained exit head + the shared exact output head. Cold bytes per
+pass are unchanged by composition (cold = model − hot), so the only new cost
+is exit-head quality. Feasible residency (hot 8448 MiB minus output head,
+states, draft KV) reaches approximately layer 35. Measured val argmax
+agreement through the exact head (954 held-out positions):
+
+| Exit depth | Zero-shot | Ridge map | Trained MLP |
+|---:|---:|---:|---:|
+| 32 | 6.2% | 15.5% | 24.6% (33.2% with token embedding) |
+| 40 | 10.1% | 17.7% | 30.9% (35.3% with embedding) |
+| 48 | 12.4% | 18.6% | 37.2% (40.4%) |
+| 56 (not resident-feasible) | 31.4% | — | 59.4–59.9% |
+
+Gate was ≥ 0.8 at a feasible depth. Best feasible is 35.3% — far below the
+native MTP head's 73% step-1 from the true final hidden. The mapping from a
+mid-depth residual to the target's argmax *is* the remaining layers'
+nonlinear compute (dominated by delta-net blocks with SSM state); no small
+head learns it from ~4k curated positions. This is the same wall as E158,
+now measured from the other side.
+
+**Combined conclusion after E153–E159 (five independent probes):** a drafter
+that beats the authored MTP head must contain a capacity-comparable model of
+the target's late layers — distilling that into small heads from
+small curated data fails repeatedly and predictably. The realistic 40 tok/s
+routes are: agent/PLD workloads (23.9 measured, ~27 ceiling), transfer-side
+gains to ~20–22 on chat, a change of hardware (owner's 22 GB card — out of
+scope by directive), or drafter training at EAGLE-scale data volume (the
+batched capture makes that 5× cheaper but ~100× more volume is still
+required). Raw: `results/e159-exit-probe-20261111.txt`,
+`/tmp/vanta-e158/`.
+
+## E160 — Exposed-vs-hidden transfer analysis (owner-directed, from the E146 trace)
+
+The owner proposed prioritizing the memory engine (branching speculation,
+fewer transferred bytes, exposed-latency removal) over further drafter
+training, and asked the diagnostic question: of the ~200 ms verify pass,
+how much is hidden behind compute? Answer, from the existing E146 Nsight
+trace (`results/e146-packed-native-20261111.nsys-rep`, 21.9 verify passes
+captured) and E149 cycle measurements:
+
+| Quantity | Value |
+|---|---:|
+| Transfer per pass (5.24 GB @ 24.6 GB/s) | 213.1 ms |
+| GEMV compute per pass (537 chunks × ~200 µs `q4_mma`) | 107.2 ms |
+| Per-chunk copy vs per-chunk GEMV | 397 µs vs 200 µs |
+| Measured verify (E149) | 226.7 ms |
+| **Exposed non-transfer stall** | **13.6 ms** |
+| GPU idle inside the streaming pipeline | ~50% |
+
+The chunk pipeline overlaps GEMV for chunk L with the copy of chunk L+1;
+since per-chunk compute (200 µs) is roughly half per-chunk copy (397 µs),
+compute hides almost fully and **~94% of the verify pass is exposed PCIe
+time**. Synchronization stalls are ~13.6 ms/cycle — small.
+
+Two consequences the owner's framing makes precise:
+
+1. **Byte cuts pay until 50% reduction**, after which GEMV compute (107
+   ms/pass) becomes the bound. The lossless ceiling measured in E156 is
+   ~9–10% (zstd-3 planar) with an entropy bound of ~15–16% — so lossless
+   compression alone lands at ~179–185 ms cycles ≈ 22–24 tok/s with the
+   current drafter. Non-lossy 3-bit cold weights alter logits and remain
+   rejected by the no-quality-loss directive.
+2. **Tree speculation with branch-local GDN state is already installed** —
+   the packed 24-position verifier verifies a best-first tree (~10–14
+   leaves) with per-node parent-derived recurrent state (`tree_path`/
+   `tree_depth` kernel arguments, E124/E140/E142/E149). Its measured yield
+   is 4.2 emitted/cycle, with E126 bounding the remaining width headroom at
+   ~13% (nine passes of 62 on chat). The GDN Tree-Scan mechanism the owner
+   cites (arXiv 2609.23900) is therefore largely implemented here; the
+   marginal idea it adds is commit-time state selection, which our
+   snapshot/rollback machinery already covers.
+
+Revised lever stack toward 40 with the current drafter: 16% lossless byte
+cut (→ ~185 ms cycles) × tree headroom (+13%) ≈ 24–27 tok/s chat, ~30+ on
+agent traces. Exceeding that requires either a >50% byte cut (losslessly
+impossible on a fixed Q4 model), a faster GEMV (the E051–E075 microbench
+hill, all failed so far), more emitted tokens (EAGLE-scale drafter training,
+data now 5× cheaper via E159's batched capture), or hardware. Raw:
+`results/e160-` analysis inline above; trace:
+`results/e146-packed-native-20261111.nsys-rep`.
+
+> **CORRECTED in E161:** the "~16% lossless ceiling" and the byte-cut
+> arithmetic built on it do not survive — the measured ceiling is ~5.5%.
+> The per-chunk compute/transfer crossover (50%) and the 94%-exposed
+> finding are unaffected.
+
+## E161 — Codec feasibility: the planar-compression lever is void (negative)
+
+The owner approved a planar-codec GPU-unpack benchmark (five metrics:
+compression ratio, decompression time, H2D transfer time, verification-cycle
+time, sustained tok/s; acceptance = reproducible end-to-end speedup with
+exact reconstruction and no significant VRAM growth). The experiment stops
+at its first gate: **the codec does not exist.**
+
+Measurements, all on real tensor boundaries from the GGUF reader (not file
+offsets), 2 MiB samples per plane:
+
+| Sample | zstd-3 | zstd-19 | xz -6 | order-0 entropy |
+|---|---:|---:|---:|---:|
+| blk.0 ffn_up/gate/down scales (2 MiB) | 0.947 | — | — | 7.54 bits/byte |
+| blk.24.ffn_up scales | 0.9435 | 0.9433 | 0.9525 | 7.53 |
+| blk.24.ffn_up nibbles | 0.9435 | 0.9434 | 0.9506 | 7.50 (≈ 3.75 bits/nibble, the audit's own bound) |
+| blk.0 attn_qkv / ssm_out / attn_q scales | 0.942–0.947 | — | — | 7.49–7.53 |
+| LZ4 (wire and both planes, 16 MiB chunks) | 1.000 | — | — | no matches at all |
+| FP16 scale fields (5-bit exponent, 2-bit mantissa-top, 8-bit mantissa-low) | — | — | — | 4.80/5, 2.00/2, 7.49/8 |
+
+Findings:
+
+1. **Both planes sit at their order-0 entropy limits.** The nibble plane's
+   3.747-bit/nibble bound (from the E156 audit, which was correct on this
+   point) leaves at most ~6.2%; zstd-19 already achieves 0.9434 against a
+   0.937 ideal. The scale plane carries ~7.53 bits/byte with no field-level
+   slack (exponent 4.8/5, mantissa 7.5/8) and no LZ structure (LZ4 = 1.000).
+2. **The E156 planar/scale results were a sampling artifact** (file-offset
+   windows rather than tensor boundaries). The whole-model lossless ceiling
+   is **~5.5%**, not 9–16%. Cross-tensor redundancy, repeated structures and
+   cross-layer correlation are all ruled out by the same evidence: any such
+   redundancy would appear in zstd-19/xz, and it does not.
+3. A GPU-decodable codec would recover at most ~4–5.5% (≈ 250 MB of 5.24 GB
+   ≈ 10 ms of the 213 ms pass) while adding per-chunk decode work to a kernel
+   path that currently has ~200 µs of headroom per 397 µs chunk copy. The
+   end-to-end gain after decode overhead is realistically under 1 tok/s —
+   the benchmark's acceptance criterion cannot be met.
+
+Consequences: (a) the compression lever is void for throughput on the fixed
+Q4 model — cold bytes per pass are irreducible in practice; (b) the owner's
+residency-reduction goal on this hardware therefore maps ~1:1 to throughput
+loss, making the 22 GB card the genuine residency answer; (c) E160's
+findings (94% exposed transfer, 107 ms hidden compute, 50% crossover) are
+unaffected and remain the true map of where time goes; (d) the remaining
+measured levers are the agent/PLD path (23.9 → ~27), tree-width headroom
+(~13%), sync-stall removal (~13.6 ms/cycle), and EAGLE-scale drafter
+training (capture now 5× cheaper via E159). Raw:
+`results/e161-codec-feasibility-20261111.txt` (inline measurements above).
+
+## E162 — Zero-copy mapped memory vs explicit staging (owner-directed, negative)
+
+The owner proposed benchmarking a zero-copy GEMV path (GPU kernels reading
+mapped pinned host memory directly, no staging buffers) against the staged
+engine, targeting the memory-capacity objective rather than throughput.
+`benchmarks/microbench/e162-zero-copy-q4.cu` measures the memory-path
+question on real Q4_0 payload (512 MiB slice of a mid-file FFN tensor),
+with the packed-verifier access pattern (each weight byte read once, shared
+by 24 rows) and a pinned-DMA control (24.83 GB/s, matching E099):
+
+| Path | Rate | Pass-equivalent (5.24 GB) |
+|---|---:|---:|
+| Staged DMA (pinned → VRAM) | 24.83 GB/s | 0.211 s |
+| SM-issued mapped reads (read-sum kernel) | 18.18 GB/s | 0.288 s |
+| Mapped reads, first run (same kernel) | 21.76 GB/s | 0.241 s |
+
+Findings:
+
+1. **SM-issued mapped reads sustain only ~73–87% of the DMA rate** (18.2–
+   21.8 vs 24.8 GB/s; run-to-run desktop variance). Post-iommu mapping is
+   far better than the E031-era 14.7 GB/s, but still loses to explicit DMA
+   on this machine's sequential-stream workload.
+2. Substituting mapped reads for staging would lengthen verify cycles from
+   ~213–227 ms to ~244–275 ms — **~10–14% slower**, failing the owner's
+   "comparable speed" acceptance bar. Zero-copy also saves only the staging
+   slots (~8 × 16 MiB ≈ 128 MiB of VRAM), not the hot arena.
+3. **The hot arena cannot move to mapped RAM**: hot weights are re-read by
+   compute every pass; at ~18–22 GB/s instead of ~360 GB/s VRAM bandwidth,
+   the 8.4 GiB hot residency would add roughly +390 ms per pass. Staging
+   buffers are the only VRAM zero-copy could free, and they are the small
+   part of the budget.
+4. Instrument note: the GEMV-shaped kernel variant was instruction-bound
+   (~1.2 s for 512 MiB in both paths — path-independent), so the read-sum
+   kernel is the valid instrument for the memory-path question. The 1/24
+   output mismatch between paths is atomicAdd ordering nondeterminism, not
+   a memory-path defect.
+
+Verdict: **zero-copy does not clear the owner's bar** — slower cycles for a
+~128 MiB VRAM saving. The two-level design (DMA staging for cold weights,
+VRAM residency for hot weights) is confirmed as the right architecture on
+this hardware. The owner's framing stands: RAM is now *usable* as a large
+GPU-accessible pool (18–22 GB/s via mapping, 24.8 via DMA), but making that
+pool *fast* still requires the staging pipeline. Raw:
+`results/e162-zero-copy-q4-20261111.txt`.
+
+## E163 — Funnel session: A1 promotion, A2 trace correction, B1 closure
+
+Executed per RESEARCH_FUNNEL.md (owner-approved next-session structure).
+
+### A1 — 8448/ctx-384 promoted (SUPPORTED)
+
+`scripts/run_single_user.sh` gains `GUM_RESIDENT=1` (8448 MiB hot,
+context capacity 384). Revalidation on identical workloads, all
+`--expect-ids` exact: e110-chat 256/256 (16.01 tok/s), e119-chat 128/128
+(17.02), e153-altitude 64/64 (17.45), e153-go 64/64 (16.17); absolute rates
+ran ~1 tok/s low under desktop load, so a same-session paired control was
+run: e119 8448 = 16.974 vs 8064 = 15.980 — **the +1.0 tok/s paired delta
+reproduces** (E156a: +0.5–1.2). The launcher default remains 8064/1024 for
+long sequences; flipping the default is a one-line owner decision.
+
+### A2 — synchronization trace analysis (ELIMINATED UNCERTAINTY + PLAN CHANGE)
+
+The E146 sqlite was re-attributed per NVTX range ("Target verification",
+20 ranges, 537 copies and 1,893 kernels each):
+
+| Quantity | Per pass |
+|---|---:|
+| Range span | 227.2 ms (median) |
+| **Kernel time** | **214.3 ms** |
+| Copy time (97.63 GiB @ 24.7 GB/s) | 214.5 ms |
+| GPU-timeline idle inside range | 2.4 ms (largest gap 0.65 ms) |
+
+**E160 correction:** kernel compute per verify pass is ~214 ms, not ~107 ms
+— E160 counted only the dominant `q4_mma<8,16,3>` family (~55% of kernel
+time) and wrongly concluded the rest hides under transfer. The pipeline is
+**balanced**: kernels ≈ copies ≈ 214 ms, running concurrently, span ≈ both.
+There is no 13.6 ms removable sync stall — intra-range idle is 2.4 ms.
+A2 closes with no implementation (per the owner's rule).
+
+Consequences, each cross-checked against an existing measurement:
+
+1. **Byte→span coupling is near 1:1 across the measured range.** From
+   E154/E155 rows: (5.242 GB, 227.8 ms) → (4.839, 213.7) → (4.445, 187.1):
+   slope ≈ 36–46 ms/GB ≈ 0.9–1.1× the DMA slope. The E160 "50% crossover"
+   is wrong; the crossover sits near a ~17–20% byte cut (solo compute
+   ≈ 185–190 ms). Copy-engine writes contend with GEMV for memory
+   bandwidth, so fewer bytes speed up *both* streams — which is also why
+   8448 residency beat 8064 by more than the pure transfer delta.
+2. **Compression stays closed, with a corrected mechanism.** A 5.5% byte
+   cut is worth ~10 ms of span, but a GPU decoder adds compute to the
+   co-critical side; E155's measured codec delta (0.9 ms for 81 MB) shows
+   the trade is already sub-linear. E161's verdict stands.
+3. **Compute is co-primary for Track A.** The "GEMV hill is hidden so it
+   doesn't matter" premise is retired. However, kernel time also scales
+   with residency contention, so the strongest measured lever remains
+   residency — and the residency ladder is capped: 8824 MiB leaves ~376 MiB
+   after states, which cannot hold the 918 MiB MTP head, and no drafter
+   ≤ 376 MiB with ≥ 4 exact mean exists (E153/E157/E158). 8448 + MTP stays
+   the optimal live configuration.
+
+### B1 — schedule-level byte-skipping (CLOSED, negative)
+
+Dependency analysis, no code: every verifier row requires all 64 layers
+(exact greedy semantics); row rejection is only observable at the final
+logits, so no row can be retired mid-pass; every layer's weights are needed
+for every live row in every pass. Schedule changes can reorder but not
+remove bytes. Additionally, with the corrected balanced pipeline, even
+skipped bytes would partly re-balance into compute time. B1 closed: no
+valid mechanism exists under exact-output constraints.
+
+### Session outcome
+
+(b) eliminated uncertainty (E160 correction, B1 closure) + (c) plan change
+(compute co-critical; residency-vs-drafter identified as the structural
+Track A trade-off). Raw: `results/e163-*-20261111.txt`,
+`results/e146-packed-native-20261111.sqlite`.
+
+## E164 — C0 benefit ceiling: byte→span is ~1:1; the compression lever reopens (corrects E163)
+
+Owner-approved C0 before building the C1 quality harness. Oracle-mode
+verify sweeps (`--oracle-ids`, d10, ctx 384, no MTP, packed verifier) at
+8448 and 8656 MiB were added to E154's two anchors (8064, 8824). Parsing
+note: the first pass averaged `commit_seconds` fields by regex accident;
+the corrected extraction uses `verify_seconds` from `oracle_cycle` lines
+only.
+
+| Cold GB | Verify ms | Source |
+|---:|---:|---|
+| 5.242 | 223.6 | E154 (8064) |
+| 4.839 | 211.6 | E164 (8448) |
+| 4.621 | 200.5 | E164 (8656) |
+| 4.445 | 187.1 | E154 (8824) |
+
+**Linear fit: span = 44.2 ms/GB × cold bytes − 5.7 ms, residuals ±3.6 ms**
+(DMA slope would be 40.5 ms/GB). Byte→span is ~1:1 with DMA across the
+entire measured range. **E163's "balanced pipeline / kernels ≈ 214 ms
+floor" model is falsified**: the kernel durations in the E146 trace
+stretch to match streaming copies at the 8064 operating point (memory-
+latency-bound on cold data), they do not bound the pass. E160's ~107 ms
+`q4_mma` count was the closer estimate of true compute; adding the other
+kernels puts the compute floor around ~150 ms (estimated — no data point
+below 4.445 GB yet), i.e. the crossover sits near a **24% byte cut at
+8448**, not 17–20% and not 50%.
+
+C0 projections at the 8448 operating point (live tree, 4.2 emitted):
+10% byte cut → ~22.5 tok/s; 25% → ~27 tok/s; 40% → compute floor
+(~28 tok/s) without compute-side improvements. **Verdict: mixed-precision
+cold weights are worth ~+45% at the quality border — C1 is GO**, with the
+note that the owner's 25% target sits near the crossover edge, so the
+compute side (cheaper low-bit GEMV under TOLERANCE) becomes the second
+lever exactly where byte cuts saturate.
+
+Ledger honesty: E160 was corrected in E163 (kernel attribution), and E163's
+crossover model is corrected here (streaming-stretched kernels). The
+byte-ledger and funnel bounds table are updated to the fit above. Raw:
+`results/e164-oracle-e110-hot{8448,8656}-ctx384-20261111.txt`,
+`results/e164-oracle-e110-hot8824-e154config-20261111.txt` (config rejected
+by the current binary — resident-output now requires a draft source; kept
+for provenance).
+
+**Owner reconciliation (adopted):** the first published projections mixed
+baselines — the 27 tok/s at 25% figure used the 8448 floor against an
+8064-style gain. Corrected: 25% byte cut from the 8448 baseline gives span
+155 ms, cycle ~171 ms, **24.6 tok/s (+33% transfer-component)**; byte cuts
+saturate at ~25.3 tok/s at the ~33% crossover (150 ms floor estimate, no
+data below 4.445 GB — extrapolation flagged as hypothesis). The fit's
+44.2 ms/GB ≈ 22.6 GB/s effective; four points establish a *local*
+relationship only.
+
+## E165 — C1 Stage S: screening harness validated, first sensitivity points
+
+The Stage S instrument (`scripts/c1_requant.py`) requantizes selected Q4_0
+tensors to symmetric k-bit grids with per-G-group fp16 scales and stores
+the result **losslessly back as Q4_0** — a k-bit grid is a subset of Q4_0's
+16-level grid when the same scale is kept, so engine runs measure the
+candidate format's true quality with zero storage distortion; byte savings
+are analytic (bpw = k + 16/G vs Q4_0's 4.5). Getting here required
+replicating the original quantizer's exact convention, discovered
+empirically: `d = signed-max-magnitude element / −8` (negative scale),
+`n = trunc(w/d + 8.5)` clipped to [0,15]. **Harness validation: the
+(4, 32) control rebuilds the original GGUF byte-for-byte** (cmp clean over
+15.1 GB).
+
+Screening metric: teacher-forced argmax agreement (`--multi 1 --feed-ids`)
+against the EXACT dense continuation — per-position greedy agreement
+without error cascade. Identity control on e119-chat: **0/128 mismatches**
+✓. Ladder so far:
+
+| Format | bpw (analytic) | Byte cut | e119 agreement | e110 agreement |
+|---|---:|---:|---:|---:|
+| (4, 32) control | 4.5 | 0% | 100% (0/128) | — |
+| (3, 64) all tensors | 3.25 | 27.8% | 82.0% (23/128) | 80.1% (51/256) |
+| (2, 64) all tensors | 2.25 | 50.0% | 53.9% (59/128) | — |
+
+Reading: the 25% feasibility gate is arithmetically met by (3,64), but its
+~81% per-position greedy agreement is a screening yellow flag — Stage V's
+task-level gates (perplexity ≤2%, task ≤1 pp) decide, and the steep
+82%→54% drop between 3.25 and 2.25 bpw suggests the quality knee lies
+between. Next Stage S points: (3,32) (3.5 bpw, 22.2% cut), (3,128)
+(3.125 bpw, 30.6%), and FFN-only mixes — mapping the knee before any
+Stage V commitment. Per the owner's rule, two success definitions are
+recorded (performance ≥25% vs memory-efficiency 15–20% safe), and no
+drafter campaign launches from a C1 failure. Raw:
+`results/e165-*-20261111.txt` (screen logs), `/tmp/gum-q*.gguf` variants.

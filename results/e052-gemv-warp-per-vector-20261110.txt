@@ -1,0 +1,4 @@
+E052,shape=11652x5120,weight_MiB=32.00,reference_ms=0.5087,candidate_ms=0.8930,speedup=0.570,bitexact=YES
+trial,0,reference_ms=0.5177,candidate_ms=0.8930
+trial,1,reference_ms=0.5076,candidate_ms=0.8984
+trial,2,reference_ms=0.5087,candidate_ms=0.8874

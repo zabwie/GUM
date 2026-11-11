@@ -1,0 +1,32 @@
+K=5120 N=17408 width=8 original_NB=8 original_warps=8 original_ms=0.3204
+  rotation ms=0.1957 bit_mismatches=0 outputs=139264
+K=5120 N=17408 width=16 original_NB=16 original_warps=8 original_ms=0.6122
+  rotation ms=0.3874 bit_mismatches=0 outputs=278528
+K=5120 N=17408 width=24 original_NB=8 original_warps=16 original_ms=0.7816
+  rotation ms=0.5728 bit_mismatches=0 outputs=417792
+  single_24x4 ms=0.7437 bit_mismatches=0 outputs=417792
+  single_24x8 ms=0.8154 bit_mismatches=0 outputs=417792
+  single_24x16 ms=0.6027 bit_mismatches=0 outputs=417792
+  split_8x4 ms=0.7527 bit_mismatches=0 outputs=417792
+K=5120 N=17408 width=32 original_NB=8 original_warps=16 original_ms=0.9680
+  rotation ms=0.7029 bit_mismatches=0 outputs=557056
+  split_16x4 ms=0.9668 bit_mismatches=0 outputs=557056
+  split_16x8 ms=0.6795 bit_mismatches=0 outputs=557056
+  split_16x16 ms=0.9160 bit_mismatches=0 outputs=557056
+  split_8x8 ms=0.6032 bit_mismatches=0 outputs=557056
+K=17408 N=5120 width=8 original_NB=8 original_warps=8 original_ms=0.2277
+  rotation ms=0.1903 bit_mismatches=0 outputs=40960
+K=17408 N=5120 width=16 original_NB=16 original_warps=8 original_ms=0.4002
+  rotation ms=0.3347 bit_mismatches=0 outputs=81920
+K=17408 N=5120 width=24 original_NB=8 original_warps=8 original_ms=0.6357
+  rotation ms=0.4575 bit_mismatches=0 outputs=122880
+  single_24x4 ms=0.6134 bit_mismatches=0 outputs=122880
+  single_24x8 ms=0.7417 bit_mismatches=0 outputs=122880
+  single_24x16 ms=0.4610 bit_mismatches=0 outputs=122880
+  split_8x4 ms=0.7898 bit_mismatches=0 outputs=122880
+K=17408 N=5120 width=32 original_NB=16 original_warps=8 original_ms=0.7075
+  rotation ms=0.6116 bit_mismatches=0 outputs=163840
+  split_16x4 ms=0.9433 bit_mismatches=0 outputs=163840
+  split_16x8 ms=0.5853 bit_mismatches=0 outputs=163840
+  split_16x16 ms=1.0693 bit_mismatches=0 outputs=163840
+  split_8x8 ms=0.5833 bit_mismatches=0 outputs=163840

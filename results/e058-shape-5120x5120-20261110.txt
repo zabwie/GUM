@@ -1,0 +1,6 @@
+E058,shape=5120x5120,weight_MiB=14.06,ref_ms=0.2364,smem_KiB=3.12,bitexact_different=0,max_abs=0,max_rel=0
+variant,vpw=16,warps=1,threads=32,ms=0.2532,speedup=0.933
+variant,vpw=8,warps=2,threads=64,ms=0.2346,speedup=1.008
+variant,vpw=4,warps=4,threads=128,ms=0.2092,speedup=1.130
+variant,vpw=2,warps=8,threads=256,ms=0.2492,speedup=0.948
+variant,vpw=1,warps=16,threads=512,ms=0.2390,speedup=0.989

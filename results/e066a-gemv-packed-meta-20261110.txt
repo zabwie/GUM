@@ -1,0 +1,5 @@
+E066,shape=11652x5120,weight_MiB=32.00,ref_ms=0.5437,meta_ms=0.4499,speedup=1.209,bitexact_different=0,max_abs=0
+
+The same-kernel comparison uses aligned int2 {scale_bits, xsum} metadata and
+the original separate scale and sum arrays as the reference. Outputs match
+bit-for-bit.

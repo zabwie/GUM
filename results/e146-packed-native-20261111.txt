@@ -1,0 +1,37 @@
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-4aca.qdstrm'
+[1/1] [0%                          ] e146-packed-native-20261111.nsys-repProcessing events...
+[1/1] [0%                          ] e146-packed-native-20261111.nsys-rep[1/1] [5%                          ] e146-packed-native-20261111.nsys-rep[1/1] [8%                          ] e146-packed-native-20261111.nsys-rep[1/1] [7%                          ] e146-packed-native-20261111.nsys-rep[1/1] [6%                          ] e146-packed-native-20261111.nsys-rep[1/1] [11%                         ] e146-packed-native-20261111.nsys-rep[1/1] [10%                         ] e146-packed-native-20261111.nsys-rep[1/1] [9%                          ] e146-packed-native-20261111.nsys-rep[1/1] [8%                          ] e146-packed-native-20261111.nsys-rep[1/1] [7%                          ] e146-packed-native-20261111.nsys-rep[1/1] [10%                         ] e146-packed-native-20261111.nsys-rep[1/1] [14%                         ] e146-packed-native-20261111.nsys-rep[1/1] [=17%                        ] e146-packed-native-20261111.nsys-rep[1/1] [==20%                       ] e146-packed-native-20261111.nsys-rep[1/1] [===23%                      ] e146-packed-native-20261111.nsys-rep[1/1] [====26%                     ] e146-packed-native-20261111.nsys-rep[1/1] [=====29%                    ] e146-packed-native-20261111.nsys-rep[1/1] [=====32%                    ] e146-packed-native-20261111.nsys-rep[1/1] [======35%                   ] e146-packed-native-20261111.nsys-rep[1/1] [=======39%                  ] e146-packed-native-20261111.nsys-rep[1/1] [========42%                 ] e146-packed-native-20261111.nsys-rep[1/1] [=========45%                ] e146-packed-native-20261111.nsys-rep[1/1] [==========48%               ] e146-packed-native-20261111.nsys-rep[1/1] [===========50%              ] e146-packed-native-20261111.nsys-rep[1/1] [========================100%] e146-packed-native-20261111.nsys-rep[1/1] [========================100%] e146-packed-native-20261111.nsys-rep
+shared_output,verified=1,bytes=715161600
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=1024,batch=1,hot_mib=8064,cache_mib=5600,validate=0
+spec_config,user_sequences=1,max_verify_positions=24,draft_max=23,draft_vocab=32768,p_min=0.060,pld_mode=2,balanced_residency=1,drafter=mtp_tree,mtp_group=4
+alloc_plan,items=1072,stream_GiB=12.76,hot_GiB=7.87,cache_GiB=4.88,pinned_MiB=3786,nvme_per_token_GiB=0.00,ssm_state_MiB=150,kv_MiB=128
+activation_l2_window,bytes=696320,persisting_limit=1622016
+alloc,free_vram_MiB=2174,ram_avail_MiB=17585,swap_used_MiB=9313
+hot_load,items=535,GiB=7.87,seconds=1.1527,gpu_pack=1
+mtp_plan,q4_MiB=910,f32_MiB=0,total_MiB=918
+spec_cycle,0,draft=23,matched=4,emitted=5,verify_seconds=0.2290,mtp_seconds=0.0140,seconds=0.2455,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=9
+spec_cycle,1,draft=23,matched=23,emitted=24,verify_seconds=0.2270,mtp_seconds=0.0095,seconds=0.2418,cold_bytes=5241526272,free_vram_MiB=1160,tree=0,tree_leaves=1
+spec_cycle,2,draft=23,matched=23,emitted=24,verify_seconds=0.2281,mtp_seconds=0.0044,seconds=0.2378,cold_bytes=5241526272,free_vram_MiB=1160,tree=0,tree_leaves=1
+spec_cycle,3,draft=23,matched=8,emitted=9,verify_seconds=0.2814,mtp_seconds=0.0148,seconds=0.3003,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=9
+spec_cycle,4,draft=23,matched=6,emitted=7,verify_seconds=0.2677,mtp_seconds=0.0162,seconds=0.2868,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=5
+spec_cycle,5,draft=23,matched=8,emitted=9,verify_seconds=0.2272,mtp_seconds=0.0162,seconds=0.2465,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=8
+spec_cycle,6,draft=23,matched=3,emitted=4,verify_seconds=0.2276,mtp_seconds=0.0134,seconds=0.2432,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=13
+spec_cycle,7,draft=23,matched=1,emitted=2,verify_seconds=0.2268,mtp_seconds=0.0132,seconds=0.2418,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=10
+spec_cycle,8,draft=23,matched=5,emitted=6,verify_seconds=0.2270,mtp_seconds=0.0142,seconds=0.2438,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=13
+spec_cycle,9,draft=23,matched=6,emitted=7,verify_seconds=0.2268,mtp_seconds=0.0118,seconds=0.2413,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=7
+spec_cycle,10,draft=23,matched=1,emitted=2,verify_seconds=0.2270,mtp_seconds=0.0139,seconds=0.2428,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=7
+spec_cycle,11,draft=23,matched=5,emitted=6,verify_seconds=0.2278,mtp_seconds=0.0134,seconds=0.2438,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=4
+spec_cycle,12,draft=21,matched=2,emitted=3,verify_seconds=0.2367,mtp_seconds=0.0155,seconds=0.2545,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=6
+spec_cycle,13,draft=18,matched=1,emitted=2,verify_seconds=0.2404,mtp_seconds=0.0131,seconds=0.2557,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=7
+spec_cycle,14,draft=16,matched=3,emitted=4,verify_seconds=0.2405,mtp_seconds=0.0129,seconds=0.2561,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=6
+spec_cycle,15,draft=12,matched=2,emitted=3,verify_seconds=0.2235,mtp_seconds=0.0092,seconds=0.2347,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=6
+spec_cycle,16,draft=9,matched=3,emitted=4,verify_seconds=0.2225,mtp_seconds=0.0072,seconds=0.2318,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=5
+spec_cycle,17,draft=5,matched=2,emitted=3,verify_seconds=0.2200,mtp_seconds=0.0051,seconds=0.2271,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=2
+spec_cycle,18,draft=2,matched=1,emitted=2,verify_seconds=0.2185,mtp_seconds=0.0036,seconds=0.2239,cold_bytes=5241526272,free_vram_MiB=1160,tree=1,tree_leaves=2
+spec_cycle,19,draft=0,matched=0,emitted=1,verify_seconds=0.2181,mtp_seconds=0.0000,seconds=0.2182,cold_bytes=5241526272,free_vram_MiB=1160,tree=0,tree_leaves=1
+spec_summary,user_sequences=1,cycles=20,emitted=128,decode_tokens=127,mean_emitted_per_cycle=6.350,draft_acceptance=0.298,mtp_draft_acceptance=0.223,mtp_accepted=67,mtp_draft=301,eagle_draft_acceptance=0.000,eagle_accepted=0,eagle_draft=0,pld_draft_acceptance=0.690,pld_accepted=40,pld_draft=58,mean_verify_s=0.2322,mean_mtp_s=0.0111,mean_repair_s=0.0024,mean_cycle_s=0.2600,tok_per_s=24.420,prefill_s=2.1472,request_tok_per_s=17.420,min_free_vram_MiB=1160
+spec_lossless,expected=128,emitted=128,compared=128,mismatches=0,first_mismatch=0,match=yes
+Generated:
+	/home/zabwie/gpu-unified-memory-research/results/e146-packed-native-20261111.nsys-rep

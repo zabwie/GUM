@@ -1,0 +1,6 @@
+nvcomp,codec=ans,layout=raw,bytes=41942970,packed_bytes=40746964,ratio=0.97148,raw_copy_ms=1.6778,packed_copy_ms=1.6421,decode_ms=0.3353,pipeline_ms=1.6428,byte_exact=yes
+nvcomp,codec=gdeflate,layout=raw,bytes=41942970,packed_bytes=39708816,ratio=0.94673,raw_copy_ms=1.6774,packed_copy_ms=1.5912,decode_ms=3.0909,pipeline_ms=2.9877,byte_exact=yes
+nvcomp,codec=zstd,layout=raw,bytes=41942970,packed_bytes=39588022,ratio=0.94385,raw_copy_ms=1.6956,packed_copy_ms=1.5985,decode_ms=6.5938,pipeline_ms=6.2549,byte_exact=yes
+nvcomp,codec=ans,layout=planar,bytes=41942970,packed_bytes=38763460,ratio=0.92419,raw_copy_ms=1.6934,packed_copy_ms=1.5652,decode_ms=0.3277,pipeline_ms=1.5749,byte_exact=yes
+nvcomp,codec=gdeflate,layout=planar,bytes=41942970,packed_bytes=37800444,ratio=0.90123,raw_copy_ms=1.6892,packed_copy_ms=1.5198,decode_ms=3.2298,pipeline_ms=3.3570,byte_exact=yes
+nvcomp,codec=zstd,layout=planar,bytes=41942970,packed_bytes=37686764,ratio=0.89852,raw_copy_ms=1.6878,packed_copy_ms=1.5212,decode_ms=6.4425,pipeline_ms=6.1848,byte_exact=yes

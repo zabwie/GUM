@@ -1,4 +1,4 @@
-# AGENT.md — operating mentality for any AI working on Vanta
+# AGENT.md — operating mentality for any AI working on GUM (GPU Unified Memory)
 
 Read this first. It encodes how the owner wants this project run, distilled from 42
 experiments. It is part of the spec, not decoration.
@@ -63,7 +63,7 @@ The same project that breaks walls refuses to *claim* anything unmeasured:
 
 - Inspect before proposing; measure before claiming; commit after verifying.
 - One meaningful change per experiment, named E0XX, raw results in `results/`.
-- Documentation is a deliverable: RESEARCH_PLAN.md (strategy), HANDOFF.md (state),
+- Documentation is a deliverable: docs/RESEARCH_PLAN.md (strategy), HANDOFF.md (state),
   NEXT_STEPS.md (ladder), EXPERIMENTS.md (evidence). Keep them current — other models and
   sessions resume from them.
 - The owner's time and GPU are shared with a desktop: use the safety floors, respect the

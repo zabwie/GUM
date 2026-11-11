@@ -1,0 +1,8 @@
+<|im_start|>system
+Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.
+
+Give clear, factual explanations with concrete examples.<|im_end|>
+<|im_start|>user
+Why do some cities store water in a tower? Explain how height affects pressure, what changes when everyone turns on their taps, and what happens during a power outage.<|im_end|>
+<|im_start|>assistant
+<think>

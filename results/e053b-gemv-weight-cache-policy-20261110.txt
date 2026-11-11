@@ -1,0 +1,4 @@
+trial,0,default_ms=0.5368,cg_weight_ms=0.8907,bitexact=YES
+trial,1,default_ms=0.5091,cg_weight_ms=0.8650,bitexact=YES
+trial,2,default_ms=0.5099,cg_weight_ms=0.8776,bitexact=YES
+E053,shape=11652x5120,weight_MiB=32.00,default_median_ms=0.5099,cg_weight_median_ms=0.8776,speedup=0.581

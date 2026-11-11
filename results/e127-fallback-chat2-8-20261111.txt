@@ -1,0 +1,11 @@
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=1024,batch=1,hot_mib=8064,cache_mib=5600,validate=0
+spec_config,user_sequences=1,max_verify_positions=16,draft_max=15,draft_vocab=32768,p_min=0.060,pld_mode=2,balanced_residency=1,drafter=eagle4
+alloc_plan,items=1072,stream_GiB=12.76,hot_GiB=7.87,cache_GiB=4.88,pinned_MiB=3786,nvme_per_token_GiB=0.00,ssm_state_MiB=150,kv_MiB=128
+activation_l2_window,bytes=696320,persisting_limit=1622016
+alloc,free_vram_MiB=2281,ram_avail_MiB=17980,swap_used_MiB=8640
+hot_load,items=541,GiB=7.87
+eagle_plan,weights_MiB=308.6,host_head_MiB=682.0
+spec_cycle,0,draft=6,matched=4,emitted=5,verify_seconds=0.2205,eagle_seconds=0.0493,seconds=0.2721,cold_bytes=5241634560,free_vram_MiB=1155,tree=1,tree_leaves=2
+spec_cycle,1,draft=1,matched=1,emitted=2,verify_seconds=0.2184,eagle_seconds=0.0056,seconds=0.2240,cold_bytes=5241634560,free_vram_MiB=1155,tree=0,tree_leaves=1
+spec_summary,user_sequences=1,cycles=2,emitted=8,decode_tokens=7,mean_emitted_per_cycle=3.500,draft_acceptance=0.714,mtp_draft_acceptance=0.000,mtp_accepted=0,mtp_draft=0,eagle_draft_acceptance=0.714,eagle_accepted=5,eagle_draft=7,pld_draft_acceptance=0.000,pld_accepted=0,pld_draft=0,mean_verify_s=0.2194,mean_eagle_s=0.0274,mean_repair_s=0.0011,mean_cycle_s=0.2481,tok_per_s=14.108,prefill_s=1.6608,request_tok_per_s=3.709,min_free_vram_MiB=1155
+spec_lossless,expected=8,emitted=8,compared=8,mismatches=0,first_mismatch=0,match=yes

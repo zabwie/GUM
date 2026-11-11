@@ -1,0 +1,4 @@
+trial,0,default_ms=0.5070,ldg_activations_ms=0.5273,cg_weight_ms=0.8248,cg_weight_ldg_act_ms=0.7816,bitexact=YES
+trial,1,default_ms=0.5065,ldg_activations_ms=0.5268,cg_weight_ms=0.8173,cg_weight_ldg_act_ms=0.7785,bitexact=YES
+trial,2,default_ms=0.5265,ldg_activations_ms=0.5275,cg_weight_ms=0.7724,cg_weight_ldg_act_ms=0.7173,bitexact=YES
+E053,shape=11652x5120,weight_MiB=32.00,default_median_ms=0.5070,ldg_activations_median_ms=0.5273,cg_weight_median_ms=0.8173,cg_weight_ldg_act_median_ms=0.7785,ldg_speedup=0.961

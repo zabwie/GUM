@@ -1,0 +1,3 @@
+System: You are a software engineer who explains design choices clearly.
+User: A library records checkouts, returns, and lost books in an append-only event log. Explain how to rebuild its current state after a crash. Include a short example sequence, what a snapshot should contain, and how to handle a partially written last record.
+Assistant:

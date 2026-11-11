@@ -1,0 +1,7 @@
+e162_zero_copy,size_MiB=512
+staged_dma,ms=21.62,GBps=24.83
+mapped_read,ms=29.54,GBps=18.18
+gemv_vram,ms=1211.48
+gemv_mapped,ms=1201.65,effective_GBps=0.45,pass_equiv_s=11.732
+validate,bit_exact_mismatches=1/24
+summary,mapped_gemv_vs_dma=55.58x,staged_dma_pass_equiv_s=0.211,zero_copy_pass_equiv_s=11.732

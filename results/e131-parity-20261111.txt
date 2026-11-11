@@ -1,0 +1,5 @@
+cpu_q4_parity,positions=1,outputs=129,bit_mismatches=0
+cpu_q4_parity,positions=8,outputs=1032,bit_mismatches=0
+cpu_q4_parity,positions=15,outputs=1935,bit_mismatches=0
+cpu_q4_parity,positions=16,outputs=2064,bit_mismatches=0
+cpu_q4_parity,positions=32,outputs=4128,bit_mismatches=0

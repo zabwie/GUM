@@ -1,0 +1,4 @@
+E060,shape=11652x5120,weight_MiB=32.00,smem_KiB=53.75,ref_ms=0.4890,bitexact_different=130885,max_abs=9.536743e-07,max_rel=0.005898367
+row_groups=2,rows_per_CTA=8,ms=1.0078,speedup=0.485
+row_groups=4,rows_per_CTA=16,ms=0.9155,speedup=0.534
+row_groups=8,rows_per_CTA=32,ms=0.8111,speedup=0.603

@@ -1,0 +1,11 @@
+training=15859,validation=4011,files=30
+initial_accuracy=all:0.56869,path:0.68047,root:0.72664,missing=276
+epoch=1,loss=0.8838,accuracy=all:0.57168,path:0.68677,root:0.75087
+saved_adapter=rank16,validation_path_root=0.71882
+epoch=2,loss=0.8284,accuracy=all:0.57068,path:0.68587,root:0.74394
+epoch=3,loss=0.7819,accuracy=all:0.56968,path:0.68767,root:0.74394
+epoch=4,loss=0.7359,accuracy=all:0.57118,path:0.68767,root:0.74394
+epoch=5,loss=0.6944,accuracy=all:0.56943,path:0.68587,root:0.75087
+epoch=6,loss=0.6583,accuracy=all:0.56844,path:0.68947,root:0.75087
+saved_adapter=rank16,validation_path_root=0.72017
+baseline_path_root=0.70356,best=0.72017

@@ -1,0 +1,1 @@
+resident output requires speculative mode with no MTP or EAGLE4; choose one draft source

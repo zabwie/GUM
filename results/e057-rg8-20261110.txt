@@ -1,0 +1,6 @@
+E057,shape=11652x5120,weight_MiB=32.00,warps=8,row_groups=8,chunk_blocks=80,smem_KiB=47.5,ref_ms=0.5086,tile_ms=0.6715,speedup=0.757,bitexact_different=130885,max_abs=9.536743e-07,max_rel=0.005898367
+trial,0,ref_ms=0.5614,tile_ms=0.6715
+trial,1,ref_ms=0.5086,tile_ms=0.6719
+trial,2,ref_ms=0.5089,tile_ms=0.6721
+trial,3,ref_ms=0.4876,tile_ms=0.6190
+trial,4,ref_ms=0.4867,tile_ms=0.6188

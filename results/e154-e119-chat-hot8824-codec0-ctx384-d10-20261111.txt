@@ -1,0 +1,34 @@
+memory.free [MiB], utilization.gpu [%], temperature.gpu
+10658 MiB, 100 %, 56
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=384,batch=1,hot_mib=8824,cache_mib=5600,validate=0
+spec_config,user_sequences=1,max_verify_positions=24,draft_max=10,draft_vocab=32768,p_min=0.250,pld_mode=0,balanced_residency=1,drafter=oracle,mtp_group=1,packed_verify=1
+alloc_plan,items=1072,stream_GiB=12.76,hot_GiB=8.62,cache_GiB=4.14,pinned_MiB=3786,nvme_per_token_GiB=0.00,ssm_state_MiB=150,kv_MiB=48
+activation_l2_window,bytes=696320,persisting_limit=1622016
+alloc,free_vram_MiB=1314,ram_avail_MiB=16487,swap_used_MiB=9537
+hot_load,items=563,GiB=8.62,seconds=1.3807,gpu_pack=1
+oracle_cycle,0,draft=10,matched=10,emitted=11,verify_seconds=0.189837,commit_seconds=0.005008,seconds=0.194975,cold_bytes=4444563456,free_vram_MiB=540
+spec_cycle,0,draft=10,matched=10,emitted=11,verify_seconds=0.1898,mtp_seconds=0.0000,seconds=0.1950,cold_bytes=4444563456,free_vram_MiB=540,tree=0,tree_leaves=1
+oracle_cycle,1,draft=10,matched=10,emitted=11,verify_seconds=0.187058,commit_seconds=0.002979,seconds=0.190166,cold_bytes=4444563456,free_vram_MiB=522
+spec_cycle,1,draft=10,matched=10,emitted=11,verify_seconds=0.1871,mtp_seconds=0.0000,seconds=0.1902,cold_bytes=4444563456,free_vram_MiB=522,tree=0,tree_leaves=1
+oracle_cycle,2,draft=10,matched=10,emitted=11,verify_seconds=0.187125,commit_seconds=0.003103,seconds=0.190349,cold_bytes=4444563456,free_vram_MiB=522
+spec_cycle,2,draft=10,matched=10,emitted=11,verify_seconds=0.1871,mtp_seconds=0.0000,seconds=0.1903,cold_bytes=4444563456,free_vram_MiB=522,tree=0,tree_leaves=1
+oracle_cycle,3,draft=10,matched=10,emitted=11,verify_seconds=0.189240,commit_seconds=0.003870,seconds=0.193241,cold_bytes=4444563456,free_vram_MiB=521
+spec_cycle,3,draft=10,matched=10,emitted=11,verify_seconds=0.1892,mtp_seconds=0.0000,seconds=0.1932,cold_bytes=4444563456,free_vram_MiB=521,tree=0,tree_leaves=1
+oracle_cycle,4,draft=10,matched=10,emitted=11,verify_seconds=0.189442,commit_seconds=0.004146,seconds=0.193713,cold_bytes=4444563456,free_vram_MiB=521
+spec_cycle,4,draft=10,matched=10,emitted=11,verify_seconds=0.1894,mtp_seconds=0.0000,seconds=0.1937,cold_bytes=4444563456,free_vram_MiB=521,tree=0,tree_leaves=1
+oracle_cycle,5,draft=10,matched=10,emitted=11,verify_seconds=0.191890,commit_seconds=0.004174,seconds=0.196210,cold_bytes=4444563456,free_vram_MiB=443
+spec_cycle,5,draft=10,matched=10,emitted=11,verify_seconds=0.1919,mtp_seconds=0.0000,seconds=0.1962,cold_bytes=4444563456,free_vram_MiB=443,tree=0,tree_leaves=1
+oracle_cycle,6,draft=10,matched=10,emitted=11,verify_seconds=0.186308,commit_seconds=0.003031,seconds=0.189481,cold_bytes=4444563456,free_vram_MiB=455
+spec_cycle,6,draft=10,matched=10,emitted=11,verify_seconds=0.1863,mtp_seconds=0.0000,seconds=0.1895,cold_bytes=4444563456,free_vram_MiB=455,tree=0,tree_leaves=1
+oracle_cycle,7,draft=10,matched=10,emitted=11,verify_seconds=0.188127,commit_seconds=0.003147,seconds=0.191402,cold_bytes=4444563456,free_vram_MiB=455
+spec_cycle,7,draft=10,matched=10,emitted=11,verify_seconds=0.1881,mtp_seconds=0.0000,seconds=0.1914,cold_bytes=4444563456,free_vram_MiB=455,tree=0,tree_leaves=1
+oracle_cycle,8,draft=10,matched=10,emitted=11,verify_seconds=0.188729,commit_seconds=0.003569,seconds=0.192417,cold_bytes=4444563456,free_vram_MiB=459
+spec_cycle,8,draft=10,matched=10,emitted=11,verify_seconds=0.1887,mtp_seconds=0.0000,seconds=0.1924,cold_bytes=4444563456,free_vram_MiB=459,tree=0,tree_leaves=1
+oracle_cycle,9,draft=10,matched=10,emitted=11,verify_seconds=0.188453,commit_seconds=0.003514,seconds=0.192092,cold_bytes=4444563456,free_vram_MiB=457
+spec_cycle,9,draft=10,matched=10,emitted=11,verify_seconds=0.1885,mtp_seconds=0.0000,seconds=0.1921,cold_bytes=4444563456,free_vram_MiB=457,tree=0,tree_leaves=1
+oracle_cycle,10,draft=10,matched=10,emitted=11,verify_seconds=0.188962,commit_seconds=0.004579,seconds=0.193675,cold_bytes=4444563456,free_vram_MiB=458
+spec_cycle,10,draft=10,matched=10,emitted=11,verify_seconds=0.1890,mtp_seconds=0.0000,seconds=0.1937,cold_bytes=4444563456,free_vram_MiB=458,tree=0,tree_leaves=1
+oracle_cycle,11,draft=5,matched=5,emitted=6,verify_seconds=0.187891,commit_seconds=0.000000,seconds=0.187998,cold_bytes=4444563456,free_vram_MiB=458
+spec_cycle,11,draft=5,matched=5,emitted=6,verify_seconds=0.1879,mtp_seconds=0.0000,seconds=0.1880,cold_bytes=4444563456,free_vram_MiB=458,tree=0,tree_leaves=1
+spec_summary,user_sequences=1,cycles=12,emitted=128,decode_tokens=127,mean_emitted_per_cycle=10.583,draft_acceptance=0.000,mtp_draft_acceptance=0.000,mtp_accepted=0,mtp_draft=0,eagle_draft_acceptance=0.000,eagle_accepted=0,eagle_draft=0,pld_draft_acceptance=0.000,pld_accepted=0,pld_draft=0,mean_verify_s=0.1886,mean_mtp_s=0.0000,mean_repair_s=0.0034,mean_cycle_s=0.1922,tok_per_s=55.074,prefill_s=1.5113,request_tok_per_s=33.531,min_free_vram_MiB=443
+spec_lossless,expected=128,emitted=128,compared=128,mismatches=0,first_mismatch=0,match=yes

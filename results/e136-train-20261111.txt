@@ -1,0 +1,5 @@
+root_replay_cosine=0.999967,samples=48
+baseline,train=7488,validation=1872,nll=3.42949,top1=0.55929,pair=0.34562
+warm,nll=3.13915,top1=0.57746,pair=0.36058
+epoch=1,training=2.35212,nll=3.14818,top1=0.57906,pair=0.36325
+epoch=2,training=2.06673,nll=3.21628,top1=0.58120,pair=0.36538

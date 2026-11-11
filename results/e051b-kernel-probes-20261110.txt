@@ -1,0 +1,9 @@
+v0 NB=16        : 0.546 ms (61 GB/s)
+v0 NB=1         : 0.109 ms (307 GB/s)
+pr1  xs-smem R1: 0.616 ms (55 GB/s) bitexact=YES
+  diff at 0: 0x1.5b4b3p-1 vs 0x1.2275d8p+4
+pr1f fake-xq R1: 0.325 ms (103 GB/s) bitexact=n/a(fake)
+pr2  xs-smem R2: 0.578 ms (58 GB/s) bitexact=YES
+pr4  xs-smem R4: 0.601 ms (56 GB/s) bitexact=YES
+pr4b R4 occ2    : 0.603 ms (56 GB/s) bitexact=YES
+pr8  xs-smem R8: 0.659 ms (51 GB/s) bitexact=YES

@@ -1,0 +1,10 @@
+codec_parity,columns=5120,width=8,values=512,raw=184320,encoded=182016,bit_exact=1
+codec_parity,columns=5120,width=12,values=1024,raw=184320,encoded=182016,bit_exact=1
+codec_parity,columns=5120,width=16,values=1024,raw=184320,encoded=182016,bit_exact=1
+codec_parity,columns=5120,width=24,values=1536,raw=184320,encoded=182016,bit_exact=1
+codec_parity,columns=5120,width=32,values=2048,raw=184320,encoded=182016,bit_exact=1
+codec_parity,columns=17408,width=8,values=512,raw=626688,encoded=618816,bit_exact=1
+codec_parity,columns=17408,width=12,values=1024,raw=626688,encoded=618816,bit_exact=1
+codec_parity,columns=17408,width=16,values=1024,raw=626688,encoded=618816,bit_exact=1
+codec_parity,columns=17408,width=24,values=1536,raw=626688,encoded=618816,bit_exact=1
+codec_parity,columns=17408,width=32,values=2048,raw=626688,encoded=618816,bit_exact=1

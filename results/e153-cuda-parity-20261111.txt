@@ -1,0 +1,6 @@
+adjacent
+parallel_draft_plan,block=10,vocab=1237,adjacent=1,scratch_bytes=140616
+parallel_cuda_parity,anchors=12,matching_tokens=120
+independent
+parallel_draft_plan,block=10,vocab=1237,adjacent=0,scratch_bytes=140616
+parallel_cuda_parity,anchors=12,matching_tokens=120

@@ -1,0 +1,6 @@
+First E075 sweep before the later higher-activity repeat:
+v0 current      : 0.508 ms  (66.0 GB/s equiv)
+E075 pair-tile cb=32: 0.403 ms (83.2 GB/s equiv) bitexact=YES smem_KiB=20.0
+E075 pair-tile cb=64: 0.389 ms (86.3 GB/s equiv) bitexact=YES smem_KiB=40.0
+E075 pair-tile cb=96: 0.475 ms (70.6 GB/s equiv) bitexact=YES smem_KiB=60.0
+E075 pair-tile cb=128: 0.449 ms (74.7 GB/s equiv) bitexact=YES smem_KiB=80.0

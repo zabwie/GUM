@@ -1,0 +1,68 @@
+Vanta weight traffic audit — 2026-11-11
+Target Qwen3.8-27B-STRICT-Q4_0, RTX 3060, E149 24-position verifier,
+8064 MiB hot, 5600 MiB RAM cache, context capacity 1024, one sequence.
+
+Trace source results/e146-packed-native-20261111.nsys-rep.
+Reconstructed Q4_0 chunk sizes and balanced residency from the target GGUF
+and the decoder. Matched every H2D weight-copy size in schedule order to
+the target-verification NVTX ranges in the existing Nsight trace.
+
+Compression sampled 16 rows per cold chunk (or the entire smaller chunk)
+alternating between the first and third quartile. Whole-chunk tests
+sampled two chunks at thirds of file order per tier and tensor role
+for ffn_gate, ffn_up, ffn_down, attn_qkv, attn_q, and ssm_out. Each zstd
+level 3 chunk was independently byte-round-tripped. The planar layout
+separates Q4 nibbles from the two bytes of each scale. It has no GPU
+decompression timing. Some full cold samples overlap the 16-row samples.
+
+Speculative row counts use one known input plus all proposed rows per
+pass. Decode token counts exclude the first token obtained in prefill.
+E152 uses the known dense continuation as an oracle, so its byte/token
+ratio measures the effect of longer exact continuations in isolation.
+
+e146_verified_schedule passes 20 cold_chunks_per_pass 537 weight_bytes_per_pass 5241526272 every_copy_size_in_order_exact True
+e146_transfers H2D_weights 104830525440 H2D_non_weights 16151024 H2D_weight_percent 99.984596 D2H 53103552 D2D 1504321536
+cold_by_tensor ffn_up 1189601280 22.696%
+cold_by_tensor ffn_gate 1072005120 20.452%
+cold_by_tensor ffn_down 1070383104 20.421%
+cold_by_tensor ssm_out 745998336 14.232%
+cold_by_tensor attn_qkv 732119040 13.968%
+cold_by_tensor attn_q 297861120 5.683%
+cold_by_tensor attn_gate 41472000 0.791%
+cold_by_tensor attn_v 32440320 0.619%
+cold_by_tensor attn_k 32440320 0.619%
+cold_by_tensor attn_output 15040512 0.287%
+cold_by_tensor ssm_beta 6082560 0.116%
+cold_by_tensor ssm_alpha 6082560 0.116%
+ffn_percent 63.569
+packed_bytes 5229361152 scale_bytes 582391808 nibble_bytes 4659134464
+compression_sample slice chunks 537 {'raw': 32772096, 'blocks': 1820672, 'zero_scale': 0, 'zero_quant': 0, 'zero_block': 0, 'wire_zstd3': 30913009, 'scales_zstd3': 2404470, 'quants_zstd3': 27424300, 'planar_zstd3': 30707376}
+compressed_ratio slice wire 0.943272 planar 0.936998 separate_planes 0.910188 zero_block_percent 0.000000
+compression_sample cold_whole chunks 12 {'raw': 166422528, 'blocks': 9245696, 'zero_scale': 0, 'zero_quant': 0, 'zero_block': 0, 'wire_zstd3': 157354135, 'scales_zstd3': 10355075, 'quants_zstd3': 139728928, 'planar_zstd3': 150086127}
+compressed_ratio cold_whole wire 0.945510 planar 0.901838 separate_planes 0.901825 zero_block_percent 0.000000
+compression_sample hot_whole chunks 12 {'raw': 196826112, 'blocks': 10934784, 'zero_scale': 0, 'zero_quant': 0, 'zero_block': 0, 'wire_zstd3': 186103335, 'scales_zstd3': 12228656, 'quants_zstd3': 165228549, 'planar_zstd3': 177458076}
+compressed_ratio hot_whole wire 0.945522 planar 0.901598 separate_planes 0.901594 zero_block_percent 0.000000
+quant_nibble_entropy_bits 3.746824 scale_exponent_entropy_bits 1.171116
+decode_efficiency e149-installed-chat cycles 62 new_tokens 255 logical_verifier_rows 1384 cold_GB 324.974629 cold_GB_per_new_token 1.274410
+decode_efficiency e149-agent cycles 22 new_tokens 127 logical_verifier_rows 484 cold_GB 115.313578 cold_GB_per_new_token 0.907981
+decode_efficiency e150-chat-e150-32 cycles 58 new_tokens 255 logical_verifier_rows 1664 cold_GB 304.008524 cold_GB_per_new_token 1.192190
+decode_efficiency e152-oracle-e110-chat-d10 cycles 24 new_tokens 255 logical_verifier_rows 255 cold_GB 125.796631 cold_GB_per_new_token 0.493320
+decode_efficiency e152-oracle-e110-chat-d15 cycles 16 new_tokens 255 logical_verifier_rows 255 cold_GB 83.864420 cold_GB_per_new_token 0.328880
+
+Activation sparsity test on an instrumented temporary E149 build.
+During generation, for each streamed projection we checked each
+32-value Q4 activation group for a zero quantization scale in every
+live verifier row. The diagnostic counted logical payload bytes
+eligible for skipping, and did not change any weight transfers.
+Counts are per projection and exclude verifier padding.
+zero-chat
+zero_group_audit,tensor_group=ffn_down,activation_groups=2158592,all_rows_zero=0,payload_bytes=0
+zero_group_audit,tensor_group=ffn_up_gate,activation_groups=1269760,all_rows_zero=0,payload_bytes=0
+zero_group_audit,tensor_group=attention_recurrent,activation_groups=2934336,all_rows_zero=0,payload_bytes=0
+spec_lossless,expected=256,emitted=256,compared=256,mismatches=0,first_mismatch=0,match=yes
+
+zero-agent
+zero_group_audit,tensor_group=ffn_down,activation_groups=765952,all_rows_zero=0,payload_bytes=0
+zero_group_audit,tensor_group=ffn_up_gate,activation_groups=450560,all_rows_zero=0,payload_bytes=0
+zero_group_audit,tensor_group=attention_recurrent,activation_groups=1041216,all_rows_zero=0,payload_bytes=0
+spec_lossless,expected=128,emitted=128,compared=128,mismatches=0,first_mismatch=0,match=yes

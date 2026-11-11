@@ -1,0 +1,12 @@
+train_chains=3456,val_chains=864
+teacher,epoch=1,loss=0.4769,prefix=0.082,survival=[0.059, 0.016, 0.007, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],est_tok_per_s=4.7/5.4
+teacher,epoch=2,loss=0.1544,prefix=0.083,survival=[0.061, 0.016, 0.003, 0.002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],est_tok_per_s=4.7/5.4
+teacher,epoch=3,loss=0.1248,prefix=0.078,survival=[0.062, 0.013, 0.001, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],est_tok_per_s=4.6/5.3
+teacher,epoch=4,loss=0.1002,prefix=0.089,survival=[0.074, 0.015, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],est_tok_per_s=4.7/5.4
+Traceback (most recent call last):
+  File "/home/zabwie/gpu-unified-memory-research/scripts/train_sequential_draft.py", line 293, in <module>
+    main()
+  File "/home/zabwie/gpu-unified-memory-research/scripts/train_sequential_draft.py", line 265, in main
+    logits = torch.cat(step_logits)
+             ^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 486.00 MiB. GPU 0 has a total capacity of 11.63 GiB of which 432.00 MiB is free. Process 1973845 has 120.59 MiB memory in use. Including non-PyTorch memory, this process has 10.18 GiB memory in use. Of the allocated memory 10.01 GiB is allocated by PyTorch, and 28.50 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

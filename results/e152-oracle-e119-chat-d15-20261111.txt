@@ -1,0 +1,28 @@
+memory.free [MiB], utilization.gpu [%], temperature.gpu
+10683 MiB, 17 %, 58
+shared_output,verified=1,bytes=715161600
+config,model=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf,arch=qwen35,layers=64,recr=48,attn=16,n_embd=5120,n_head=24,n_kv=4,head=256,rot=64,ffn=17408,vocab=248320,ssm_state=128,ssm_group=16,ssm_dt=48,ssm_inner=6144,rope_base=10000000,ctx=1024,batch=1,hot_mib=8064,cache_mib=5600,validate=0
+spec_config,user_sequences=1,max_verify_positions=24,draft_max=15,draft_vocab=32768,p_min=0.060,pld_mode=0,balanced_residency=1,drafter=oracle,mtp_group=4,packed_verify=1
+alloc_plan,items=1072,stream_GiB=12.76,hot_GiB=7.87,cache_GiB=4.88,pinned_MiB=3786,nvme_per_token_GiB=0.00,ssm_state_MiB=150,kv_MiB=128
+activation_l2_window,bytes=696320,persisting_limit=1622016
+alloc,free_vram_MiB=2032,ram_avail_MiB=16145,swap_used_MiB=8810
+hot_load,items=535,GiB=7.87,seconds=1.2106,gpu_pack=1
+mtp_plan,q4_MiB=910,f32_MiB=0,total_MiB=918
+oracle_cycle,0,draft=15,matched=15,emitted=16,verify_seconds=0.224455,commit_seconds=0.005409,seconds=0.230007,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,0,draft=15,matched=15,emitted=16,verify_seconds=0.2245,mtp_seconds=0.0000,seconds=0.2300,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,1,draft=15,matched=15,emitted=16,verify_seconds=0.225816,commit_seconds=0.004876,seconds=0.230826,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,1,draft=15,matched=15,emitted=16,verify_seconds=0.2258,mtp_seconds=0.0000,seconds=0.2308,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,2,draft=15,matched=15,emitted=16,verify_seconds=0.224182,commit_seconds=0.004181,seconds=0.228494,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,2,draft=15,matched=15,emitted=16,verify_seconds=0.2242,mtp_seconds=0.0000,seconds=0.2285,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,3,draft=15,matched=15,emitted=16,verify_seconds=0.224789,commit_seconds=0.004319,seconds=0.229239,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,3,draft=15,matched=15,emitted=16,verify_seconds=0.2248,mtp_seconds=0.0000,seconds=0.2292,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,4,draft=15,matched=15,emitted=16,verify_seconds=0.225534,commit_seconds=0.004283,seconds=0.229960,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,4,draft=15,matched=15,emitted=16,verify_seconds=0.2255,mtp_seconds=0.0000,seconds=0.2300,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,5,draft=15,matched=15,emitted=16,verify_seconds=0.223855,commit_seconds=0.003865,seconds=0.227868,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,5,draft=15,matched=15,emitted=16,verify_seconds=0.2239,mtp_seconds=0.0000,seconds=0.2279,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,6,draft=15,matched=15,emitted=16,verify_seconds=0.222689,commit_seconds=0.003712,seconds=0.226525,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,6,draft=15,matched=15,emitted=16,verify_seconds=0.2227,mtp_seconds=0.0000,seconds=0.2265,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+oracle_cycle,7,draft=14,matched=14,emitted=15,verify_seconds=0.223406,commit_seconds=0.000000,seconds=0.223526,cold_bytes=5241526272,free_vram_MiB=1018
+spec_cycle,7,draft=14,matched=14,emitted=15,verify_seconds=0.2234,mtp_seconds=0.0000,seconds=0.2235,cold_bytes=5241526272,free_vram_MiB=1018,tree=0,tree_leaves=1
+spec_summary,user_sequences=1,cycles=8,emitted=128,decode_tokens=127,mean_emitted_per_cycle=15.875,draft_acceptance=0.000,mtp_draft_acceptance=0.000,mtp_accepted=0,mtp_draft=0,eagle_draft_acceptance=0.000,eagle_accepted=0,eagle_draft=0,pld_draft_acceptance=0.000,pld_accepted=0,pld_draft=0,mean_verify_s=0.2243,mean_mtp_s=0.0000,mean_repair_s=0.0038,mean_cycle_s=0.2283,tok_per_s=69.528,prefill_s=1.8006,request_tok_per_s=35.289,min_free_vram_MiB=1018
+spec_lossless,expected=128,emitted=128,compared=128,mismatches=0,first_mismatch=0,match=yes

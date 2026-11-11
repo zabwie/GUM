@@ -1,0 +1,5 @@
+cpu_vnni,columns=5120,rows=65536,positions=1,threads=8,bytes=188743680,best_ms=2.379,effective_GBps=79.349,sample=-1.08475
+cpu_vnni,columns=5120,rows=65536,positions=2,threads=8,bytes=188743680,best_ms=2.221,effective_GBps=84.999,sample=-0.60075
+cpu_vnni,columns=5120,rows=65536,positions=4,threads=8,bytes=188743680,best_ms=2.439,effective_GBps=77.384,sample=7.87300
+cpu_vnni,columns=5120,rows=65536,positions=8,threads=8,bytes=188743680,best_ms=5.505,effective_GBps=34.285,sample=5.12025
+cpu_vnni,columns=5120,rows=65536,positions=16,threads=8,bytes=188743680,best_ms=6.818,effective_GBps=27.684,sample=3.97175
