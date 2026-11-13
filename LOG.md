@@ -112,3 +112,16 @@ Run contract: owner template + owner addenda given live before departure.
 - Final baseline (60/60 token-exact, 3 complete sweeps): decode 7.75 / 7.42 / 6.57 tok/s
   and prefill 118 / 121 / 103 tok/s (128/1k/4k buckets); H2D 24.6 GB/s; min free VRAM
   1424-1521 MiB.
+- ~16:40 REOPENED after owner pushback ("6 tok/s is nowhere near enough") with the one
+  lever the plateau analysis under-weighted: the 4.3 GiB KV allocation sized for 196K ctx
+  that ordinary chat never uses. Right-sizing the context budget moves that VRAM into
+  resident weights: cold bytes/pass 10.6 -> ~8.7 GB, verify 0.459 -> 0.323 s.
+- Gate PASSED: ctx 32768 / hot 6400 profile, 40/40 turns token-for-token identical to the
+  196K goldens, 2 full sweeps: decode 10.79 / 9.64 / 7.92 tok/s (+39% / +30% / +21%),
+  prefill unchanged 118/121/103 (compute-bound), min free VRAM 2064-2086 MiB (MORE than
+  baseline's 1424-1521). Live server check: 9.0-9.7 tok/s on real requests.
+- KEPT: GUM_PROFILE in gum_openai_server.py — default "chat" (ctx 32768, hot 6400,
+  cache 8700, gen 32768); GUM_PROFILE=196k restores the E181 long-output profile exactly.
+  Same decoder, same code path; profile choice is configuration, reported as such.
+  This is the stopgap form of GUM Adaptive (grow-on-demand context) — the architecture
+  work that removes the trade-off entirely remains the real fix.
