@@ -1,0 +1,42 @@
+llama_context: n_ctx_seq (512) > n_ctx_train (0) -- possible training context overflow
+{"vram_used_MiB": 756, "vram_total_MiB": 12288}
+prompt short_ferment: declared=128 tokens=115
+prompt short_cathedral: declared=128 tokens=102
+prompt short_chess: declared=128 tokens=106
+prompt short_tides: declared=128 tokens=94
+prompt short_roofgarden: declared=128 tokens=103
+prompt short_darkroom: declared=128 tokens=102
+prompt short_vinyl: declared=128 tokens=96
+prompt mid_fluoride: declared=1k tokens=815
+prompt mid_bakernight: declared=1k tokens=803
+prompt mid_organ: declared=1k tokens=837
+prompt mid_joboffers: declared=1k tokens=865
+prompt mid_driving: declared=1k tokens=817
+prompt mid_molasses: declared=1k tokens=677
+prompt mid_pond: declared=1k tokens=761
+prompt long_canal: declared=4k tokens=3040
+prompt long_containers: declared=4k tokens=3204
+prompt long_lighthouse: declared=4k tokens=3657
+prompt long_archaeology: declared=4k tokens=3155
+prompt long_solar: declared=4k tokens=3113
+prompt long_avalanche: declared=4k tokens=3011
+golden short_ferment: 256 ids, tok_per_s=7.957
+golden short_cathedral: 256 ids, tok_per_s=6.488
+golden short_chess: 256 ids, tok_per_s=7.592
+golden short_tides: 256 ids, tok_per_s=8.753
+golden short_roofgarden: 256 ids, tok_per_s=7.624
+golden short_darkroom: 256 ids, tok_per_s=7.117
+golden short_vinyl: 256 ids, tok_per_s=7.594
+golden mid_fluoride: 256 ids, tok_per_s=7.370
+golden mid_bakernight: 256 ids, tok_per_s=7.349
+golden mid_organ: 256 ids, tok_per_s=7.294
+golden mid_joboffers: 256 ids, tok_per_s=7.590
+golden mid_driving: 256 ids, tok_per_s=6.857
+golden mid_molasses: 256 ids, tok_per_s=6.535
+golden mid_pond: 256 ids, tok_per_s=7.320
+golden long_canal: 256 ids, tok_per_s=6.507
+golden long_containers: 256 ids, tok_per_s=6.190
+golden long_lighthouse: 256 ids, tok_per_s=5.921
+golden long_archaeology: 256 ids, tok_per_s=6.521
+golden long_solar: 256 ids, tok_per_s=7.211
+golden long_avalanche: 256 ids, tok_per_s=6.564

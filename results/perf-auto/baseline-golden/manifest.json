@@ -1,0 +1,165 @@
+{
+  "tag": "baseline-golden",
+  "seed": 20261113,
+  "gen_tokens": 256,
+  "flags": [],
+  "base_flags": [
+    "--session",
+    "1",
+    "--session-tail",
+    "1",
+    "--session-stream",
+    "1",
+    "--prefill-chunks",
+    "8",
+    "--speculate",
+    "32",
+    "--packed-verify",
+    "1",
+    "--pld",
+    "0",
+    "--draft-max",
+    "31",
+    "--ctx",
+    "196608",
+    "--gen-tokens",
+    "131072",
+    "--hot-mib",
+    "3456",
+    "--cache-mib",
+    "10240",
+    "--kv-cache",
+    "turboquant-ttkv",
+    "--show-text",
+    "0",
+    "--measure-h2d",
+    "1"
+  ],
+  "gpu": {
+    "vram_used_MiB": 756,
+    "vram_total_MiB": 12288
+  },
+  "prompts": [
+    {
+      "bucket": "128",
+      "name": "short_ferment",
+      "declared": "128",
+      "prompt_tokens": 115
+    },
+    {
+      "bucket": "128",
+      "name": "short_cathedral",
+      "declared": "128",
+      "prompt_tokens": 102
+    },
+    {
+      "bucket": "128",
+      "name": "short_chess",
+      "declared": "128",
+      "prompt_tokens": 106
+    },
+    {
+      "bucket": "128",
+      "name": "short_tides",
+      "declared": "128",
+      "prompt_tokens": 94
+    },
+    {
+      "bucket": "128",
+      "name": "short_roofgarden",
+      "declared": "128",
+      "prompt_tokens": 103
+    },
+    {
+      "bucket": "128",
+      "name": "short_darkroom",
+      "declared": "128",
+      "prompt_tokens": 102
+    },
+    {
+      "bucket": "128",
+      "name": "short_vinyl",
+      "declared": "128",
+      "prompt_tokens": 96
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_fluoride",
+      "declared": "1k",
+      "prompt_tokens": 815
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_bakernight",
+      "declared": "1k",
+      "prompt_tokens": 803
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_organ",
+      "declared": "1k",
+      "prompt_tokens": 837
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_joboffers",
+      "declared": "1k",
+      "prompt_tokens": 865
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_driving",
+      "declared": "1k",
+      "prompt_tokens": 817
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_molasses",
+      "declared": "1k",
+      "prompt_tokens": 677
+    },
+    {
+      "bucket": "1k",
+      "name": "mid_pond",
+      "declared": "1k",
+      "prompt_tokens": 761
+    },
+    {
+      "bucket": "4k",
+      "name": "long_canal",
+      "declared": "4k",
+      "prompt_tokens": 3040
+    },
+    {
+      "bucket": "4k",
+      "name": "long_containers",
+      "declared": "4k",
+      "prompt_tokens": 3204
+    },
+    {
+      "bucket": "4k",
+      "name": "long_lighthouse",
+      "declared": "4k",
+      "prompt_tokens": 3657
+    },
+    {
+      "bucket": "4k",
+      "name": "long_archaeology",
+      "declared": "4k",
+      "prompt_tokens": 3155
+    },
+    {
+      "bucket": "4k",
+      "name": "long_solar",
+      "declared": "4k",
+      "prompt_tokens": 3113
+    },
+    {
+      "bucket": "4k",
+      "name": "long_avalanche",
+      "declared": "4k",
+      "prompt_tokens": 3011
+    }
+  ],
+  "decoder_sha": "9597433564ec1cca"
+}

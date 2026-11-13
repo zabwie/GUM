@@ -22,6 +22,7 @@ Record every deviation in LOG.md.
 
 from __future__ import annotations
 
+from collections import deque
 import argparse
 import hashlib
 import json
@@ -101,7 +102,9 @@ def run_turn(proc: subprocess.Popen, ids: list[int], log: "TextIO") -> dict:
     cycles = 0
     cold_bytes = 0
     cold_h2d_ms = 0.0
+    log_tail: deque[str] = deque(maxlen=40)
     for line in proc.stdout:
+        log_tail.append(line)
         log.write(line)
         if line.startswith("spec_cycle,"):
             cycles += 1
@@ -117,7 +120,8 @@ def run_turn(proc: subprocess.Popen, ids: list[int], log: "TextIO") -> dict:
             break
     wall = time.monotonic() - started
     if out_ids is None or not summary:
-        raise RuntimeError("decoder did not finish the turn; see log")
+        tail_text = "".join(log_tail)[-4000:] if log_tail else "(no tail)"
+        raise RuntimeError(f"decoder did not finish the turn; log tail:\n{tail_text}")
     return {"out_ids": out_ids, "summary": summary, "turn": turn, "wall_s": round(wall, 4),
             "cycles": cycles, "cold_bytes": cold_bytes, "cold_h2d_ms": round(cold_h2d_ms, 1),
             "prompt_tokens": len(ids)}
@@ -158,15 +162,16 @@ def main() -> None:
         return tok.tokenize(rendered.encode("utf-8"), add_bos=False, special=True)
 
     prepared = []
+    bucket_map = {"short": "128", "mid": "1k", "long": "4k"}
     for bucket, name, text in PROMPTS:
         ids = render(text)
         prepared.append({"bucket": token_ok(len(ids)), "name": name, "ids": ids,
-                         "declared": bucket, "prompt_tokens": len(ids)})
+                         "declared": bucket_map[bucket], "prompt_tokens": len(ids)})
         (dest / f"prompt.{name}.ids").write_text(",".join(map(str, ids)) + "\n")
     warm_ids = render(WARMUP)
 
     selected = [p for p in prepared if p["declared"] in args.lengths.split(",")]
-    if not selected:
+    if not selected and not args.golden:
         sys.exit("no prompts selected")
 
     manifest = {"tag": args.tag, "seed": SEED, "gen_tokens": GEN_TOKENS,
@@ -205,8 +210,8 @@ def main() -> None:
         goldens[p["name"]] = [int(x) for x in g.read_text().split()]
 
     sweep_rows = []
-    for sweep in range(args.sweeps):
-        log = (dest / f"sweep{sweep}.log").open("w")
+    def one_sweep(sweep: int, append: bool) -> None:
+        log = (dest / f"sweep{sweep}.log").open("a" if append else "w")
         proc = launch(flags, dest / f"command_sweep{sweep}.txt")
         try:
             run_turn(proc, warm_ids, log)
@@ -246,6 +251,17 @@ def main() -> None:
             except Exception:
                 proc.kill()
         log.close()
+
+    for sweep in range(args.sweeps):
+        for attempt in range(3):
+            try:
+                one_sweep(sweep, append=attempt > 0)
+                break
+            except RuntimeError as error:
+                print(f"RETRY sweep {sweep} attempt {attempt}: {str(error)[-600:]}", flush=True)
+                if attempt == 2:
+                    raise
+                time.sleep(120)  # kernel: settle swap before relaunch
 
     (dest / "rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sweep_rows))
     # Aggregate: median and spread per bucket per metric across sweeps and prompts.
