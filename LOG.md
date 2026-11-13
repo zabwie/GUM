@@ -141,3 +141,20 @@ Run contract: owner template + owner addenda given live before departure.
   env var away. Server restarted on lean; live check OK (total VRAM 6.57 GiB incl desktop).
 - Operational note: lean needs cache-mib >= staged bytes (15.1 GB - hot) or the remainder
   goes to the per-token NVMe tier (1.14 GiB/token — catastrophic). alloc_plan line reports it.
+- ~17:30 ROOT GRANTED (owner-provided; used via printf | sudo -S per owner instruction).
+  Deployed, in order:
+  1. FULL-PIN REGIME (source patch): when memlock allows, allocate ONE pinned host cache
+     instead of pinned+unpinned duplicates (eliminates 2x RAM and the per-pass CPU memcpy
+     of the unpinned fraction). Measured: lean 7.19 tok/s vs 6.70 (+7.4%), chat 9.38 vs
+     9.17 (+2.3%) on probe conditions; consistent with link-bound analysis (CPU memcpy no
+     longer contends for DRAM bandwidth).
+  2. systemd unit gum-openai.service (enabled): LimitMEMLOCK=infinity, CPUAffinity 0-3,
+     OOMScoreAdjust -200, Restart=on-failure. Decoder verified running with memlock
+     unlimited; live chat OK.
+  3. /etc/security/limits.d/90-gum-memlock.conf: zabwie soft/hard memlock unlimited.
+  4. vm.swappiness 60 -> 10 (persisted /etc/sysctl.d/90-gum.conf); stale swap flushed
+     (4 GiB -> 0).
+  5. nvidia-smi -pm 1 (persistence mode).
+  start.sh updated: uses the systemd API when present, falls back to in-process API
+  otherwise; dsh UI launch unchanged. NOT done (needs reboot/owner call): pcie_aspm=off.
+  Password handling: printf|sudo -S only; never written to files or logs.

@@ -1913,8 +1913,14 @@ int main(int argc, char** argv) {
     uint8_t* stage[kStage]; for (auto& s : stage) check(cudaHostAlloc((void**)&s, kStageBytes + 4096, cudaHostAllocPortable), "stage");
     uint8_t* staged_cache = nullptr; uint8_t* pinned_cache = nullptr;
     if (staged_used) {
-        if (posix_memalign((void**)&staged_cache, 4096, staged_used)) { fprintf(stderr, "cache alloc\n"); return 1; }
-        if (pin_bytes) check(cudaHostAlloc((void**)&pinned_cache, pin_bytes, cudaHostAllocPortable), "pinned cache");
+        if (pin_bytes >= staged_used) {
+            // full-pin regime (memlock allows): one pinned copy, no unpinned duplicate.
+            // Every kStaged item is in_pin, so staged_cache is never dereferenced.
+            check(cudaHostAlloc((void**)&pinned_cache, staged_used, cudaHostAllocPortable), "pinned cache");
+        } else {
+            if (posix_memalign((void**)&staged_cache, 4096, staged_used)) { fprintf(stderr, "cache alloc\n"); return 1; }
+            if (pin_bytes) check(cudaHostAlloc((void**)&pinned_cache, pin_bytes, cudaHostAllocPortable), "pinned cache");
+        }
     }
     std::vector<char> cached(items.size(), 0);
     int fd = open(model.c_str(), O_RDONLY | (o_direct ? O_DIRECT : 0)); if (fd < 0) { perror("open o_direct"); return 1; }
