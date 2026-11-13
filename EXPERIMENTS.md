@@ -2563,3 +2563,28 @@ saves. **A6 is closed negative — the persisting window lever on this 3 MiB par
 not pay at any width.** The prefill wall (7 TFLOP/s effective) needs a kernel-level
 attack (the k_mat_q4_shared family), not cache policy. Flag kept, default off; layout
 reorder retained (strictly cleaner, exact-gated). Raw: results/e190-*.
+
+## E191 — CPU second-stream feasibility gate: PASSED at 4× (2026-11-13)
+
+External reviewer challenged E188's conclusion: 4.3 GiB/s is llama.cpp's kernel, not
+the hardware (0.54 TFLOP/s vs a multi-TOPS AVX ceiling; pp32 = pp512 suggests
+unamortized nibble unpacking). Built the decisive microbench
+(benchmarks/microbench/e191-cpu-vnni/): one ffn_down-shaped tensor (5120×17408,
+32 verify rows), Q4_0 weights × int8 activations, unpack-once-apply-to-32-rows.
+Three numeric bugs found and fixed during validation (maddubs operand order, missing
+horizontal-lane sums, and a bias constant: wq = q+8 requires a 16·Σa correction, not
+8·Σa — all variants now agree with the scalar reference to float rounding).
+
+Measured on 8 physical P-cores (taskset 0-7), 20 reps:
+- **AVX-VNNI dpbusd: 3.96 TFLOP/s = 32.4 GiB/s of weights** (verified-correct)
+- AVX2 maddubs: 3.71 TFLOP/s = 30.4 GiB/s
+- scalar floor: 1.01; llama.cpp baseline: 0.54 TFLOP/s = 4.3 GiB/s (E188)
+
+The gate (≥1 TFLOP/s) passes at **4×**. The CPU processes weights ~40% FASTER than
+the GPU's 23 GiB/s DMA stream at verify width. Balanced-split ceiling updates:
+f ≈ 58% of weight bytes to CPU → cycle floor ≈ 0.25 s vs 0.59 s → **+58% with perfect
+per-layer overlap; realistic +30–45%** after integration costs (per-layer sync,
+activation exchange, RAM contention: CPU 32 GiB/s + DMA 23 GiB/s vs DDR5-5600 real
+~65 GB/s — tight but within budget). The batch-1 exclusion and the "not worth it"
+conclusion are both overturned: CPU offload excluded by owner directive only, and
+the reviewer's 2×→+35% estimate was itself conservative. Raw: results/e191-*.
