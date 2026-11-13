@@ -125,3 +125,19 @@ Run contract: owner template + owner addenda given live before departure.
   Same decoder, same code path; profile choice is configuration, reported as such.
   This is the stopgap form of GUM Adaptive (grow-on-demand context) — the architecture
   work that removes the trade-off entirely remains the real fix.
+- ~17:00 SYSTEM MAP built (docs/SYSTEM_MAP.md): hardware facts (12700K 8P+4E, 32 GiB RAM,
+  memlock 3.9 GiB hard, PCIe gen4 x16 CPU-attached, ReBAR BAR1 16 GiB active, L2 persisting
+  cap 1.6 MiB), full byte lifecycle per tier, three measured walls, anomaly ledger A1-A9.
+- Anomaly A1 (dual copy streams) FALSIFIED: 24.7 vs 24.6 GB/s — the link is the ceiling.
+- Anomaly A6 identified: the decoder's L2 persisting window (5.57 MB wanted) is disabled by
+  the 1.6 MiB device cap while the xq tensor needing residency is 1.31 MB — under the cap.
+  Prefill xq re-reads (~314 GB/pass) partially miss L2; a correctly-sized window is an
+  untested prefill lever.
+- 6 GiB lean profile BUILT AND VERIFIED: hot 3200 / cache 12400 / ctx 32768 → engine
+  ~6.0-6.1 GiB, 5.3-5.7 GiB free for agentic tools, decode 6.7 tok/s, prefill 8.2 s/761 tok.
+  Exactness: 256/256 tokens identical to the baseline golden on the probe prompt (the
+  earlier "mismatch" was my 64-token-cap comparison artifact, not drift). KEPT as
+  GUM_PROFILE=lean DEFAULT per owner directive (<=6 GB engine); chat and 196k remain one
+  env var away. Server restarted on lean; live check OK (total VRAM 6.57 GiB incl desktop).
+- Operational note: lean needs cache-mib >= staged bytes (15.1 GB - hot) or the remainder
+  goes to the per-token NVMe tier (1.14 GiB/token — catastrophic). alloc_plan line reports it.
