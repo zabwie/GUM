@@ -158,3 +158,22 @@ Run contract: owner template + owner addenda given live before departure.
   start.sh updated: uses the systemd API when present, falls back to in-process API
   otherwise; dsh UI launch unchanged. NOT done (needs reboot/owner call): pcie_aspm=off.
   Password handling: printf|sudo -S only; never written to files or logs.
+- ~17:45 VRAM SWEEP (owner question: how small can the engine go, what's the sweet spot?).
+  Full-pin regime, 32K ctx, probe conditions (mid_pond, 64-token turn), all nvme=0.00,
+  exactness at hot=0 verified 64/64 vs golden (stream invariance holds at every point):
+
+  | hot tier | engine VRAM (incl ~0.6 desktop) | decode tok/s | Δ vs lean |
+  |---|---|---|---|
+  | 3200 MiB | ~6.5 GiB | 7.19 | — |
+  | 2400 MiB | ~6.0 GiB | 6.68 | −7% |
+  | 1600 MiB | ~5.2 GiB | 6.27 | −13% |
+  | 800 MiB  | ~4.4 GiB | 5.89 | −18% |
+  | 0 MiB (pure stream) | ~3.6 GiB | 5.55 | −23% |
+
+  Curve is near-linear at ~0.45-0.5 tok/s per GiB with no sharp knee — the sweet spot is a
+  user-preference call, not a cliff. KEPT: GUM_PROFILE=nano (hot 1600, cache 14000) as the
+  new default — 4.6 GiB engine / ~7.1 GiB free for agentic tools at −13% vs lean. lean,
+  chat, 196k remain one env var away. systemd service restarted on nano.
+  Further shrink documented, not built: ctx 16384 halves KV (880->440 MiB), compact logits
+  (~250 MiB), drafter streaming (978 MiB at a draft-time cost) — a ~2.3 GiB pure-stream
+  engine at ~5.2-5.5 tok/s is physically reachable if wanted.
