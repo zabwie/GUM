@@ -2433,3 +2433,16 @@ Enabled via `/etc/systemd/system/gum-openai.service.d/adaptive.conf`
 scripts/verify_stream.sh expects throughput from the E182 law given the live hot tier.
 
 Raw: results/e183-adaptive-turn2.json; journalctl gum-openai.service adaptive, lines.
+
+## E184 — Data-path efficiency audit (stream era, 2026-11-13)
+
+Direct decoder trace at hot=0, production flags (results/e184-datapath-audit-20261113/):
+cold payload is **13.70 GB/cycle, each byte fetched exactly once** (target 14.4 GB minus
+resident MTP head); steady-state path is staged-cache → single pinned DMA, no bounce
+copies under full-pin. Live effective rate **22.95 GB/s = 93% of the 24.7 GB/s DMA
+ceiling** (the 7% residue is kernel-stretch — kernels execute while weight tiles land).
+The link itself delivers 78% of gen4 spec; that gap is protocol overhead, config-closed
+(iommu=pt, dual-stream and zero-copy falsified, compression at entropy bound). Remaining
+slack, sized: ~16 ms/cycle serial draft+repair tail with the link idle (prefetch-during-
+draft ≈ +4–5%) and the 7% stretch (deeper staging prefetch queue). Combined realistic
+recovery ~6–8%; the link constant is otherwise closed.
