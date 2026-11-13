@@ -1,4 +1,31 @@
-# GUM — Session Handoff (2026-11-11, post-E165)
+# GUM — Session Handoff (2026-11-13, **pure-streaming era**)
+
+> **STOP — READ THIS FIRST IF YOU ARE AN AI OR HUMAN PICKING UP THIS REPO.**
+> The installed configuration is **pure streaming** (`GUM_PROFILE=stream`): hot weight tier
+> **0 MiB**, every weight byte streams from pinned RAM over PCIe each pass. This is the
+> owner's chosen daily driver and the baseline for ALL current work.
+>
+> **Self-check before quoting any tok/s:** run `curl -s http://127.0.0.1:8765/health` —
+> `profile` must say `stream`. Measured reference points (frozen suite, mid_pond probe):
+>
+> | profile | engine VRAM | desktop free | decode tok/s | claim check |
+> |---|---|---|---|---|
+> | **stream** (default) | ~3.0 GiB | ~9 GiB | **~5.5** | if you measure 5–6, you are correct |
+> | nano | ~4.6 GiB | ~7.1 GiB | 6.27 | |
+> | lean | ~6.1 GiB | ~5.3 GiB | 7.19 | |
+> | chat | ~10.2 GiB | ~2.1 GiB | 10.79 | |
+> | 196k (E181 long-output) | ~10.4 GiB | ~1.5 GiB | workload-dependent | |
+>
+> **Historical numbers (17–24 tok/s, E149/E177 era) were DIFFERENT configurations**
+> (8 GiB hot tier, 2K ctx bench contexts). If you measure 2–6 tok/s while believing you
+> should see 17+, you are on a mismatched profile — check `--hot-mib` and `--ctx` before
+> "diagnosing a regression". The 21→5 tok/s incident happened this way.
+>
+> Measured walls (do not re-derive, see [docs/SYSTEM_MAP.md](docs/SYSTEM_MAP.md)):
+> DMA 24.7 GB/s (link, triple-measured), acceptance chain p₁ 0.79 → emitted/cycle 3.7
+> (= p₁/(1−p₁), closes exactly), prefill ~7 TFLOP/s effective. Anomaly ledger A1–A9 in
+> SYSTEM_MAP; next experiments: A8 shortlist coverage, A6 L2 persisting window (1.31 MB
+> vs 1.6 MiB cap), A7 drafter-KV audit.
 
 Repo: `/home/zabwie/gpu-unified-memory-research` (git; latest see `git log -1`).
 Read [AGENT.md](AGENT.md) first for the operating mentality. **[docs/RESEARCH_FUNNEL.md](docs/RESEARCH_FUNNEL.md)
@@ -7,6 +34,35 @@ enters through it. [docs/RESEARCH_PLAN.md](docs/RESEARCH_PLAN.md) is the strateg
 [EXPERIMENTS.md](EXPERIMENTS.md) the evidence; this file is machine state and immediate next moves.
 Superseded status sections (E043–E149 era) live in [docs/archive/HANDOFF_HISTORY.md](docs/archive/HANDOFF_HISTORY.md).
 
+## Historical context (pre-streaming era, for orientation only)
+
+E177 measures unhinted native MTP on two frozen task suites. The 8064 MiB
+resident current-source baseline delivered 17.56 and 18.33 committed decode
+tok/s, including drafting and state repair. The merged final prefill pass
+reduces first-token latency and preserves the exact output stream. At the
+measured cycle cost, reaching 40 decode tok/s requires about 10–11 committed
+tokens per weight pass against 4.73–4.93 observed. The raw logs, Nsight
+trace, reproduction commands and rejected draft changes are in the
+[E177 ledger](results/e177-general-20261112/README.md).
+
+The installed decoder supports `--prefill-chunks 8` with the E171 packed
+MTP session settings. It processes up to 256 prompt IDs per target weight
+pass. Use `--session-prefix-tokens N` when separate requests share a
+known 32-aligned initial context. The decoder checks those IDs before
+reusing the saved recurrent state and live KV.
+
+E175 lets a client append draft tokens to a packed native MTP request with
+`--session-draft-hints 1`. The target can verify them during the final
+prompt pass. On the E170 fixture follow-up, a draft constructed from tool
+output reduced two prefill and five decode passes to a single target pass.
+This path serves structured requests with a usable candidate. The ordinary
+MTP generation rate remains the relevant baseline on open-ended requests.
+
+See [E173](EXPERIMENTS.md#e173--wider-exact-prefill) and
+[E174](EXPERIMENTS.md#e174--reuse-shared-context-across-separate-requests) and
+[E175](EXPERIMENTS.md#e175--verify-tool-drafts-during-prefill)
+for the current launch settings and exact-gated timing records.
+
 ## Mission
 
 GUM (GPU Unified Memory): system RAM as a designed tier of VRAM for big-model inference on
@@ -14,19 +70,28 @@ small GPUs — focused on **single-user tok/s**, losslessly. Owner directives: n
 open source, system changes OK, ambitious (40 tok/s), CPU layer offload excluded, 22 GB card
 possibly coming (don't optimize for it).
 
-## Current baseline (this is "now")
+## E167 baseline for legacy workload comparisons
 
 | Workload | Now |
 |---|---|
-| Normal chat | ~17–18 tok/s |
-| Agent-style prompts (repetitive text) | ~24 tok/s |
-| Ceiling with all remaining validated levers (better residency, tree tuning, sync trim) | ~20–25 chat / ~27 agent |
+| Normal chat | ~16–17 tok/s (chat-neutral vs E149 by same-state control) |
+| Agent-style prompts (repetitive text) | ~21–23 tok/s |
+| Verbatim-repeat / long exact spans | **36.9 tok/s measured, lossless (E167 deep-γ)** |
+| Ceiling with all remaining validated levers | deep-γ extends the agent ceiling past ~27 on exact spans; ~20–25 chat |
 
-Measured reference points behind those numbers: the installed six-prompt exact suite runs
-16.99–23.87 generated tok/s (agent trace 23.87, chats 16.99–18.58; all 1,024 token IDs exact,
-E149). Dense decode is 3.59–3.73 tok/s. llama.cpp's own over-VRAM mode on this model/hardware:
-0.63 tok/s (1.04 with its MTP head). Everything is lossless — greedy token IDs match the exact
-Qwen3.8-27B Q4_0 checkpoint.
+E167 (deep-γ PLD) is installed: packed default γ=64 with an adaptive direct-chain
+override (chains > tree budget verify as one linear pass, gated on direct-chain
+acceptance ≥0.75, bounded cold probe). `--speculate 24 --packed-verify 1` preserves
+the E149 configuration byte-for-byte. All six exact-gate prompts lossless; prefill is
+pinned at 32 rows (64-row prefill flips near-tie argmaxes). `draft_hist` in every
+spec summary logs the per-cycle draft-length distribution. Machine-state caveat:
+desktop VRAM pressure inflated all E167 pass times ~5–15 ms at both γ=24 and γ=64 —
+re-baseline absolute tok/s on a calm desktop. Measured reference points: six-prompt
+exact suite E167 runs 15.78–20.86 tok/s lossless (see EXPERIMENTS.md E167 for the
+E149 comparison and controls); dense decode 3.59–3.73 tok/s; llama.cpp over-VRAM mode
+0.63 tok/s. Background: E167b capture pipeline (`scripts/capture_when_idle.sh`,
+hourly idle-gated automation, `touch capture/STOP` to halt) is accumulating
+EAGLE-scale drafter training data; pilot metrics in EXPERIMENTS.md E167b.
 
 ## State after E165 — C-track paused (owner, 2026-11-11)
 

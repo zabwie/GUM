@@ -247,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._json(200, {"status": "ok", "model": MODEL_ID,
+            self._json(200, {"status": "ok", "model": MODEL_ID, "profile": PROFILE,
                              "loaded": SESSION.proc is not None and SESSION.proc.poll() is None,
                              "context": CTX, "max_tokens": GEN_TOKENS, "kv_cache": KV_CACHE})
             return

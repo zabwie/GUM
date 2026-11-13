@@ -86,7 +86,7 @@ struct DraftOptions {
 
 template<class Propose, class Lookup>
 DraftTree build_draft_tree(long eos, int limit, int max_depth, double cutoff, int group_width,
-                           Propose propose, Lookup lookup) {
+                           Propose propose, Lookup lookup, int model_budget = -1) {
     struct Proposal {
         double score;
         long token;
@@ -102,6 +102,10 @@ DraftTree build_draft_tree(long eos, int limit, int max_depth, double cutoff, in
     };
     DraftTree result;
     if (!limit || !max_depth) return result;
+    // model_budget caps MODEL-EXPANDED nodes (each costs a drafter forward);
+    // history-guided nodes are free and may use the full `limit` (E167 deep-gamma).
+    if (model_budget < 0) model_budget = limit;
+    int model_nodes = 0;
     std::priority_queue<Proposal> pending;
     std::vector<std::vector<int>> paths{{0}};
     std::vector<double> scores{0.0};
@@ -118,7 +122,7 @@ DraftTree build_draft_tree(long eos, int limit, int max_depth, double cutoff, in
                 const auto& choice = options[row].choices[i];
                 if (!(choice.probability > 0.0 && choice.probability >= cutoff) || choice.token == eos) continue;
                 const double score = scores[node] + log(choice.probability * 0.9);
-                const auto match = i == 0 ? lookup(prefix, choice.token, max_depth - depth) : std::vector<long>{};
+                const auto match = i == 0 ? lookup(prefix, choice.token, limit - depth) : std::vector<long>{};
                 if (match.size() >= 4) {
                     pending.push({score, choice.token, node, {match.begin() + 1, match.end()}, true, false});
                 } else {
@@ -134,7 +138,7 @@ DraftTree build_draft_tree(long eos, int limit, int max_depth, double cutoff, in
         while (!pending.empty() && (int)result.tokens.size() < limit && count < group_width) {
             const Proposal next = pending.top();
             const int depth = (int)paths[next.parent].size();
-            const bool expandable = !next.use_history && depth < max_depth;
+            const bool expandable = !next.use_history && depth < max_depth && model_nodes < model_budget;
             // A group contains independent candidates whose parents have
             // already been evaluated. History continuations need no model call.
             if (count && !expandable) break;
@@ -146,7 +150,8 @@ DraftTree build_draft_tree(long eos, int limit, int max_depth, double cutoff, in
             result.tokens.push_back(next.token);
             result.from_history.push_back(next.from_history);
             scores.push_back(next.score);
-            if (next.use_history && depth < max_depth && !next.continuation.empty() && next.continuation.front() != eos)
+            if (!next.use_history) ++model_nodes;
+            if (next.use_history && depth < limit && !next.continuation.empty() && next.continuation.front() != eos)
                 pending.push({next.score + log(0.86), next.continuation.front(), node,
                     {next.continuation.begin() + 1, next.continuation.end()}, true, true});
             if (!expandable) break;

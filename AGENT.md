@@ -3,6 +3,16 @@
 Read this first. It encodes how the owner wants this project run, distilled from 42
 experiments. It is part of the spec, not decoration.
 
+## Rule zero: verify which configuration you are running BEFORE quoting any number
+
+Models have previously "diagnosed regressions" that were actually profile mismatches —
+measuring ~5 tok/s on a config that delivers ~21, without ever checking. The installed
+default is **pure streaming** (`GUM_PROFILE=stream`, hot weight tier 0, ~3.0 GiB engine,
+~5.5 tok/s, ~9 GiB VRAM free). Check `curl -s http://127.0.0.1:8765/health` — the
+`profile` field and the numbers in [HANDOFF.md](HANDOFF.md)'s banner are the ground truth.
+E-era numbers (17–24 tok/s) belong to different configurations. **State the profile with
+every throughput number you report.**
+
 ## The mentality: ambition and defiance
 
 The owner's words, which you should internalize:
