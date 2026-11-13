@@ -1392,6 +1392,7 @@ int main(int argc, char** argv) {
     bool explicit_p_min = false, explicit_draft_max = false, explicit_packed = false;
     int mtp_tree_mode = 1, mtp_group = kMaxDraftGroup, packed_verify = 0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0, pld_enabled = 2;
+    int l2_win_flag = 0;   // E190/A6: per-tensor persisting window — measured NEGATIVE, off by default
     long chain_min = 0;   // E168: minimum direct-chain length for the deep override (0 = mtp_limit)
     std::string feed_ids_s, oracle_ids_path, parallel_path;
     bool resident_output = false, compress_packed = false, session = false, session_tail = false;
@@ -1434,6 +1435,7 @@ int main(int argc, char** argv) {
         else if (k == "--session-stream") session_stream = atoi(v) != 0;
         else if (k == "--fuse-prefill-tail") fuse_prefill_tail = atoi(v);
         else if (k == "--measure-h2d") measure_h2d = atoi(v) != 0;
+        else if (k == "--l2-win") l2_win_flag = atoi(v) != 0;
         else if (k == "--kv-cache") kv_mode = v;
         else if (k == "--kv-recent") kv_recent = atol(v);
         else if (k == "--prefill-chunks") prefill_chunks = atol(v);
@@ -1865,10 +1867,13 @@ int main(int argc, char** argv) {
     }
     const uint64_t xq_bytes = (uint64_t)B * max_K;
     const uint64_t qmeta_bytes = (uint64_t)B * max_K / 32 * sizeof(int2);
-    // Keep the decode working set contiguous even with larger prefill scratch.
-    const uint64_t meta_off = B > standard_rows ? 0 : align_up(xq_bytes, 256);
-    const uint64_t quant_off = B > standard_rows ? align_up(qmeta_bytes, 256) : 0;
-    const uint64_t activation_bytes = std::max(meta_off + qmeta_bytes, quant_off + xq_bytes);
+    // E190/A6: keep [xq][xmeta] in BOTH modes so a per-tensor persisting window can
+    // span a tensor's whole quantized slice contiguously from the arena base. The old
+    // prefill layout put xmeta first, which forced the E052 window to span the gap and
+    // blew the persisting cap — the window then stayed disabled at all widths.
+    const uint64_t meta_off = align_up(xq_bytes, 256);
+    const uint64_t quant_off = 0;
+    const uint64_t activation_bytes = meta_off + qmeta_bytes;
     const uint64_t decode_activation_bytes = B > standard_rows
         ? quant_off + (uint64_t)standard_rows * max_K : activation_bytes;
     uint8_t* activation_buf = nullptr;
@@ -1950,20 +1955,15 @@ int main(int argc, char** argv) {
     // covers all three arrays. Skip cleanly if the configured batch exceeds the device's
     // persisting-cache window.
     cudaDeviceProp l2prop{}; check(cudaGetDeviceProperties(&l2prop, 0), "L2 cache properties");
-    if (l2prop.persistingL2CacheMaxSize > 0 && decode_activation_bytes <= (uint64_t)l2prop.persistingL2CacheMaxSize) {
+    // E190/A6: the persisting window is set PER TENSOR inside mat() (span = that
+    // tensor's xq+xmeta slice, hitRatio scaled to the cap when it overflows). This
+    // replaces the E052 whole-arena window, which never engaged at prefill widths.
+    bool l2_win = l2_win_flag && l2prop.persistingL2CacheMaxSize > 0;
+    if (l2_win) {
         check(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, (size_t)l2prop.persistingL2CacheMaxSize), "persisting L2 limit");
-        cudaStreamAttrValue window{};
-        window.accessPolicyWindow.base_ptr = activation_buf;
-        window.accessPolicyWindow.num_bytes = (size_t)decode_activation_bytes;
-        window.accessPolicyWindow.hitRatio = 1.0f;
-        window.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
-        window.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-        check(cudaStreamSetAttribute(stc, cudaStreamAttributeAccessPolicyWindow, &window), "activation L2 window");
-        printf("activation_l2_window,bytes=%llu,persisting_limit=%d\n",
-               (unsigned long long)decode_activation_bytes, l2prop.persistingL2CacheMaxSize);
+        printf("activation_l2_window,mode=per-tensor,persisting_limit=%d\n", l2prop.persistingL2CacheMaxSize);
     } else {
-        printf("activation_l2_window,disabled=capacity,bytes=%llu,persisting_limit=%d\n",
-               (unsigned long long)activation_bytes, l2prop.persistingL2CacheMaxSize);
+        printf("activation_l2_window,disabled=%s\n", l2_win_flag ? "device" : "flag");
     }
     cudaEvent_t ev[kStage], evc[kSlots], h2d_start[kStage];
     for (auto& e : ev) check(cudaEventCreate(&e), "event");
@@ -2482,6 +2482,21 @@ int main(int argc, char** argv) {
             ystride = m.by_name.at(tn)->ne[1];
             if (!reuse || !reuse_quant)
                 k_quant_x<<<dim3((unsigned)((nb * B + 127) / 128)), 128, 0, stc>>>(xin, nb * B, xq, xmeta);
+            if (l2_win && !reuse) {
+                // E190/A6: persist this tensor's quantized-activation slice for the
+                // duration of its GEMV tiles. Weight bytes stream through the remaining
+                // L2 (missProp=Streaming). Overflowing slices scale hitRatio to the cap
+                // (partial persistence of e.g. ffn_down's 5 MB slice at 256 rows).
+                const uint64_t span = (uint64_t)B * K + (uint64_t)B * K / 32 * sizeof(int2);
+                cudaStreamAttrValue w{};
+                w.accessPolicyWindow.base_ptr = activation_buf;
+                w.accessPolicyWindow.num_bytes = (size_t)std::min<uint64_t>(span, activation_bytes);
+                w.accessPolicyWindow.hitRatio = std::min(1.0f,
+                    (float)l2prop.persistingL2CacheMaxSize / (float)std::max<uint64_t>(span, 1));
+                w.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+                w.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+                check(cudaStreamSetAttribute(stc, cudaStreamAttributeAccessPolicyWindow, &w), "per-tensor L2 window");
+            }
             for (int idx : tensor_items.at(tn)) {
                 Item& it = items[idx];
                 auto multiply = [&](const uint8_t* weights) {

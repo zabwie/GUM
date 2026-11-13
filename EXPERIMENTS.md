@@ -2545,3 +2545,21 @@ overhead + the shared 715 MiB head. Reclaimable without quality loss: **tens of 
 (drafter KV→FP16, misc) ≈ +1–2%, not +7%**. The +7% quick pair promised earlier does
 not exist — withdrawn. The VRAM-neutral, quality-neutral levers that remain are the
 capture-fed MTP finetune (emitted/cycle) and the A6 prefill L2 window.
+
+## E190 — A6 closed: per-tensor L2 persisting window is a measured negative (2026-11-13)
+
+Implemented the full A6 proposal: arena reordered so each tensor's xq+xmeta slice is
+contiguous from base (the old prefill layout [xmeta][xq] forced the E052 window to span
+the gap and never engage), and mat() now sets a per-tensor persisting window (span =
+that tensor's quantized slice; hitRatio scaled to the 1.55 MiB cap when it overflows,
+e.g. ffn_down's 4.45 MB at 256 rows → 0.29). Flag-gated (`--l2-win`), one binary.
+
+Result on a 2,387-token prefill (hot=0, twice each): prefill 23.75/24.32 s (off) vs
+**24.87/24.92 s (on, +4.5%)**; decode cycle unchanged (noise). Mechanism: the GEMV
+kernels already stage xq through shared memory per block, so xq re-reads were largely
+L2 hits; carving 1.55 MiB of persisting set-aside out of the 3 MiB L2 halves the
+streaming working set and the hitRatio-thrash on overflowing slices costs more than it
+saves. **A6 is closed negative — the persisting window lever on this 3 MiB part does
+not pay at any width.** The prefill wall (7 TFLOP/s effective) needs a kernel-level
+attack (the k_mat_q4_shared family), not cache policy. Flag kept, default off; layout
+reorder retained (strictly cleaner, exact-gated). Raw: results/e190-*.
