@@ -35,7 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <functional>
+#include <iostream>
 #include <map>
 #include <string>
 #include <thread>
@@ -114,10 +114,10 @@ static bool parse_gguf(const char* path, GgufKV& kv, std::vector<GTensor>& tenso
     for (uint64_t i = 0; i < nkvs; ++i) {
         std::string k = read_str(f); if (k.empty()) { fclose(f); return false; }
         uint32_t vt; if (fread(&vt, 4, 1, f) != 1) { fclose(f); return false; }
-        auto rd_u32 = [&]() { uint32_t v = 0; fread(&v, 4, 1, f); return (long)v; };
-        auto rd_i64 = [&]() { int64_t v = 0; fread(&v, 8, 1, f); return (long)v; };
-        auto rd_f32 = [&]() { float v = 0; fread(&v, 4, 1, f); return (double)v; };
-        auto rd_u64 = [&]() { uint64_t v = 0; fread(&v, 8, 1, f); return (long)v; };
+        auto rd_u32 = [&]() { uint32_t v = 0; if (fread(&v, 4, 1, f) != 1) return 0L; return (long)v; };
+        auto rd_i64 = [&]() { int64_t v = 0; if (fread(&v, 8, 1, f) != 1) return 0L; return (long)v; };
+        auto rd_f32 = [&]() { float v = 0; if (fread(&v, 4, 1, f) != 1) return 0.0; return (double)v; };
+        auto rd_u64 = [&]() { uint64_t v = 0; if (fread(&v, 8, 1, f) != 1) return 0L; return (long)v; };
         switch (vt) {
             case 0: case 1: { uint8_t v = 0; if (fread(&v, 1, 1, f) != 1) { fclose(f); return false; } kv.ints[k] = v; break; }
             case 2: case 3: { uint16_t v = 0; if (fread(&v, 2, 1, f) != 1) { fclose(f); return false; } kv.ints[k] = v; break; }
@@ -255,12 +255,6 @@ struct Model {
     long bos_id = -1, eos_id = -1;
     std::map<std::string, uint64_t> small_off;   // small F32 tensors -> offset in device blob
 };
-
-static const GTensor* gt(const Model& m, const char* fmt, long il, char* buf, size_t bs) {
-    snprintf(buf, bs, fmt, il);
-    auto it = m.by_name.find(buf);
-    return it == m.by_name.end() ? nullptr : it->second;
-}
 
 // ---------------------------------------------------------------------------
 // GPU kernels
@@ -518,7 +512,8 @@ __global__ void k_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, 
 // for this layer after append). K/V cache: [n_kh][max_ctx][hd]. out: [nh_q][hd].
 __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, const float* q,
                               int pos, int n_ctx_max, int nh_q, int n_kh, int hd, float scale, int q_stride, long kv_seq_stride, int row_pos,
-                              const int* tree_depth = nullptr, const int* tree_path = nullptr, int path_stride = 0) {
+                              const int* tree_depth = nullptr, const int* tree_path = nullptr, int path_stride = 0,
+                              int first_pos = 0) {
     extern __shared__ float sh[];   // pos+1 scores
     const int h = blockIdx.x;
     const long v = blockIdx.y;
@@ -531,12 +526,14 @@ __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, cons
     const float* Kk = Kc + (size_t)kh * n_ctx_max * hd;
     const float* Vk = Vc + (size_t)kh * n_ctx_max * hd;
     // multi-position verify: row v is at position pos+v and attends cache[0..pos+v]
-    const int np = pos + 1 + (tree_depth ? tree_depth[v] : (row_pos ? (int)v : 0));
+    const int np = pos + 1 + (tree_depth ? tree_depth[v] : (row_pos ? (int)v : 0)) - first_pos;
     const int* path = tree_path ? tree_path + v * path_stride : nullptr;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
     for (int t = warp; t < np; t += blockDim.x / 32) {
-        const float* key = Kk + (size_t)(path && t >= pos ? pos + path[t - pos] : t) * hd;
+        const int at = first_pos + t;
+        const int slot = path && at >= pos ? pos + path[at - pos] : at;
+        const float* key = Kk + (size_t)(slot < n_ctx_max ? slot : slot % n_ctx_max) * hd;
         float score = 0.f;
         // Each warp scores a different key while retaining the previous order
         // of the 32-element reductions and the sum across groups.
@@ -564,7 +561,11 @@ __global__ void k_attn_decode(float* out, const float* Kc, const float* Vc, cons
     __syncthreads();
     for (int i = threadIdx.x; i < hd; i += blockDim.x) {
         float acc = 0.f;
-        for (int t = 0; t < np; ++t) acc += sh[t] * Vk[(size_t)(path && t >= pos ? pos + path[t - pos] : t) * hd + i];
+        for (int t = 0; t < np; ++t) {
+            const int at = first_pos + t;
+            const int slot = path && at >= pos ? pos + path[at - pos] : at;
+            acc += sh[t] * Vk[(size_t)(slot < n_ctx_max ? slot : slot % n_ctx_max) * hd + i];
+        }
         out[(size_t)h * hd + i] = acc / zsum;
     }
 }
@@ -575,11 +576,13 @@ __global__ void k_append_kv(float* keys, float* values, const float* k, const fl
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= heads * head_dim) return;
     const long from = (long)row * heads * head_dim + i;
+    const int slot = pos + (positions ? row : 0);
     const long to = (long)row * sequence_stride +
-                    ((long)(i / head_dim) * ctx + pos + (positions ? row : 0)) * head_dim + i % head_dim;
+                    ((long)(i / head_dim) * ctx + (slot < ctx ? slot : slot % ctx)) * head_dim + i % head_dim;
     keys[to] = k[from];
     values[to] = v[from];
 }
+#include "tiered_kv.cuh"
 // gated delta net, one token: state[h] is [i][j], so adjacent threads j load adjacent state.
 // q16/k16: [ngroup][S]; v: [H][S]; g/beta: [H]; out: [H][S].
 __global__ void k_delta_net(float* state, const float* q16, const float* k16, const float* v,
@@ -612,7 +615,8 @@ __global__ void k_delta_net(float* state, const float* q16, const float* k16, co
 // multi-position verify: ONE sequence's conv over B positions, sequential state shifts.
 // x/out: [B][C] rows are positions; grid (C/256).
 __global__ void k_conv1d_silu_multi(float* cstate, const float* x, const float* w, float* out, int C, int B,
-                                    bool update_state = true) {
+                                    bool update_state = true, float* trial_state = nullptr, int prompt_rows = 0,
+                                    bool save_boundary = false) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     float s0 = cstate[c * 3 + 0], s1 = cstate[c * 3 + 1], s2 = cstate[c * 3 + 2];
@@ -621,9 +625,14 @@ __global__ void k_conv1d_silu_multi(float* cstate, const float* x, const float* 
         const float sum = w[c * 4 + 0] * s0 + w[c * 4 + 1] * s1 + w[c * 4 + 2] * s2 + w[c * 4 + 3] * xc;
         s0 = s1; s1 = s2; s2 = xc;
         out[(size_t)p * C + c] = sum / (1.f + expf(-sum));
+        if (trial_state && p + 1 == prompt_rows) {
+            float* dst = save_boundary ? trial_state : cstate;
+            dst[c * 3 + 0] = s0; dst[c * 3 + 1] = s1; dst[c * 3 + 2] = s2;
+        }
     }
     if (update_state) {
-        cstate[c * 3 + 0] = s0; cstate[c * 3 + 1] = s1; cstate[c * 3 + 2] = s2;
+        float* dst = trial_state && !save_boundary ? trial_state : cstate;
+        dst[c * 3 + 0] = s0; dst[c * 3 + 1] = s1; dst[c * 3 + 2] = s2;
     }
 }
 // Multi-position gated delta net for ONE sequence. State is [H][i][j], with lanes split
@@ -668,7 +677,8 @@ template <bool output, bool tree = false>
 __global__ void k_delta_net_128(float* state, const float* qkv, const float* g, const float* beta, float* out,
                                 int H, int ngroup, float scale, long qkv_stride, long out_stride, int B,
                                 const int* path = nullptr, const int* lengths = nullptr,
-                                const int* owners = nullptr, int path_stride = 0, bool update_state = true) {
+                                const int* owners = nullptr, int path_stride = 0, bool update_state = true,
+                                float* trial_state = nullptr, int prompt_rows = 0, bool save_boundary = false) {
     constexpr int S = 128;
     const int leaf = blockIdx.z;
     if constexpr (tree) {
@@ -706,24 +716,33 @@ __global__ void k_delta_net_128(float* state, const float* qkv, const float* g, 
             out[(size_t)row * out_stride + h * S + j] = value * scale;
           }
         }
+        if constexpr (!tree) {
+            if (trial_state && p + 1 == prompt_rows) {
+                float* dst = save_boundary ? trial_state + (size_t)h * S * S + j : col;
+#pragma unroll
+                for (int i = 0; i < S; ++i) dst[i * S] = local[i];
+            }
+        }
     }
     if constexpr (!tree) {
         if (update_state) {
+            float* dst = trial_state && !save_boundary ? trial_state + (size_t)h * S * S + j : col;
 #pragma unroll
-            for (int i = 0; i < S; ++i) col[i * S] = local[i];
+            for (int i = 0; i < S; ++i) dst[i * S] = local[i];
         }
     }
 }
 
 static void launch_delta_multi(float* state, const float* qkv, const float* g, const float* beta, float* out,
                                int S, int H, int groups, float scale, long qkv_stride, long out_stride,
-                               int rows, cudaStream_t stream, const int* path = nullptr, bool update_state = true) {
+                               int rows, cudaStream_t stream, const int* path = nullptr, bool update_state = true,
+                               float* trial_state = nullptr, int prompt_rows = 0, bool save_boundary = false) {
     const dim3 grid((unsigned)H, (unsigned)((S + 31) / 32));
     if (S != 128) {
         k_delta_net_multi<<<grid, 32, 0, stream>>>(state, qkv, g, beta, out, S, H, groups, scale, qkv_stride, out_stride, rows);
     } else if (out) {
         k_delta_net_128<true><<<grid, 32, 0, stream>>>(state, qkv, g, beta, out, H, groups, scale,
-            qkv_stride, out_stride, rows, nullptr, nullptr, nullptr, 0, update_state);
+            qkv_stride, out_stride, rows, nullptr, nullptr, nullptr, 0, update_state, trial_state, prompt_rows, save_boundary);
     } else {
         k_delta_net_128<false><<<grid, 32, 0, stream>>>(state, qkv, g, beta, out, H, groups, scale, qkv_stride, out_stride, rows, path);
     }
@@ -788,10 +807,6 @@ __global__ void k_silu_mul(float* y, const float* a, const float* b, int n) {  /
     const float v = a[i];
     y[i] = v / (1.f + expf(-v)) * b[i];
 }
-__global__ void k_sigmoid_mul(float* y, const float* gate, const float* x, int n) {  // y = x*sigmoid(gate)
-    const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
-    y[i] = x[i] / (1.f + expf(-gate[i]));
-}
 __global__ void k_add(float* y, const float* x, int n) {
     const long i = ((long)blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x; if (i >= (long)gridDim.y * n) return;
     y[i] += x[i];
@@ -819,10 +834,6 @@ __global__ void k_gated_norm(float* out, const float* x, const float* w, const f
     }
 }
 
-// ---------------------------------------------------------------------------
-// CPU reference decode (validation): float32 mirror of the GPU math, including
-// the int8 per-32-block activation quantization used by the dp4a Q4_0 GEMV.
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // CPU reference decode (validation): exact mirror of the GPU math. GEMVs work
 // on the raw Q4_0 nibbles with the same int8 per-32-block activation
@@ -919,7 +930,6 @@ static void cpu_rope(float* q, float* k, int pos, int nh_q, int nh_k, int hd, in
         }
     }
 }
-static void cpu_silu(float* y, const float* x, int n) { for (int i = 0; i < n; ++i) y[i] = x[i] / (1.f + expf(-x[i])); }
 static void cpu_add(float* y, const float* x, int n) { for (int i = 0; i < n; ++i) y[i] += x[i]; }
 
 // One decode step on CPU: token -> logits (greedy argmax done by caller). Returns logits in out.
@@ -934,7 +944,6 @@ static void cpu_step(CPUModel& cm, long tok, std::vector<float>& logits) {
     }
     dbg_cpu("emb", x.data(), m.n_embd);
     for (long il = 0; il < m.n_layer; ++il) {
-        char nm[128];
         // attn_norm
         { const float* w = cm.f32.at("blk." + std::to_string(il) + ".attn_norm.weight");
           cpu_rms(w, x.data(), xn.data(), m.n_embd, (float)m.eps); }
@@ -1090,6 +1099,7 @@ static void cpu_step(CPUModel& cm, long tok, std::vector<float>& logits) {
 // NB-dispatched Q4_0 matvec: y[v*ystride + row] for v in [0, g_batch)
 static long g_batch = 1;
 static bool g_packed_widths = false;
+static constexpr long kPrefillChunk = 32;
 static long mat_width(long rows) {
     if (g_packed_widths && rows > 8 && rows <= 12) return 12;
     if (g_packed_widths && rows > 16 && rows <= 24) return 24;
@@ -1136,13 +1146,15 @@ static void launch_mat_q4(const uint8_t* w, long K, long rows, const int8_t* xq,
 #include "packed_scale_codec.cuh"
 
 template <int NB, int WARPS, int GROUPS = 1, bool ENCODED = false>
-__global__ void q4_mma(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* xmeta, float* y, long ystride) {
+__global__ void q4_mma(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* xmeta,
+                       float* y, long ystride, int runtime_groups = 0) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     extern __shared__ float partial[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int group = lane >> 2, thread = lane & 3;
-    const long tile_index = blockIdx.x / GROUPS;
-    const long group_index = blockIdx.x % GROUPS;
+    const unsigned groups = GROUPS ? GROUPS : runtime_groups;
+    const long tile_index = blockIdx.x / groups;
+    const long group_index = blockIdx.x % groups;
     const long first_row = tile_index * 16;
     const long nb = K / 32;
     xq += group_index * NB * K;
@@ -1214,20 +1226,39 @@ __global__ void q4_mma(const uint8_t* w, long K, long rows, const int8_t* xq, co
 
 template <bool ENCODED = false>
 static void launch_packed_q4(const uint8_t* w, long K, long rows, const int8_t* xq, const int2* meta,
-                             float* y, long ystride, cudaStream_t stream) {
+                             float* y, long ystride, cudaStream_t stream, long active = 0, bool grouped_prefill = false) {
     const unsigned tiles = (rows + 15) / 16;
     constexpr size_t smem8 = 16 * 8 * 32 * sizeof(float);
     constexpr size_t smem16 = 16 * 16 * 32 * sizeof(float);
-    if (g_batch <= 8) {
+    if (grouped_prefill) {
+        switch ((active + 15) / 16) {
+            case 3: q4_mma<16,8,3,ENCODED><<<3*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride); break;
+            case 4: q4_mma<16,8,4,ENCODED><<<4*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride); break;
+            case 5: q4_mma<16,8,5,ENCODED><<<5*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride); break;
+            case 6: q4_mma<16,8,6,ENCODED><<<6*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride); break;
+            case 7: q4_mma<16,8,7,ENCODED><<<7*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride); break;
+            case 8: q4_mma<16,8,8,ENCODED><<<8*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride); break;
+            default: {
+                const int groups = (active + 15) / 16;
+                q4_mma<16,8,0,ENCODED><<<groups * tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride,groups);
+                break;
+            }
+        }
+    } else if (g_batch <= 8) {
         q4_mma<8,8,1,ENCODED><<<tiles,256,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
     } else if (g_batch <= 16) {
         q4_mma<16,8,1,ENCODED><<<tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride);
     } else if (g_batch <= 24) {
         if (K >= 17408) q4_mma<8,8,3,ENCODED><<<3*tiles,256,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
         else q4_mma<8,16,3,ENCODED><<<3*tiles,512,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
-    } else {
+    } else if (g_batch <= 32) {
         if (K >= 17408) q4_mma<16,8,2,ENCODED><<<2*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride);
         else q4_mma<8,16,4,ENCODED><<<4*tiles,512,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
+    } else {
+        // Deep verification keeps the E167 dispatch.
+        if (K >= 17408)
+            q4_mma<16,8,4,ENCODED><<<4*tiles,256,smem16,stream>>>(w,K,rows,xq,meta,y,ystride);
+        else q4_mma<8,8,8,ENCODED><<<8*tiles,256,smem8,stream>>>(w,K,rows,xq,meta,y,ystride);
     }
 }
 
@@ -1346,8 +1377,15 @@ int main(int argc, char** argv) {
     bool explicit_p_min = false, explicit_draft_max = false, explicit_packed = false;
     int mtp_tree_mode = 1, mtp_group = kMaxDraftGroup, packed_verify = 0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0, pld_enabled = 2;
+    long chain_min = 0;   // E168: minimum direct-chain length for the deep override (0 = mtp_limit)
     std::string feed_ids_s, oracle_ids_path, parallel_path;
-    bool resident_output = false, compress_packed = false;
+    bool resident_output = false, compress_packed = false, session = false, session_tail = false;
+    bool session_draft_hints = false, session_stream = false;
+    int fuse_prefill_tail = -1;
+    bool measure_h2d = false;
+    std::string kv_mode = "fp32";
+    long kv_recent = kTierRecent;
+    long prefill_chunks = 1, session_prefix_tokens = 0;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i]; const char* v = argv[i + 1];
         if (k == "--model") model = v;
@@ -1375,6 +1413,16 @@ int main(int argc, char** argv) {
         else if (k == "--parallel-draft") parallel_path = v;
         else if (k == "--resident-output") resident_output = atoi(v) != 0;
         else if (k == "--compress-packed") compress_packed = atoi(v) != 0;
+        else if (k == "--session") session = atoi(v) != 0;
+        else if (k == "--session-tail") session_tail = atoi(v) != 0;
+        else if (k == "--session-draft-hints") session_draft_hints = atoi(v) != 0;
+        else if (k == "--session-stream") session_stream = atoi(v) != 0;
+        else if (k == "--fuse-prefill-tail") fuse_prefill_tail = atoi(v);
+        else if (k == "--measure-h2d") measure_h2d = atoi(v) != 0;
+        else if (k == "--kv-cache") kv_mode = v;
+        else if (k == "--kv-recent") kv_recent = atol(v);
+        else if (k == "--prefill-chunks") prefill_chunks = atol(v);
+        else if (k == "--session-prefix-tokens") session_prefix_tokens = atol(v);
         else if (k == "--mtp") mtp_path = v;
         else if (k == "--mtp-tree") mtp_tree_mode = atoi(v);
         else if (k == "--mtp-group") mtp_group = atoi(v);
@@ -1385,6 +1433,7 @@ int main(int argc, char** argv) {
         else if (k == "--draft-vocab") draft_vocab = atol(v);
         else if (k == "--balance-hot") balance_hot = atoi(v) != 0;
         else if (k == "--pld") pld_enabled = atoi(v);
+        else if (k == "--chain-min") chain_min = atol(v);
     }
     const bool auto_packed = !explicit_packed && !explicit_speculate && !mtp_path.empty() && mtp_tree_mode == 1 &&
         batch == 1 && !multi && !validate && getenv("GUM_PACKED_DEFAULT");
@@ -1411,7 +1460,7 @@ int main(int argc, char** argv) {
     if (model.empty()) { fprintf(stderr, "need --model\n"); return 2; }
     if (batch < 1 || batch > 64 || (batch & (batch - 1))) { fprintf(stderr, "--batch must be a power of two in 1..64\n"); return 2; }
     if (validate && batch != 1) { fprintf(stderr, "--validate requires --batch 1\n"); return 2; }
-    if (!explicit_speculate && (!mtp_path.empty() || !eagle_path.empty()) && batch == 1 && !multi && !validate) speculate = packed_verify ? 24 : 16;
+    if (!explicit_speculate && (!mtp_path.empty() || !eagle_path.empty()) && batch == 1 && !multi && !validate) speculate = packed_verify ? 64 : 16;
     if ((multi > 0 || speculate > 0) && (batch != 1 || (multi > 0 && speculate > 0))) {
         fprintf(stderr, "use one sequence and one verification mode\n");
         return 2;
@@ -1429,6 +1478,12 @@ int main(int argc, char** argv) {
     }
     if (!eagle_path.empty() && (!mtp_path.empty() || !speculate || multi || validate || ctx > 4096)) {
         fprintf(stderr, "--eagle4 requires single-user speculative mode, no --mtp, and context at most 4096\n");
+        return 2;
+    }
+    const char* capture_layers = getenv("GUM_MID_CAPTURE");
+    const char* capture_path = getenv("GUM_MID_CAPTURE_FILE");
+    if (capture_layers && (batch <= 1 || multi || speculate || validate || !capture_path || !*capture_path)) {
+        fprintf(stderr, "GUM_MID_CAPTURE requires dense batch decode and GUM_MID_CAPTURE_FILE\n");
         return 2;
     }
     const bool mtp_tree = !mtp_path.empty() && speculate > 0 && mtp_tree_mode == 1;
@@ -1558,6 +1613,52 @@ int main(int argc, char** argv) {
         }
         share_output = true;
     }
+    const bool session_drafter = (mtp_tree && packed_verify) || !eagle_path.empty();
+    if (session && (!session_drafter || A != "qwen35" || !share_output || dbg_dump || oracle ||
+                    prompt_ids_s.empty() || !out_ids_path.empty() || !expect_ids_path.empty())) {
+        fprintf(stderr, "--session needs packed native MTP or EAGLE4 and --prompt-ids; each turn emits session_ids on stdout\n");
+        return 2;
+    }
+    if ((prefill_chunks != 1 && prefill_chunks != 2 && prefill_chunks != 4 && prefill_chunks != 8) ||
+        (prefill_chunks > 1 && (A != "qwen35" || !mtp_tree || !packed_verify || !share_output || dbg_dump || oracle))) {
+        fprintf(stderr, "--prefill-chunks takes 1, 2, 4 or 8; grouping needs packed native MTP with a shared output head\n");
+        return 2;
+    }
+    if (session) show_text = 0;  // keep generated text out of the line protocol
+    if (session_tail && (!session || !mtp_tree || !packed_verify || speculate > kPrefillChunk ||
+                         m.sss_state != 128 || m.sss_conv != 4)) {
+        fprintf(stderr, "--session-tail requires a packed native MTP session with --speculate at most 32\n");
+        return 2;
+    }
+    if (session_prefix_tokens < 0 ||
+        (session_prefix_tokens && (!session_tail || session_prefix_tokens % kPrefillChunk ||
+            session_prefix_tokens >= ctx - gen_tokens))) {
+        fprintf(stderr, "--session-prefix-tokens needs --session-tail 1 and a multiple of 32 below ctx minus gen-tokens\n");
+        return 2;
+    }
+    if (session_draft_hints && (!session_tail || speculate != kPrefillChunk || prefill_chunks < 4)) {
+        fprintf(stderr, "--session-draft-hints needs --session-tail 1, --speculate 32 and at least four prefill chunks\n");
+        return 2;
+    }
+    if (session_stream && !session) {
+        fprintf(stderr, "--session-stream requires --session 1\n");
+        return 2;
+    }
+    const bool can_fuse_prefill_tail = session_tail && prefill_chunks >= 2 &&
+        !session_draft_hints && (session_prefix_tokens == 0);
+    if (fuse_prefill_tail < -1 || fuse_prefill_tail > 1 || (fuse_prefill_tail == 1 && !can_fuse_prefill_tail)) {
+        fprintf(stderr, "--fuse-prefill-tail needs a grouped native MTP session without draft hints or a fixed shared prefix\n");
+        return 2;
+    }
+    if (fuse_prefill_tail < 0) fuse_prefill_tail = can_fuse_prefill_tail;
+    const bool tier_kv = kv_mode == "turboquant" || kv_mode == "turboquant-ttkv";
+    if (kv_mode != "fp32" && (!tier_kv || A != "qwen35" || m.head_v != kTierHead || ctx % kTierOldGroup ||
+                              kv_recent < 0 || kv_recent > ctx || kv_recent >= kTierOld ||
+                              !mtp_tree || !packed_verify || oracle || validate || dbg_dump ||
+                              session_draft_hints || session_prefix_tokens)) {
+        fprintf(stderr, "--kv-cache turboquant[-ttkv] needs packed native MTP and context divisible by 16, without oracle or session hints\n");
+        return 2;
+    }
     printf("config,model=%s,arch=%s,layers=%ld,recr=%ld,attn=%ld,n_embd=%ld,n_head=%ld,n_kv=%ld,head=%ld,rot=%ld,ffn=%ld,vocab=%ld,ssm_state=%ld,ssm_group=%ld,ssm_dt=%ld,ssm_inner=%ld,rope_base=%.0f,ctx=%ld,batch=%ld,hot_mib=%ld,cache_mib=%ld,validate=%d\n",
            model.c_str(), A.c_str(), m.n_layer, m.n_recr, m.n_attn, m.n_embd, m.n_head, m.n_kv, m.head_v, m.n_rot, m.n_ff,
            m.n_vocab, m.sss_state, m.sss_group, m.sss_dt, m.sss_inner, m.rope_base, ctx, seqs, hot_mib, cache_mib, validate);
@@ -1568,8 +1669,8 @@ int main(int argc, char** argv) {
                mtp_tree ? "mtp_tree" : !mtp_path.empty() ? "mtp" : "history", mtp_tree ? mtp_group : 1, packed_verify);
     }
 
-    if (packed_verify && ((!mtp_tree && eagle_path.empty() && !resident_output) || speculate > 32)) {
-        fprintf(stderr, "--packed-verify requires a resident output matrix and up to 32 verification positions\n"); return 2;
+    if (packed_verify && ((!mtp_tree && eagle_path.empty() && !resident_output) || speculate > 64)) {
+        fprintf(stderr, "--packed-verify requires a resident output matrix and up to 64 verification positions\n"); return 2;
     }
     if (compress_packed && !packed_verify) {
         fprintf(stderr, "--compress-packed requires --packed-verify\n");
@@ -1648,19 +1749,61 @@ int main(int argc, char** argv) {
     const long sss_v = m.sss_dt ? m.sss_inner / m.sss_dt : 0;
     const uint64_t ssm_vram = ((uint64_t)m.n_recr * m.sss_dt * (uint64_t)sss_v * sss_v * 4
                             + (uint64_t)m.n_recr * m.qkv_out * (m.sss_conv ? m.sss_conv - 1 : 0) * 4) * seqs;
-    const uint64_t kv_vram = (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * seqs;
     const bool wide_prefill = !eagle_path.empty() || ((mtp_tree || resident_output) && share_output && !dbg_dump);
-    const long prefill_width = wide_prefill ? std::max(32L, speculate) : speculate;
-    const long B = std::max(batch, prefill_width);
+    // E167: ordinary 64-row dispatch can change near-tie argmaxes. Grouped
+    // prefill keeps the per-row reduction and shares the weight transfer.
+    const long prefill_width = wide_prefill ? kPrefillChunk : speculate;
+    const long standard_rows = std::max(batch, prefill_width);
+    const long B = std::max(batch, prefill_chunks * prefill_width);
+    const bool large_tier = tier_kv && ctx > 24576;
+    TierCache tier_cache;
+    tier_cache.recent_tokens = (int)kv_recent;
+    tier_cache.ring = (int)kv_recent + 2 * B + kTierOldGroup;
+    tier_cache.capacity = (int)ctx;
+    tier_cache.pooling = kv_mode == "turboquant-ttkv";
+    // Old protected groups still have their individual rows. Only the active
+    // middle tier needs 4:1 rows at larger capacities.
+    tier_cache.middle_groups = large_tier ?
+        std::min(ctx, (long)kTierOld + 2 * B + kTierOldGroup) / kTierMidGroup : ctx / kTierMidGroup;
+    const long tier_splits = (ctx + kTierSplit - 1) / kTierSplit;
+    const long tier_batch = large_tier ? std::min(B, kPrefillChunk) : B;
+    const uint64_t tier_scratch = (uint64_t)m.n_head *
+        (B * kTierHead + tier_batch * tier_splits * (kTierHead + 2)) * sizeof(float) + ctx;
+    const uint64_t kv_vram = tier_kv ? tier_cache.bytes(m.n_attn * m.n_kv) + tier_scratch :
+        (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * seqs;
+    const long mtp_window = large_tier ? 8192 : ctx;
+    const long mtp_capacity = large_tier ? mtp_window + 2 * B + 2 * batch : ctx;
+    const uint64_t mtp_kv_bytes = (uint64_t)m.n_kv * mtp_capacity * m.head_v * 2 * sizeof(float);
     const uint64_t draft_reserve = !eagle_path.empty() ? Eagle4::device_bytes(ctx, B) :
         resident_output ? outw->bytes + (uint64_t)parallel_stat.st_size + (4ull << 20) :
-        (mtp_path.empty() ? 0 : (980ull << 20));   // E046: MTP blob + KV + h_tgt
+        (mtp_path.empty() ? 0 : (916ull << 20) + std::max(mtp_kv_bytes, uint64_t{64} << 20));
     size_t total_vram = 0;
-    const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + draft_reserve + (16u << 20);
+    // E167: speculative mode keeps per-layer replay inputs for the accepted-prefix
+    // re-feed; sized by the (already adjusted) batch, so deep gamma grows it
+    const uint64_t replay_reserve = (speculate > 0 && m.n_recr && m.sss_dt)
+        ? (uint64_t)m.n_recr * 2 * ((uint64_t)batch * (m.qkv_out + m.sss_dt)) * 4 : 0;
+    // Additional per-row scratch for the Qwen 27B grouped-prefill path.
+    const uint64_t prefill_reserve = (uint64_t)(B - standard_rows) * (512ull << 10);
+    const uint64_t replay_bytes = session_draft_hints || fuse_prefill_tail
+        ? std::max(replay_reserve, ssm_vram) : replay_reserve;
+    const uint64_t vram_plan = hot_used + (uint64_t)kSlots * kMaxItem + ssm_vram + kv_vram + draft_reserve +
+        replay_bytes + prefill_reserve + (16u << 20);
     {
         cudaDeviceProp prop{};
         check(cudaGetDeviceProperties(&prop, 0), "props");
         total_vram = prop.totalGlobalMem;
+        const long score_limit = tier_kv ? mtp_window + (large_tier ? batch : 0) : ctx;
+        if (m.n_attn && (uint64_t)score_limit * sizeof(float) + 2 * sizeof(float) > prop.sharedMemPerBlock) {
+            cudaFuncAttributes attr{};
+            check(cudaFuncGetAttributes(&attr, k_attn_decode), "attention resources");
+            const uint64_t attention_bytes = (uint64_t)score_limit * sizeof(float);
+            if (attention_bytes + attr.sharedSizeBytes > prop.sharedMemPerBlockOptin) {
+                fprintf(stderr, "context %ld exceeds the GPU attention scratch capacity\n", ctx);
+                return 4;
+            }
+            check(cudaFuncSetAttribute(k_attn_decode, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       (int)attention_bytes), "long-context attention scratch");
+        }
     }
     if (vram_plan + (2ull << 30) > total_vram) {
         fprintf(stderr, "ABORT before alloc: VRAM plan %.2f GiB + 2 GiB floor exceeds %.2f GiB\n",
@@ -1707,12 +1850,16 @@ int main(int argc, char** argv) {
     }
     const uint64_t xq_bytes = (uint64_t)B * max_K;
     const uint64_t qmeta_bytes = (uint64_t)B * max_K / 32 * sizeof(int2);
-    const uint64_t meta_off = align_up(xq_bytes, 256);
-    const uint64_t activation_bytes = meta_off + qmeta_bytes;
+    // Keep the decode working set contiguous even with larger prefill scratch.
+    const uint64_t meta_off = B > standard_rows ? 0 : align_up(xq_bytes, 256);
+    const uint64_t quant_off = B > standard_rows ? align_up(qmeta_bytes, 256) : 0;
+    const uint64_t activation_bytes = std::max(meta_off + qmeta_bytes, quant_off + xq_bytes);
+    const uint64_t decode_activation_bytes = B > standard_rows
+        ? quant_off + (uint64_t)standard_rows * max_K : activation_bytes;
     uint8_t* activation_buf = nullptr;
     check(cudaMalloc((void**)&activation_buf, activation_bytes), "activation arena");
     check(cudaMemset(activation_buf, 0, activation_bytes), "initialize padded activation rows");
-    int8_t* xq = (int8_t*)activation_buf;
+    int8_t* xq = (int8_t*)(activation_buf + quant_off);
     int2* xmeta = (int2*)(activation_buf + meta_off);
     // small F32 tensors -> one device blob
     uint64_t small_bytes = 0;
@@ -1738,7 +1885,21 @@ int main(int argc, char** argv) {
     // rows share slice 0; batch mode keeps one slice per sequence)
     float *kv_dev = nullptr, *ssm_dev = nullptr, *conv_dev = nullptr;
     const uint64_t kv_per_layer = (uint64_t)m.n_kv * ctx * m.head_v * 4;
-    if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn * seqs), "kv cache");
+    float *tier_queries = nullptr, *tier_partial = nullptr;
+    uint8_t* tier_protection = nullptr;
+    std::vector<uint8_t> tier_flags;
+    std::vector<uint8_t> tier_structural;
+    long tier_packed = 0, tier_written = 0;
+    if (tier_kv) {
+        tier_cache.allocate(m.n_attn * m.n_kv);
+        check(cudaMalloc(&tier_queries, (size_t)B * m.n_head * kTierHead * sizeof(float)), "rotated KV queries");
+        check(cudaMalloc(&tier_partial, (size_t)tier_batch * m.n_head * tier_splits * (kTierHead + 2) * sizeof(float)), "tiered attention partials");
+        check(cudaMalloc(&tier_protection, ctx), "TTKV structural protection");
+        tier_flags.resize(ctx);
+        printf("kv_cache,mode=%s,cache_mib=%.1f,scratch_mib=%.1f,recent=%d,old_age=%d\n",
+            kv_mode.c_str(), tier_cache.bytes(m.n_attn * m.n_kv) / 1048576.0, tier_scratch / 1048576.0,
+            tier_cache.recent_tokens, kTierOld);
+    } else if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn * seqs), "kv cache");
     const uint64_t sss = m.sss_inner / m.sss_dt;
     if (m.n_recr) {
         check(cudaMalloc((void**)&ssm_dev, (size_t)m.n_recr * m.sss_dt * sss * sss * 4 * seqs), "ssm state");
@@ -1768,24 +1929,58 @@ int main(int argc, char** argv) {
     // covers all three arrays. Skip cleanly if the configured batch exceeds the device's
     // persisting-cache window.
     cudaDeviceProp l2prop{}; check(cudaGetDeviceProperties(&l2prop, 0), "L2 cache properties");
-    if (l2prop.persistingL2CacheMaxSize > 0 && activation_bytes <= (uint64_t)l2prop.persistingL2CacheMaxSize) {
+    if (l2prop.persistingL2CacheMaxSize > 0 && decode_activation_bytes <= (uint64_t)l2prop.persistingL2CacheMaxSize) {
         check(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, (size_t)l2prop.persistingL2CacheMaxSize), "persisting L2 limit");
         cudaStreamAttrValue window{};
         window.accessPolicyWindow.base_ptr = activation_buf;
-        window.accessPolicyWindow.num_bytes = (size_t)activation_bytes;
+        window.accessPolicyWindow.num_bytes = (size_t)decode_activation_bytes;
         window.accessPolicyWindow.hitRatio = 1.0f;
         window.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
         window.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
         check(cudaStreamSetAttribute(stc, cudaStreamAttributeAccessPolicyWindow, &window), "activation L2 window");
         printf("activation_l2_window,bytes=%llu,persisting_limit=%d\n",
-               (unsigned long long)activation_bytes, l2prop.persistingL2CacheMaxSize);
+               (unsigned long long)decode_activation_bytes, l2prop.persistingL2CacheMaxSize);
     } else {
         printf("activation_l2_window,disabled=capacity,bytes=%llu,persisting_limit=%d\n",
                (unsigned long long)activation_bytes, l2prop.persistingL2CacheMaxSize);
     }
-    cudaEvent_t ev[kStage], evc[kSlots]; for (auto& e : ev) check(cudaEventCreate(&e), "event"); for (auto& e : evc) check(cudaEventCreate(&e), "event");
+    cudaEvent_t ev[kStage], evc[kSlots], h2d_start[kStage];
+    for (auto& e : ev) check(cudaEventCreate(&e), "event");
+    for (auto& e : evc) check(cudaEventCreate(&e), "event");
+    if (measure_h2d) for (auto& e : h2d_start) check(cudaEventCreate(&e), "H2D timing event");
     for (auto& e : evc) check(cudaEventRecord(e, stc), "evc prime");
     check(cudaStreamSynchronize(stc), "evc prime sync");
+
+    // E169 retains the E159 record layout: three fp32 header values, then one
+    // batch of residuals per selected layer (ascending), then the final batch.
+    FILE* capture_file = nullptr;
+    float *capture_dev = nullptr, *capture_host = nullptr;
+    std::vector<long> capture_slots;
+    long capture_mid = 0;
+    size_t capture_row_floats = 0, capture_payload_floats = 0;
+    if (capture_layers) {
+        capture_slots.assign(m.n_layer, -1);
+        for (const char* p = capture_layers; ; ) {
+            char* end = nullptr;
+            const long layer = strtol(p, &end, 10);
+            if (end == p || layer < 0 || layer >= m.n_layer || (*end && *end != ',')) {
+                fprintf(stderr, "invalid GUM_MID_CAPTURE layer list: %s\n", capture_layers);
+                return 2;
+            }
+            capture_slots[layer] = 0;
+            if (!*end) break;
+            p = end + 1;
+        }
+        for (long& slot : capture_slots) if (slot == 0) slot = capture_mid++;
+        capture_row_floats = (size_t)batch * m.n_embd;
+        capture_payload_floats = (capture_mid + 1) * capture_row_floats;
+        capture_file = fopen(capture_path, "wb");
+        if (!capture_file) { perror(capture_path); return 1; }
+        check(cudaMalloc(&capture_dev, capture_payload_floats * sizeof(float)), "capture dev");
+        check(cudaHostAlloc(&capture_host, (capture_payload_floats + 3) * sizeof(float),
+            cudaHostAllocDefault), "capture host");
+        printf("mid_capture,layers=%s,file=%s\n", capture_layers, capture_path);
+    }
 
     // ---- schedule: item indices in decode order ----
     std::vector<int> sched; std::vector<int> sched_row0;  // logits row0 if output chunk
@@ -1795,7 +1990,6 @@ int main(int argc, char** argv) {
         for (int idx : itn->second) sched.push_back(idx);
     };
     for (long il = 0; il < m.n_layer; ++il) {
-        char nm[128];
         if (A == "qwen35" && m.is_recr[il]) {
             push_tensor("blk." + std::to_string(il) + ".attn_qkv.weight");
             push_tensor("blk." + std::to_string(il) + ".attn_gate.weight");
@@ -1819,8 +2013,61 @@ int main(int argc, char** argv) {
     tok.vocab = kv.arr_strs["tokenizer.ggml.tokens"];
     for (size_t i = 0; i < tok.vocab.size(); ++i) tok.id_of[tok.vocab[i]] = (long)i;
     tok.bos = m.bos_id; tok.eos = m.eos_id;
+    if (tier_kv) {
+        tier_structural.reserve(tok.vocab.size());
+        for (const auto& piece : tok.vocab) {
+            const auto token = tok.unescape(piece);
+            const bool structural = token.find_first_of("0123456789_/\\") != std::string::npos ||
+                token.compare(0, 2, "<|") == 0 || token.find("tool_") != std::string::npos ||
+                (token.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 1) != std::string::npos &&
+                 token.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos);
+            tier_structural.push_back(structural);
+        }
+    }
     std::vector<std::vector<long>> prompts;
-    if (!prompt_ids_s.empty()) {
+    auto parse_session_ids = [&](const std::string& text, std::vector<long>& ids) {
+        for (const char* p = text.c_str(); ; ) {
+            char* end = nullptr;
+            const long id = strtol(p, &end, 10);
+            if (end == p || (*end && *end != ',') || id < 0 || id >= m.n_vocab) {
+                fprintf(stderr, "session expects one comma-separated sequence of valid token IDs per line\n");
+                return false;
+            }
+            ids.push_back(id);
+            if (!*end) return true;
+            p = end + 1;
+        }
+    };
+    // Session clients can prefix the usual request with a smaller output limit.
+    auto parse_session_request = [&](std::string text, std::vector<long>& ids, std::vector<long>& draft,
+                                     long& request_tokens) {
+        request_tokens = gen_tokens;
+        const size_t colon = text.find(':');
+        if (colon != std::string::npos) {
+            const std::string limit = text.substr(0, colon);
+            char* end = nullptr;
+            request_tokens = strtol(limit.c_str(), &end, 10);
+            if (*end || request_tokens < 1 || request_tokens > gen_tokens) {
+                fprintf(stderr, "session output limit must be in 1..%ld\n", gen_tokens);
+                return false;
+            }
+            text.erase(0, colon + 1);
+        }
+        const size_t separator = session_draft_hints ? text.find('|') : std::string::npos;
+        if (separator == std::string::npos) return parse_session_ids(text, ids);
+        return parse_session_ids(text.substr(0, separator), ids) &&
+            (separator + 1 == text.size() || parse_session_ids(text.substr(separator + 1), draft));
+    };
+    std::vector<long> first_draft;
+    long first_gen_tokens = gen_tokens;
+    if (session) {
+        if (prompt_ids_s == "-" && !std::getline(std::cin, prompt_ids_s)) {
+            fprintf(stderr, "missing first session request on stdin\n");
+            return 2;
+        }
+        prompts.emplace_back();
+        if (!parse_session_request(prompt_ids_s, prompts.back(), first_draft, first_gen_tokens)) return 2;
+    } else if (!prompt_ids_s.empty()) {
         size_t p = 0;
         while (p <= prompt_ids_s.size()) {
             size_t semi = prompt_ids_s.find(';', p);
@@ -1896,33 +2143,36 @@ int main(int argc, char** argv) {
     // ---- load hot arena once (it is read in place every token thereafter) ----
     {
         const auto hot_start = std::chrono::steady_clock::now();
-        std::vector<uint8_t> bounce(kMaxItem + 8192);
-        std::vector<uint8_t> repacked(packed_verify && verify_hot ? kMaxItem : 0);
         uint8_t* raw_device = slots;
         if (packed_verify && !raw_device) check(cudaMalloc(&raw_device, kMaxItem), "hot pack scratch");
+        const long upload_slots = packed_verify && !slots ? 1 : std::min(kStage, kSlots);
         long n_hot_items = 0;
-        for (size_t i = 0; i < items.size(); ++i) {
-            Item& it = items[i]; if (it.tier != kHot) continue;
-            const ssize_t got = pread(fdc, bounce.data(), it.bytes, (off_t)it.file_off);
+        for (const Item& it : items) {
+            if (it.tier != kHot) continue;
+            const long slot = n_hot_items % upload_slots;
+            check(cudaEventSynchronize(evc[slot]), "hot upload slot");
+            const ssize_t got = pread(fdc, stage[slot], it.bytes, (off_t)it.file_off);
             if (got < (ssize_t)it.bytes) { fprintf(stderr, "hot pread %s\n", it.tensor.c_str()); return 1; }
+            uint8_t* destination = it.packed ? raw_device + slot * kMaxItem : hot + it.res_off;
+            check(cudaMemcpyAsync(destination, stage[slot], it.bytes, cudaMemcpyHostToDevice, st), "hot upload");
             if (it.packed) {
-                check(cudaMemcpyAsync(raw_device, bounce.data(), it.bytes, cudaMemcpyHostToDevice, stc), "hot raw upload");
+                check(cudaEventRecord(ev[slot], st), "hot raw upload ready");
+                check(cudaStreamWaitEvent(stc, ev[slot], 0), "hot pack wait");
                 const int blocks = (int)(it.K / 32);
                 const int tiles = (int)(it.rows / 16) * blocks;
                 k_pack_q4_tiles<<<(tiles + 3) / 4, 128, 0, stc>>>(
-                    reinterpret_cast<uint16_t*>(hot + it.res_off), reinterpret_cast<const uint16_t*>(raw_device), blocks, tiles);
+                    reinterpret_cast<uint16_t*>(hot + it.res_off), reinterpret_cast<const uint16_t*>(destination), blocks, tiles);
                 check(cudaGetLastError(), "hot pack kernel");
-                check(cudaStreamSynchronize(stc), "hot pack sync");
-                ++n_hot_items;
-                continue;
             }
-            check(cudaMemcpy(hot + it.res_off, bounce.data(), it.bytes, cudaMemcpyHostToDevice), "hot load");
+            check(cudaEventRecord(evc[slot], it.packed ? stc : st), "hot upload slot complete");
             ++n_hot_items;
         }
+        check(cudaStreamSynchronize(st), "hot uploads complete");
+        check(cudaStreamSynchronize(stc), "hot packing complete");
         if (raw_device != slots) check(cudaFree(raw_device), "free hot pack scratch");
         if (verify_hot) {
             long bad = 0;
-            std::vector<uint8_t> roundtrip(kMaxItem);
+            std::vector<uint8_t> bounce(kMaxItem), roundtrip(kMaxItem), repacked(packed_verify ? kMaxItem : 0);
             for (size_t i = 0; i < items.size(); ++i) {
                 Item& it = items[i]; if (it.tier != kHot) continue;
                 const ssize_t got = pread(fdc, bounce.data(), it.bytes, (off_t)it.file_off);
@@ -1982,11 +2232,11 @@ int main(int argc, char** argv) {
             if (t.type == kGGML_Q4_0 && t.name != "token_embd.weight") { q4s.push_back({t.name, &t}); q4tot += align_up(t.bytes, 256); }
             else if (t.type == kGGML_F32) { f32s.push_back({t.name, &t}); f32tot += align_up(t.bytes, 256); }
         }
-        mtp_vram = q4tot + f32tot + (uint64_t)m.n_kv * ctx * m.head_v * 8 + (uint64_t)m.n_embd * 4;
+        mtp_vram = q4tot + f32tot + mtp_kv_bytes + (uint64_t)m.n_embd * 4;
         check(cudaMalloc((void**)&mtp_dev, q4tot), "mtp q4 blob");
         check(cudaMalloc((void**)&mtp_small_dev, f32tot), "mtp f32 blob");
-        check(cudaMalloc((void**)&mtp_kv_dev, (size_t)m.n_kv * ctx * m.head_v * 8), "mtp kv");
-        check(cudaMemset(mtp_kv_dev, 0, (size_t)m.n_kv * ctx * m.head_v * 8), "mtp kv zero");
+        check(cudaMalloc((void**)&mtp_kv_dev, mtp_kv_bytes), "mtp kv");
+        check(cudaMemset(mtp_kv_dev, 0, mtp_kv_bytes), "mtp kv zero");
         check(cudaMalloc(&mtp_last_hidden, m.n_embd * sizeof(float)), "last target hidden state");
         check(cudaMemset(mtp_last_hidden, 0, m.n_embd * sizeof(float)), "initial target hidden state");
         check(cudaMalloc((void**)&mtp_cat, (size_t)B * 2 * m.n_embd * 4), "mtp cat");
@@ -2014,7 +2264,8 @@ int main(int argc, char** argv) {
           } }
         mtp_on = true;
         if (share_output) output_device = mtp_dev + mtp_off.at("output.weight");
-        printf("mtp_plan,q4_MiB=%.0f,f32_MiB=%.0f,total_MiB=%.0f\n", q4tot / 1048576.0, f32tot / 1048576.0, mtp_vram / 1048576.0);
+        printf("mtp_plan,q4_MiB=%.0f,f32_MiB=%.0f,total_MiB=%.0f,window=%ld\n",
+            q4tot / 1048576.0, f32tot / 1048576.0, mtp_vram / 1048576.0, mtp_window);
     }
 
     if (eagle_on || resident_output) {
@@ -2061,8 +2312,12 @@ int main(int argc, char** argv) {
     const size_t replay_layer = 2 * (replay_qkv + replay_gate);
     float* replay_inputs = nullptr;
     if (speculate > 0 && m.n_recr) {
-        check(cudaMalloc((void**)&replay_inputs, m.n_recr * replay_layer * sizeof(float)), "recurrent replay inputs");
+        check(cudaMalloc((void**)&replay_inputs, replay_bytes), "recurrent replay inputs");
     }
+    const size_t trial_ssm_layer = m.sss_dt * Sv * Sv;
+    const size_t trial_conv_layer = m.qkv_out * (m.sss_conv - 1);
+    float* trial_ssm = session_draft_hints || fuse_prefill_tail ? replay_inputs : nullptr;
+    float* trial_conv = trial_ssm ? trial_ssm + m.n_recr * trial_ssm_layer : nullptr;
     int *tree_depth = nullptr, *tree_paths = nullptr, *tree_leaves = nullptr;
     int *tree_lengths = nullptr, *tree_owners = nullptr;
     int tree_leaf_count = 0;
@@ -2082,9 +2337,43 @@ int main(int argc, char** argv) {
     const bool reuse_quant = packed_verify;
     const bool fuse_quant = reuse_quant && !dbg_dump;
     const bool defer_recurrent = replay_inputs && Sv == 128;
+    struct PrefillDraft {
+        long rows = 0;
+        long split = 0;
+        long checkpoint_row = 0;
+    };
+    auto tier_commit = [&](const std::vector<long>& ids, long end) {
+        if (!tier_kv || end <= tier_packed) return;
+        if (tier_cache.pooling) {
+            const long flag_start = tier_packed / kTierOldGroup * kTierOldGroup;
+            for (long pos = flag_start; pos < end; ++pos) {
+                const bool protect = pos < 32 || tier_structural[ids[pos]];
+                if (pos % kTierOldGroup == 0) tier_flags[pos] = 0;
+                if (pos % kTierMidGroup == 0) tier_flags[pos + 1] = 0;
+                if (protect) {
+                    tier_flags[pos / kTierOldGroup * kTierOldGroup] = 1;
+                    tier_flags[pos / kTierMidGroup * kTierMidGroup + 1] = 1;
+                }
+            }
+            const long flag_end = std::min(ctx, (long)align_up(end, kTierOldGroup));
+            check(cudaMemcpyAsync(tier_protection + flag_start, tier_flags.data() + flag_start,
+                flag_end - flag_start, cudaMemcpyHostToDevice, stc), "TTKV retention mask");
+        }
+        const int heads = (int)(m.n_attn * m.n_kv);
+        for (int width : {1, kTierMidGroup, kTierOldGroup}) {
+            const long first = tier_packed / width, count = end / width - first;
+            if (count && (width == 1 || tier_cache.pooling))
+                k_tier_pack<<<dim3(heads, count), kTierHead, 0, stc>>>(tier_cache, first, width, (int)m.n_rot, (float)m.rope_base);
+        }
+        tier_packed = end;
+    };
     auto run_token = [&](const std::vector<long>& toks, long B, int pass, double* tok_s_out, uint64_t* cold_out,
-                         bool record_recurrent = false, bool tree = false, long head_row = -1) {
-        g_batch = mat_width(B);
+                         bool record_recurrent = false, bool tree = false, long head_row = -1, bool capture = false,
+                         long physical_rows = 0, PrefillDraft draft = PrefillDraft{}, double* h2d_ms_out = nullptr) {
+        if (tier_kv) tier_written = std::max(tier_written, cur_pos + B);
+        g_batch = mat_width(physical_rows ? physical_rows : B);
+        const long prompt_rows = B - draft.rows;
+        const bool grouped = prefill_chunks > 1 && B > kPrefillChunk && head_row == -2;
         std::atomic<size_t> released{0};
         std::atomic<long> ready[kStage]; for (auto& r : ready) r = 0;
         std::atomic<bool> fail{false};
@@ -2154,6 +2443,7 @@ int main(int argc, char** argv) {
             }
         });
         size_t cold_k = 0;
+        double h2d_ms = 0.0;
         std::vector<int> pending;
         auto S = [&](const std::string& tn) -> const float* { return (const float*)(small_dev + m.small_off.at(tn)); };
         auto mat = [&](const std::string& tn, const float* xin, long K, float* out, long out_row0, long ystride,
@@ -2167,10 +2457,48 @@ int main(int argc, char** argv) {
             for (int idx : tensor_items.at(tn)) {
                 Item& it = items[idx];
                 auto multiply = [&](const uint8_t* weights) {
-                    if (it.transfer < it.bytes)
-                        launch_packed_q4<true>(weights, it.K, it.rows, xq, xmeta, out + out_row0 + it.row0, ystride, stc);
-                    else if (it.packed) launch_packed_q4(weights, it.K, it.rows, xq, xmeta, out + out_row0 + it.row0, ystride, stc);
-                    else launch_mat_q4(weights, it.K, it.rows, xq, xmeta, out + out_row0 + it.row0, ystride, stc);
+                    float* output = out + out_row0 + it.row0;
+                    if (draft.rows && it.packed && B > kPrefillChunk) {
+                        // Packed groups use the same per-row FP32 reduction
+                        // for every width, including the final prompt slice.
+                        if (it.transfer < it.bytes)
+                            launch_packed_q4<true>(weights, K, it.rows, xq, xmeta, output, ystride, stc, B, true);
+                        else
+                            launch_packed_q4(weights, K, it.rows, xq, xmeta, output, ystride, stc, B, true);
+                    } else if (draft.rows || draft.checkpoint_row) {
+                        // After a reused prefix the first canonical chunk can
+                        // start partway through, with only its suffix in xq.
+                        auto slice = [&](long row, long width) {
+                            g_batch = mat_width(width);
+                            const int8_t* q = xq + row * K;
+                            const int2* meta = xmeta + row * nb;
+                            float* dst = output + row * ystride;
+                            if (it.transfer < it.bytes)
+                                launch_packed_q4<true>(weights, K, it.rows, q, meta, dst, ystride, stc);
+                            else if (it.packed)
+                                launch_packed_q4(weights, K, it.rows, q, meta, dst, ystride, stc);
+                            else
+                                launch_mat_q4(weights, K, it.rows, q, meta, dst, ystride, stc);
+                        };
+                        const long split = draft.checkpoint_row ? draft.checkpoint_row : draft.split;
+                        for (long row = 0; row < split; ) {
+                            slice(row, kPrefillChunk);
+                            row += draft.checkpoint_row ? kPrefillChunk - (cur_pos + row) % kPrefillChunk : kPrefillChunk;
+                        }
+                        slice(split, physical_rows);
+                        for (long row = prompt_rows; row < B; row += kPrefillChunk)
+                            slice(row, std::min(kPrefillChunk, B - row));
+                    } else if (it.transfer < it.bytes)
+                        launch_packed_q4<true>(weights, it.K, it.rows, xq, xmeta, output, ystride, stc, B, grouped);
+                    else if (it.packed)
+                        launch_packed_q4(weights, it.K, it.rows, xq, xmeta, output, ystride, stc, B, grouped);
+                    else if (grouped) {
+                        g_batch = kPrefillChunk;
+                        for (long row = 0; row < B; row += kPrefillChunk)
+                            launch_mat_q4(weights, it.K, it.rows, xq + row * it.K, xmeta + row * nb,
+                                output + row * ystride, ystride, stc);
+                        g_batch = mat_width(B);
+                    } else launch_mat_q4(weights, it.K, it.rows, xq, xmeta, output, ystride, stc);
                 };
                 if (it.tier == kHot) {
                     multiply(hot + it.res_off);
@@ -2188,6 +2516,7 @@ int main(int argc, char** argv) {
                     csrc = pinned_cache + it.res_off;
                 }
                 check(cudaStreamWaitEvent(st, evc[cold_k % kSlots], 0), "slot wait");
+                if (measure_h2d) check(cudaEventRecord(h2d_start[cold_k % kStage], st), "H2D timing start");
                 check(cudaMemcpyAsync(dst, csrc, it.transfer, cudaMemcpyHostToDevice, st), "copy");
                 check(cudaEventRecord(ev[cold_k % kStage], st), "ev");
                 check(cudaStreamWaitEvent(stc, ev[cold_k % kStage], 0), "wait copy");
@@ -2197,6 +2526,11 @@ int main(int argc, char** argv) {
                 if (pending.size() >= 6) {   // E047: deeper release window
                     const int o = pending.front(); pending.erase(pending.begin());
                     check(cudaEventSynchronize(ev[o % kStage]), "ev sync");
+                    if (measure_h2d) {
+                        float ms = 0.0f;
+                        check(cudaEventElapsedTime(&ms, h2d_start[o % kStage], ev[o % kStage]), "H2D elapsed");
+                        h2d_ms += ms;
+                    }
                     released.store((size_t)o + 1);
                 }
                 ++cold_k;
@@ -2247,7 +2581,11 @@ int main(int argc, char** argv) {
                         conv_dev + ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"),
                         t_conv, (int)m.qkv_out, tree_depth, tree_paths, (int)batch);
                 else if (row_pos)
-                    k_conv1d_silu_multi<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, (int)B, !saved || !defer_recurrent);
+                    k_conv1d_silu_multi<<<(unsigned)((m.qkv_out + 255) / 256), 256, 0, stc>>>(
+                        conv_dev + ri * trial_conv_layer, yA, S(L + ".ssm_conv1d.weight"),
+                        t_conv, (int)m.qkv_out, (int)B, !saved || !defer_recurrent,
+                        (draft.rows || draft.checkpoint_row) ? trial_conv + ri * trial_conv_layer : nullptr,
+                        (int)(draft.checkpoint_row ? draft.checkpoint_row : prompt_rows), draft.checkpoint_row != 0);
                 else
                     k_conv1d_silu<<<dim3((unsigned)((m.qkv_out + 255) / 256), (unsigned)B), 256, 0, stc>>>(conv_dev + (size_t)ri * m.qkv_out * (m.sss_conv - 1), yA, S(L + ".ssm_conv1d.weight"), t_conv, (int)m.qkv_out, conv_seq_stride);
                 if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg("convout0", t_conv, m.qkv_out); if (B > 1) dbg2("convout0", t_conv, m.qkv_out, m.qkv_out, 1); }
@@ -2268,7 +2606,10 @@ int main(int argc, char** argv) {
                         tree_leaves, tree_lengths, tree_owners, (int)batch);
                 else if (row_pos)
                     launch_delta_multi(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_v, t_g48a, t_dn,
-                                       (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, m.qkv_out, m.sss_inner, (int)B, stc, nullptr, !saved || !defer_recurrent);
+                                       (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, m.qkv_out,
+                                       m.sss_inner, (int)B, stc, nullptr, !saved || !defer_recurrent,
+                                       (draft.rows || draft.checkpoint_row) ? trial_ssm + ri * trial_ssm_layer : nullptr,
+                                       (int)(draft.checkpoint_row ? draft.checkpoint_row : prompt_rows), draft.checkpoint_row != 0);
                 else
                     k_delta_net<<<dim3((unsigned)m.sss_dt, (unsigned)B), 128, 0, stc>>>(ssm_dev + (size_t)ri * m.sss_dt * Sv * Sv, t_conv, t_conv + Sdim * m.sss_group,
                                                                  t_conv + 2 * Sdim * m.sss_group, t_v, t_g48a, t_dn, (int)Sdim, (int)m.sss_dt, (int)m.sss_group, dn_scale, ssm_seq_stride, (long)m.qkv_out);
@@ -2291,19 +2632,36 @@ int main(int argc, char** argv) {
                 const int rope_style = 0;
                 k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style, row_pos, tree ? tree_depth : nullptr);
                 const long li = A == "qwen35" ? il / 4 : il;
-                // batch mode: one slice per sequence; multi/verify mode: rows are positions of
-                // ONE sequence and must share slice 0 (full-history causal attention)
-                const long kv_seq_stride = row_pos ? 0 : (long)m.n_attn * 2 * m.n_kv * ctx * m.head_v;   // FLOATS
-                float* Kc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer);
-                float* Vc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer + kv_per_layer);
-                // NOTE: appends must run on the compute stream — they read yB/t_v produced
-                // by GEMVs on stc (a copy-stream race here corrupted every layer >= 1)
-                k_append_kv<<<dim3((unsigned)((nh_k * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(
-                    Kc, Vc, yB, t_v, (int)cur_pos, (int)ctx, (int)nh_k, (int)hd, kv_seq_stride, row_pos);
-                if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("vc" + std::to_string(il)).c_str(), Vc, nh_k * hd); }
-                k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + (row_pos ? B : 1)) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride, row_pos,
-                    tree ? tree_depth : nullptr, tree ? tree_paths : nullptr, (int)batch);
-                if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); if (B > 1) { dbg2(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd, nh_q * hd, 1); dbg2(("vv" + std::to_string(il)).c_str(), t_v, nh_k * hd, nh_k * hd, 1); } }
+                if (tier_kv) {
+                    const auto layer_cache = tier_cache.layer((int)nh_k, (int)li);
+                    const int splits = (int)((cur_pos + B + kTierSplit - 1) / kTierSplit);
+                    k_tier_append<<<dim3(nh_k, B), kTierHead, 0, stc>>>(layer_cache, yB, t_v, cur_pos, nh_k);
+                    k_tier_query<<<dim3(nh_q, B), kTierHead, 0, stc>>>(tier_queries, yA, nh_q, q_stride);
+                    for (int first_row = 0; first_row < B; first_row += tier_batch) {
+                        const int rows = std::min<long>(tier_batch, B - first_row);
+                        k_tier_attention<<<dim3(nh_q, rows, splits), kTierHead, 0, stc>>>(
+                            t_att, tier_partial, layer_cache, yA, tier_queries, tier_protection, cur_pos,
+                            nh_q, nh_k, q_stride, tree ? tree_depth : nullptr,
+                            tree ? tree_paths : nullptr, batch, splits, first_row, attn_scale);
+                        if (splits > 1)
+                            k_tier_merge<<<nh_q * rows, kTierHead, 0, stc>>>(
+                                t_att + (size_t)first_row * nh_q * hd, tier_partial, splits);
+                    }
+                } else {
+                    // batch mode: one slice per sequence; multi/verify mode: rows are positions of
+                    // ONE sequence and must share slice 0 (full-history causal attention)
+                    const long kv_seq_stride = row_pos ? 0 : (long)m.n_attn * 2 * m.n_kv * ctx * m.head_v;   // FLOATS
+                    float* Kc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer);
+                    float* Vc = (float*)((uint8_t*)kv_dev + (size_t)li * 2 * kv_per_layer + kv_per_layer);
+                    // NOTE: appends must run on the compute stream — they read yB/t_v produced
+                    // by GEMVs on stc (a copy-stream race here corrupted every layer >= 1)
+                    k_append_kv<<<dim3((unsigned)((nh_k * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(
+                        Kc, Vc, yB, t_v, (int)cur_pos, (int)ctx, (int)nh_k, (int)hd, kv_seq_stride, row_pos);
+                    if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("vc" + std::to_string(il)).c_str(), Vc, nh_k * hd); }
+                    k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)((cur_pos + (row_pos ? B : 1)) * 4), stc>>>(t_att, Kc, Vc, yA, (int)cur_pos, (int)ctx, (int)nh_q, (int)nh_k, (int)hd, attn_scale, q_stride, kv_seq_stride, row_pos,
+                        tree ? tree_depth : nullptr, tree ? tree_paths : nullptr, (int)batch);
+                    if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); if (B > 1) { dbg2(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd, nh_q * hd, 1); dbg2(("vv" + std::to_string(il)).c_str(), t_v, nh_k * hd, nh_k * hd, 1); } }
+                }
                 if (A == "qwen35") k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
                 mat(L + ".attn_output.weight", t_att, nh_q * hd, yA, 0, max_rows);
                 if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("wo0", yA, m.n_embd, m.n_embd, 1); dbg2("xpre0", x, m.n_embd, m.n_embd, 1); }
@@ -2320,10 +2678,17 @@ int main(int argc, char** argv) {
             else k_silu_mul<<<(unsigned)((m.n_ff * B + 255) / 256), 256, 0, stc>>>(t_ffnh, yA, yB, (int)(m.n_ff * B));
             mat(L + ".ffn_down.weight", t_ffnh, m.n_ff, yA, 0, max_rows, fuse_quant);
             k_add<<<(unsigned)((m.n_embd * B + 255) / 256), 256, 0, stc>>>(x, yA, (int)(m.n_embd * B));
+            if (capture && capture_slots[il] >= 0) {
+                check(cudaMemcpyAsync(capture_dev + capture_slots[il] * capture_row_floats, x,
+                    capture_row_floats * sizeof(float), cudaMemcpyDeviceToDevice, stc), "capture mid");
+            }
             if (eagle_on) eagle.tap((int)il, x, (int)B);
             if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("ffn_out" + std::to_string(il)).c_str(), x, m.n_embd); }
             if ((il & 7) == 0) safety("token");
         }
+        if (capture)
+            check(cudaMemcpyAsync(capture_dev + capture_mid * capture_row_floats, x,
+                capture_row_floats * sizeof(float), cudaMemcpyDeviceToDevice, stc), "capture final pre-norm");
         // Prompt chunks only need the last row's prediction at the handoff.
         // The MTP cache still consumes every final-normalized target row.
         if (mtp_on || head_row == -1)
@@ -2331,28 +2696,53 @@ int main(int argc, char** argv) {
         else if (head_row >= 0)
             k_rms_norm<<<1, 256, 0, stc>>>(t_norm + head_row * m.n_embd, x + head_row * m.n_embd,
                 S("output_norm.weight"), (int)m.n_embd, (float)m.eps);
-        if (share_output && head_row != -2) {
-            const long rows = head_row >= 0 ? 1 : B;
-            const float* input = t_norm + std::max(0L, head_row) * m.n_embd;
+        auto read_target_maxima = [&](long start, long rows) {
+            k_logit_tile_max<<<dim3(logit_tiles, (unsigned)rows), 256, 0, stc>>>(logits, (int)m.n_vocab, tile_maxima);
+            k_logit_row_max<<<(unsigned)rows, 256, 0, stc>>>(tile_maxima, logit_tiles, row_maxima);
+            check(cudaMemcpyAsync(target_maxima.data() + start, row_maxima,
+                rows * sizeof(LogitMax), cudaMemcpyDeviceToHost, stc), "target argmax d2h");
+        };
+        auto score_target_rows = [&](long start, long rows) {
+            const float* input = t_norm + start * m.n_embd;
             const long blocks = m.n_embd / 32 * rows;
             g_batch = mat_width(rows);
             k_quant_x<<<(unsigned)((blocks + 127) / 128), 128, 0, stc>>>(input, blocks, xq, xmeta);
             launch_mat_q4(output_device, m.n_embd, m.n_vocab, xq, xmeta, logits, m.n_vocab, stc);
+            if (compact_target_logits) read_target_maxima(start, rows);
+        };
+        if (share_output && head_row != -2) {
+            score_target_rows(std::max(0L, head_row), head_row >= 0 ? 1 : B);
+            if (draft.rows)
+                for (long row = prompt_rows; row < B; row += speculate)
+                    score_target_rows(row, std::min(speculate, B - row));
         } else if (!share_output) {
             mat("output.weight", t_norm, m.n_embd, logits, 0, m.n_vocab);
+            if (compact_target_logits) read_target_maxima(0, B);
         }
-        if (compact_target_logits && head_row != -2) {
-            const long rows = head_row >= 0 ? 1 : B;
-            k_logit_tile_max<<<dim3(logit_tiles, (unsigned)rows), 256, 0, stc>>>(logits, (int)m.n_vocab, tile_maxima);
-            k_logit_row_max<<<(unsigned)rows, 256, 0, stc>>>(tile_maxima, logit_tiles, row_maxima);
-            check(cudaMemcpyAsync(target_maxima.data() + std::max(0L, head_row), row_maxima,
-                rows * sizeof(LogitMax), cudaMemcpyDeviceToHost, stc), "target argmax d2h");
-        }
+        if (capture)
+            check(cudaMemcpyAsync(capture_host + 3, capture_dev, capture_payload_floats * sizeof(float),
+                cudaMemcpyDeviceToHost, stc), "capture d2h");
         check(cudaGetLastError(), "kernel");
         check(cudaStreamSynchronize(stc), "sync c");
         check(cudaStreamSynchronize(st), "sync copy");
+        if (measure_h2d) for (int o : pending) {
+            check(cudaEventSynchronize(ev[o % kStage]), "H2D final sync");
+            float ms = 0.0f;
+            check(cudaEventElapsedTime(&ms, h2d_start[o % kStage], ev[o % kStage]), "H2D final elapsed");
+            h2d_ms += ms;
+        }
         released.store(cold_list.size() + (size_t)kStage);
         for (auto& th : pool) th.join();
+        if (capture) {
+            capture_host[0] = (float)cur_pos;
+            capture_host[1] = (float)capture_mid;
+            capture_host[2] = (float)B;
+            const size_t record_floats = capture_payload_floats + 3;
+            if (fwrite(capture_host, sizeof(float), record_floats, capture_file) != record_floats) {
+                perror(capture_path);
+                exit(1);
+            }
+        }
         if (!compact_target_logits && head_row != -2) {
             const long rows = head_row >= 0 ? 1 : B;
             check(cudaMemcpy(logits_h.data() + std::max(0L, head_row) * m.n_vocab, logits,
@@ -2365,6 +2755,7 @@ int main(int argc, char** argv) {
         }
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         *tok_s_out = s;
+        if (h2d_ms_out) *h2d_ms_out = h2d_ms;
         uint64_t cb = 0; for (int idx : cold_list) cb += items[idx].transfer;
         *cold_out = cb;
         if (fail.load()) exit(1);
@@ -2431,7 +2822,7 @@ int main(int argc, char** argv) {
     double sum_gen_s = 0; long n_gen_s = 0;
     size_t max_plen = 0;
     for (long v = 0; v < batch; ++v) { plen[v] = prompts[v].size(); max_plen = std::max(max_plen, plen[v]); }
-    if (!max_plen || ctx <= 0 || max_plen > (size_t)ctx || (size_t)gen_tokens > (size_t)ctx - max_plen) {
+    if (!max_plen || ctx <= 0 || max_plen > (size_t)ctx || (size_t)first_gen_tokens > (size_t)ctx - max_plen) {
         fprintf(stderr, "context is too small for the prompt and generation limit\n");
         return 2;
     }
@@ -2498,7 +2889,7 @@ int main(int argc, char** argv) {
     // Appends MTP KV causally; h_out = [B][n_embd] shared-head-normed hidden. With
     // want_logits, the head GEMV runs for row `logit_row` and its logits land in logits[0].
     auto mtp_S = [&](const std::string& tn) -> const float* { return (const float*)(mtp_small_dev + mtp_small_off.at(tn)); };
-    const long mtp_kv_layer = m.n_kv * ctx * m.head_v;
+    const long mtp_kv_layer = m.n_kv * mtp_capacity * m.head_v;
     std::vector<int> draft_ids;
     std::vector<char> draft_seen(mtp_on ? m.n_vocab : 0);
     int* draft_device = nullptr;
@@ -2510,11 +2901,7 @@ int main(int argc, char** argv) {
         }
     };
     if (mtp_on && common && common < m.n_vocab) {
-        for (long token = 0; token < common; ++token) add_draft_id(token);
-        for (long token : prompts[0]) add_draft_id(token);
-        add_draft_id(m.eos_id);
         check(cudaMalloc(&draft_device, m.n_vocab * sizeof(int)), "draft vocabulary");
-        check(cudaMemcpy(draft_device, draft_ids.data(), draft_ids.size() * sizeof(int), cudaMemcpyHostToDevice), "draft ids");
     }
     struct MtpBranchBatch {
         int first;
@@ -2554,16 +2941,18 @@ int main(int argc, char** argv) {
             (int)pos0, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot,
             (float)m.rope_base, 2 * (int)hd, 0, 1, grouped ? mtp_tree_depth : nullptr);
         k_append_kv<<<dim3((unsigned)((nh_k * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(
-            mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yB, t_v, storage, (int)ctx, (int)nh_k, (int)hd, 0, true);
+            mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yB, t_v, storage, (int)mtp_capacity, (int)nh_k, (int)hd, 0, true);
         if (!h_out) {
             check(cudaGetLastError(), "mtp KV kernel");
             return;
         }
-        const long score_rows = pos0 + (grouped ? grouped->max_depth + 1 : B);
+        // Limit only the proposer. The target verifier keeps its full context.
+        const long first_pos = large_tier ? std::max(0L, pos0 + 1 - mtp_window) : 0;
+        const long score_rows = pos0 + (grouped ? grouped->max_depth + 1 : B) - first_pos;
         k_attn_decode<<<dim3((unsigned)nh_q, (unsigned)B), 256, (unsigned)(score_rows * sizeof(float)), stc>>>(
-            t_att, mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yA, (int)pos0, (int)ctx,
+            t_att, mtp_kv_dev, mtp_kv_dev + mtp_kv_layer, yA, (int)pos0, (int)mtp_capacity,
             (int)nh_q, (int)nh_k, (int)hd, attn_scale, 2 * (int)hd, 0, 1,
-            grouped ? mtp_tree_depth : nullptr, grouped ? mtp_tree_path : nullptr, grouped ? grouped->stride : 0);
+            grouped ? mtp_tree_depth : nullptr, grouped ? mtp_tree_path : nullptr, grouped ? grouped->stride : 0, first_pos);
         k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
         k_quant_x<<<dim3((unsigned)((nh_q * hd / 32 * B + 127) / 128)), 128, 0, stc>>>(t_att, nh_q * hd / 32 * B, xq, xmeta);
         launch_mat_q4(mtp_dev + mtp_off.at("blk.64.attn_output.weight"), nh_q * hd, m.n_embd, xq, xmeta, yA, m.n_embd, stc);
@@ -2599,41 +2988,196 @@ int main(int argc, char** argv) {
         check(cudaStreamSynchronize(stc), "mtp sync");
     };
 
-    auto mtp_commit = [&](const std::vector<long>& tokens, long base, int final_row, const int* path, bool dump) {
+    auto mtp_commit = [&](const std::vector<long>& tokens, long base, int final_row, const int* path, bool dump,
+                          long target_offset = 0) {
         // MTP conditions on the previous target hidden state at each position.
         // The accepted rows populate its KV cache, then only the last state carries forward.
         const int count = (int)tokens.size();
         const long elements = (long)count * m.n_embd;
-        k_mtp_shift_hidden<<<(elements + 255) / 256, 256, 0, stc>>>(mtp_last_hidden, t_norm, path,
+        const float* target_rows = t_norm + target_offset * m.n_embd;
+        k_mtp_shift_hidden<<<(elements + 255) / 256, 256, 0, stc>>>(mtp_last_hidden, target_rows, path,
             mtp_hout, (int)m.n_embd, count);
-        check(cudaMemcpyAsync(mtp_last_hidden, t_norm + (size_t)final_row * m.n_embd,
+        check(cudaMemcpyAsync(mtp_last_hidden, target_rows + (size_t)final_row * m.n_embd,
             m.n_embd * sizeof(float), cudaMemcpyDeviceToDevice, stc), "advance last target hidden state");
         mtp_forward(mtp_hout, tokens, count, base, dump ? mtp_hout : nullptr, false, -1);
     };
 
-    if (speculate > 0) {
+    // Attention KV stays in place as generation appends. Keep recurrent
+    // state in host RAM at the prompt checkpoint and optional shared prefix.
+    std::vector<long> checkpoint_ids;
+    std::vector<long> committed_ids;
+    std::vector<long> shared_prefix_ids;
+    std::vector<uint8_t> checkpoint_state;
+    std::vector<uint8_t> shared_prefix_state;
+    auto copy_checkpoint = [&](std::vector<uint8_t>& state, bool restore, bool boundary = false) {
+        const size_t hidden_bytes = mtp_on ? m.n_embd * sizeof(float) : 0;
+        state.resize(ssm_bytes + conv_bytes + hidden_bytes);
+        uint8_t* host = state.data();
+        const std::pair<void*, size_t> regions[] = {
+            {boundary ? trial_ssm : ssm_dev, ssm_bytes},
+            {boundary ? trial_conv : conv_dev, conv_bytes}, {mtp_last_hidden, hidden_bytes}
+        };
+        check(cudaStreamSynchronize(stc), "checkpoint sync");
+        for (const auto& [device, bytes] : regions) {
+            if (!bytes) continue;
+            if (restore) check(cudaMemcpy(device, host, bytes, cudaMemcpyHostToDevice), "restore prefill state");
+            else check(cudaMemcpy(host, device, bytes, cudaMemcpyDeviceToHost), "save prefill state");
+            host += bytes;
+        }
+    };
+    auto run_request = [&](const std::vector<long>& request, const std::vector<long>& hint, long gen_tokens) -> int {
         // One sequence. Verify a draft against the unchanged Q4 target, then
         // commit only the recurrent inputs and attention KV of the accepted prefix.
         const auto prefill_start = std::chrono::steady_clock::now();
         const long G = speculate;
-        std::vector<long> hist = prompts[0];
+        std::vector<long> hist = request;
         std::vector<long> emitted;
+        auto stream_tokens = [&](size_t count) {
+            if (!session_stream || count == 0) return;
+            printf("session_delta");
+            for (size_t i = emitted.size() - count; i < emitted.size(); ++i)
+                printf(",%ld", emitted[i]);
+            printf("\n");
+            fflush(stdout);
+        };
         long known = -1;
-        for (size_t base = 0; base < hist.size(); base += prefill_width) {
-            const long nb = std::min<long>(prefill_width, (long)hist.size() - base);
+        if (draft_device) {
+            draft_ids.clear();
+            std::fill(draft_seen.begin(), draft_seen.end(), false);
+            for (long token = 0; token < common; ++token) add_draft_id(token);
+            for (long token : request) add_draft_id(token);
+            add_draft_id(m.eos_id);
+            check(cudaMemcpy(draft_device, draft_ids.data(), draft_ids.size() * sizeof(int),
+                cudaMemcpyHostToDevice), "draft ids");
+        }
+        const size_t complete_prefix = (hist.size() - 1) / prefill_width * prefill_width;
+        const size_t shared_prefix = (size_t)session_prefix_tokens;
+        size_t reused = 0;
+        if (session) {
+            if (hist.size() > (size_t)(ctx - gen_tokens)) {
+                fprintf(stderr, "session context is too small for the prompt and generation limit\n");
+                return 2;
+            }
+            // A fresh request may give its final chunk a different shape and
+            // output head. Save only completed nonfinal prefill chunks.
+            if (session_tail && !committed_ids.empty() && committed_ids.size() <= complete_prefix &&
+                std::equal(committed_ids.begin(), committed_ids.end(), hist.begin())) {
+                // The cache and recurrent state are already at this position.
+                reused = committed_ids.size();
+            } else if (!checkpoint_ids.empty() && checkpoint_ids.size() <= complete_prefix &&
+                (!tier_kv || (long)checkpoint_ids.size() >= tier_written - (tier_cache.ring - tier_cache.recent_tokens)) &&
+                std::equal(checkpoint_ids.begin(), checkpoint_ids.end(), hist.begin())) {
+                reused = checkpoint_ids.size();
+                copy_checkpoint(checkpoint_state, true);
+            } else if (!shared_prefix_ids.empty() && shared_prefix_ids.size() <= complete_prefix &&
+                std::equal(shared_prefix_ids.begin(), shared_prefix_ids.end(), hist.begin())) {
+                reused = shared_prefix_ids.size();
+                copy_checkpoint(shared_prefix_state, true);
+                checkpoint_ids.clear();
+            } else if (cur_pos) {
+                check(cudaMemset(ssm_dev, 0, ssm_bytes), "reset session recurrent state");
+                check(cudaMemset(conv_dev, 0, conv_bytes), "reset session convolution state");
+                if (mtp_on)
+                    check(cudaMemset(mtp_last_hidden, 0, m.n_embd * sizeof(float)), "reset session MTP state");
+                checkpoint_ids.clear();
+            }
+            if (reused < shared_prefix_ids.size()) shared_prefix_ids.clear();
+            cur_pos = (long)reused;
+            if (tier_kv) tier_packed = tier_written = cur_pos;
+            free_min = free_vram_mib();
+        }
+        const long hint_limit = std::min({(long)hint.size(), gen_tokens - 1, 2 * kPrefillChunk});
+        long prefill_passes = 0;
+        bool hint_rejected = false;
+        for (size_t base = reused; base < hist.size(); ) {
+            const size_t chunk_start = base / prefill_width * prefill_width;
+            const long canonical_rows = std::min<long>(prefill_width, hist.size() - chunk_start);
+            long nb = canonical_rows - (long)(base - chunk_start);
+            size_t grouped_end = std::min(complete_prefix, chunk_start + prefill_chunks * prefill_width);
+            if (shared_prefix_ids.empty() && base < shared_prefix)
+                grouped_end = std::min(grouped_end, shared_prefix);
+            if (prefill_chunks > 1 && grouped_end > base + kPrefillChunk)
+                nb = (long)(grouped_end - base);
+            long physical_rows = canonical_rows;
+            long prefill_split = 0;
+            long checkpoint_row = 0;
+            // Keep the nonfinal checkpoint while scoring the final prompt rows
+            // in the same weight pass using the original matrix widths.
+            if (fuse_prefill_tail && base + nb == complete_prefix &&
+                nb + mat_width(hist.size() - complete_prefix) <= B) {
+                checkpoint_row = nb;
+                nb = (long)(hist.size() - base);
+                physical_rows = nb - checkpoint_row;
+            }
+            // Preserve the prompt's canonical chunks, but read each weight
+            // only once. Keep any earlier checkpoint for changed-prefix replay.
+            if (reused && hint_limit && base + nb == complete_prefix &&
+                (!shared_prefix_ids.empty() || shared_prefix != complete_prefix) &&
+                hist.size() - base + hint_limit + kPrefillChunk <= (size_t)B) {
+                prefill_split = nb;
+                nb = (long)(hist.size() - base);
+                physical_rows = nb - prefill_split;
+            }
             std::vector<long> toks(hist.begin() + base, hist.begin() + base + nb);
             double s; uint64_t cold;
             const long head_row = share_output && !dbg_dump ? (base + nb == hist.size() ? nb - 1 : -2) : -1;
-            run_token(toks, nb, (int)(base / prefill_width), &s, &cold, false, false, head_row);
+            const long fused = head_row >= 0 ? std::max(0L, std::min(hint_limit, B - nb - kPrefillChunk)) : 0;
+            if (fused) toks.insert(toks.end(), hint.begin(), hint.begin() + fused);
+            run_token(toks, nb + fused, (int)(base / prefill_width), &s, &cold, false, false, head_row, false,
+                fused || nb < canonical_rows || checkpoint_row ? physical_rows : 0,
+                {fused, prefill_split, checkpoint_row});
+            tier_commit(hist, (long)(base + nb));
+            ++prefill_passes;
+            if (session_stream && prefill_passes % 8 == 0) {
+                printf("session_prefill,processed=%zu,prompt=%zu\n", base + nb, hist.size());
+                fflush(stdout);
+            }
             if (base + nb == hist.size()) {
                 known = target_id(nb - 1);
                 if (parallel_on) parallel.commit(t_norm + (size_t)(nb - 1) * m.n_embd, stc);
             }
-            if (mtp_on && !oracle) mtp_commit(toks, (long)base, (int)nb - 1, nullptr, dbg_dump);
+            if (fused) {
+                long matched = 0;
+                while (matched < fused && target_id(nb + matched - 1) == hint[matched] && hint[matched] != m.eos_id)
+                    ++matched;
+                hint_rejected = matched < fused;
+                printf("prefill_hint,proposed=%ld,matched=%ld,committed=%ld,cold_bytes=%llu\n",
+                       fused, matched, hint_rejected ? 0 : matched, (unsigned long long)cold);
+                if (!hint_rejected) {
+                    check(cudaMemcpyAsync(ssm_dev, trial_ssm, ssm_bytes, cudaMemcpyDeviceToDevice, stc), "commit draft recurrent state");
+                    check(cudaMemcpyAsync(conv_dev, trial_conv, conv_bytes, cudaMemcpyDeviceToDevice, stc), "commit draft convolution state");
+                    emitted.assign(hint.begin(), hint.begin() + matched);
+                    known = target_id(nb + matched - 1);
+                }
+                cur_pos = (long)(base + nb + emitted.size());
+                toks.resize(nb + emitted.size());
+            }
+            if (nb > prefill_width || fused || checkpoint_row) {
+                for (long row = 0; row < (long)toks.size(); ) {
+                    const long end = row < nb ? nb : (long)toks.size();
+                    const long width = row < nb ? kPrefillChunk - (long)(base + row) % kPrefillChunk : kPrefillChunk;
+                    const long count = std::min(end - row, width);
+                    std::vector<long> chunk(toks.begin() + row, toks.begin() + row + count);
+                    mtp_commit(chunk, (long)base + row, count - 1, nullptr, false, row);
+                    row += count;
+                    if (checkpoint_row && row == checkpoint_row) {
+                        copy_checkpoint(checkpoint_state, false, true);
+                        checkpoint_ids.assign(hist.begin(), hist.begin() + complete_prefix);
+                    }
+                }
+            } else if (mtp_on && !oracle) mtp_commit(toks, (long)base, (int)nb - 1, nullptr, dbg_dump);
             if (eagle_on) {
                 eagle.project((int)base, (int)nb);
                 eagle_embeddings(toks);
                 eagle.attention(eagle.hidden_context + base * m.n_embd, (int)base, (int)nb, false);
+            }
+            if (session && base + nb == complete_prefix) {
+                copy_checkpoint(checkpoint_state, false);
+                checkpoint_ids.assign(hist.begin(), hist.begin() + complete_prefix);
+            }
+            if (shared_prefix && base + nb == shared_prefix && shared_prefix <= complete_prefix) {
+                copy_checkpoint(shared_prefix_state, false);
+                shared_prefix_ids.assign(hist.begin(), hist.begin() + shared_prefix);
             }
             // teacher-forced MTP sanity: row r's head argmax should predict the token
             // after toks[r] for most rows — a low rate means the MTP forward is broken
@@ -2652,28 +3196,42 @@ int main(int argc, char** argv) {
                 }
                 printf("dbg,mtp_tf,pb=%zu,ok=%ld,n=%ld\n", base, tf_ok, tf_n);
             }
+            base += nb;
         }
+        if (prefill_chunks > 1)
+            printf("grouped_prefill,passes=%ld,processed_tokens=%zu\n", prefill_passes, hist.size() - reused);
         safety("spec-prefill");
         check(cudaStreamSynchronize(stc), "spec prefill");
         const auto decode_start = std::chrono::steady_clock::now();
         const double prefill_s = std::chrono::duration<double>(decode_start - prefill_start).count();
         long cycles = 0;
         long mtp_accepted = 0, mtp_draft = 0, pld_accepted = 0, pld_draft = 0;
+        long direct_accepted = 0, direct_draft = 0;   // E167: acceptance of direct deep chains only
+        double chain_q_ewma = 1.0;   // E168: EWMA recovers after a low-acceptance stretch
+        std::vector<long> draft_hist;   // E167: draft length (rows-1) per cycle
         long eagle_accepted = 0, eagle_draft = 0;
         long parallel_accepted = 0, parallel_proposed = 0;
         double verify_s = 0, draft_s = 0, repair_s = 0;
         auto lookup_drafts = [&](long limit) {
-            std::vector<long> drafts;
+            // E167: prefer the occurrence with the LONGEST continuation (an early repeat
+            // with lots of following text), not just the most recent one — deep chains
+            // need continuations past the tree budget. Longest-match-n still wins first.
             const long size = (long)hist.size();
-            for (long n = std::min<long>(6, size - 1); n >= 1 && drafts.empty(); --n) {
+            for (long n = std::min<long>(6, size - 1); n >= 1; --n) {
+                std::vector<long> best;
+                size_t best_len = 0;
                 for (long j = size - n - 2; j >= 0; --j) {
                     if (!std::equal(hist.begin() + j, hist.begin() + j + n, hist.end() - n)) continue;
                     const long end = std::min(size, j + n + limit);
-                    drafts.assign(hist.begin() + j + n, hist.begin() + end);
-                    break;
+                    const size_t len = (size_t)(end - (j + n));
+                    if (len > best_len) {
+                        best_len = len;
+                        best.assign(hist.begin() + j + n, hist.begin() + end);
+                    }
                 }
+                if (!best.empty()) return best;
             }
-            return drafts;
+            return std::vector<long>{};
         };
         auto lookup_after_proposal = [&](const std::vector<long>& drafts, long proposal, long limit) {
             std::vector<long> continuation;
@@ -2699,22 +3257,53 @@ int main(int argc, char** argv) {
         };
         // The first token comes from prompt evaluation. Each later token comes
         // either from a matched draft or from the target's next-token prediction.
-        hist.push_back(known);
-        emitted.push_back(known);
+        const long prefilled_output = (long)emitted.size();
+        hist.insert(hist.end(), emitted.begin(), emitted.end());
+        if (!prefilled_output || known != m.eos_id) {
+            hist.push_back(known);
+            emitted.push_back(known);
+        }
+        const long emitted_before_decode = (long)emitted.size();
+        stream_tokens(emitted.size());
+        if (prefilled_output && draft_device) {
+            const size_t old = draft_ids.size();
+            for (long id : emitted) add_draft_id(id);
+            if (draft_ids.size() > old)
+                check(cudaMemcpy(draft_device + old, draft_ids.data() + old, (draft_ids.size() - old) * sizeof(int),
+                                 cudaMemcpyHostToDevice), "extend prefill draft vocabulary");
+        }
         bool stop = known == m.eos_id;
+        bool hint_matches = !hint_rejected && prefilled_output < (long)hint.size() && hint[prefilled_output] == known;
         while (!stop && (long)emitted.size() < gen_tokens) {
             const auto cycle_start = std::chrono::steady_clock::now();
             const long base = cur_pos;
             const long remaining = gen_tokens - (long)emitted.size();
             const long limit = std::min(G, remaining) - 1;
             const long mtp_limit = std::min(limit, draft_max);
+            const size_t hint_start = std::min(emitted.size(), hint.size());
+            const long hint_count = hint_matches ? std::min(limit, (long)(hint.size() - hint_start)) : 0;
             std::vector<long> drafts = !oracle && !parallel_on && !eagle_on && (!mtp_on || pld_enabled == 1)
                 ? lookup_drafts(limit) : std::vector<long>{};
+            // E167 deep long-match override: an exact history chain longer than the tree
+            // budget verifies as one linear pass — no drafter forwards, no tree. Gated on
+            // an EWMA of DIRECT-chain acceptance (guided-tree acceptance is a different
+            // statistic; the EWMA recovers after a low-acceptance stretch, E168): a deep
+            // pass pays the full width even when the target diverges early.
+            if (mtp_on && pld_enabled == 2 && !oracle && !parallel_on && !eagle_on) {
+                std::vector<long> chain = lookup_drafts(limit);
+                if ((long)chain.size() > (chain_min ? chain_min : mtp_limit) && chain_q_ewma >= 0.75) {
+                    // Cold start: bounded probe — +16 positions past the tree budget
+                    // buys the acceptance evidence without paying the full width.
+                    if (direct_draft < 8)
+                        chain.resize((size_t)std::min<long>((long)chain.size(), mtp_limit + 16));
+                    drafts = std::move(chain);
+                }
+            }
             const bool use_pld = !mtp_on || (drafts.size() >= 6);
             double this_draft_s = 0;
             long model_drafts = 0;
             DraftTree tree_drafts;
-            const bool tree_mtp = mtp_tree && !oracle && !use_pld;
+            const bool tree_mtp = mtp_tree && !oracle && !use_pld && !hint_count;
             auto guided_history = [&](const std::vector<long>& prefix, long token, long count) {
                 return pld_enabled == 2 ? lookup_after_proposal(prefix, token, count) : std::vector<long>{};
             };
@@ -2725,6 +3314,8 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 drafts.assign(oracle_ids.begin() + first, oracle_ids.begin() + first + mtp_limit);
+            } else if (hint_count) {
+                drafts.assign(hint.begin() + hint_start, hint.begin() + hint_start + hint_count);
             } else if (parallel_on) {
                 const auto draft_start = std::chrono::steady_clock::now();
                 const ssize_t bytes = emb_nb * 18;
@@ -2738,7 +3329,10 @@ int main(int argc, char** argv) {
                 this_draft_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - draft_start).count();
             } else if (eagle_on) {
                 const auto draft_start = std::chrono::steady_clock::now();
-                tree_drafts = eagle.draft(known, m.eos_id, (int)base, (int)limit, (int)mtp_limit, p_min,
+                // Tree node budget stays at mtp_limit: every model-expanded node costs a
+                // drafter forward, so the deep-γ ceiling (limit, up to 63) applies only to
+                // PLD history chains, never to tree expansion (novel chat unchanged).
+                tree_drafts = eagle.draft(known, m.eos_id, (int)base, (int)mtp_limit, (int)mtp_limit, p_min,
                     [&](long token) { eagle_embeddings({token}); }, guided_history);
                 drafts = std::move(tree_drafts.tokens);
                 model_drafts = (long)std::count(tree_drafts.from_history.begin(), tree_drafts.from_history.end(), false);
@@ -2746,7 +3340,9 @@ int main(int argc, char** argv) {
             } else if (tree_mtp) {
                 const auto draft_start = std::chrono::steady_clock::now();
                 std::vector<int> ranking(m.n_vocab);
-                tree_drafts = build_draft_tree(m.eos_id, (int)limit, (int)mtp_limit, p_min, mtp_group,
+                // Tree budget stays at mtp_limit (E149 behavior): deeper trees only added
+                // rejected width, and every model-expanded node costs a drafter forward.
+                tree_drafts = build_draft_tree(m.eos_id, (int)mtp_limit, (int)mtp_limit, p_min, mtp_group,
                     [&](int first, int count, const std::vector<std::vector<int>>& paths, const DraftTree& tree, DraftOptions* options) {
                         const bool shortlist = first > 0 && draft_device;
                         const int vocab = shortlist ? (int)draft_ids.size() : (int)m.n_vocab;
@@ -2785,7 +3381,7 @@ int main(int argc, char** argv) {
                                 proposal.choices[i] = {shortlist ? draft_ids[pick] : pick, exp((logits[pick] - peak) / 1.2) / mass};
                             }
                         }
-                    }, guided_history);
+                    }, guided_history, (int)mtp_limit);
                 drafts = std::move(tree_drafts.tokens);
                 model_drafts = (long)std::count(tree_drafts.from_history.begin(), tree_drafts.from_history.end(), false);
                 this_draft_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - draft_start).count();
@@ -2866,8 +3462,11 @@ int main(int argc, char** argv) {
                 check(cudaMemcpyAsync(conv_snap, conv_dev, conv_bytes, cudaMemcpyDeviceToDevice, stc), "conv snapshot");
             }
             double pass_s;
+            double pass_h2d_ms = 0.0;
             uint64_t cold;
-            run_token(feed, rows, (int)cycles + 1, &pass_s, &cold, rows > 1, tree);
+            run_token(feed, rows, (int)cycles + 1, &pass_s, &cold, rows > 1, tree, -1, false,
+                      0, PrefillDraft{}, &pass_h2d_ms);
+            draft_hist.push_back(rows - 1);
             std::vector<long> prefix{feed[0]};
             int leaf = 0;
             for (;;) {
@@ -2887,6 +3486,11 @@ int main(int argc, char** argv) {
             const long committed = (long)prefix.size();
             const long accepted = committed - 1;
             stop = known == m.eos_id;
+            if (hint_count) {
+                const size_t next = hint_start + accepted;
+                hint_matches = next < hint.size() && hint[next] == known;
+                printf("decode_hint,proposed=%ld,accepted=%ld\n", hint_count, accepted);
+            }
             const long new_tokens = accepted + (stop ? 0 : 1);
             emitted.insert(emitted.end(), prefix.begin() + 1, prefix.end());
             if (!stop) emitted.push_back(known);
@@ -2920,19 +3524,28 @@ int main(int argc, char** argv) {
                 mtp_draft += model_drafts;
                 mtp_accepted += model_accepted;
             }
-            if (!oracle) {
+            if (!oracle && !hint_count) {
                 pld_draft += rows - 1 - model_drafts;
                 pld_accepted += accepted - model_accepted;
             }
+            if (!tree && rows > 1 && mtp_on && !oracle && !hint_count) {
+                direct_draft += rows - 1;
+                direct_accepted += accepted;
+                chain_q_ewma = 0.8 * chain_q_ewma + 0.2 * ((double)accepted / (double)(rows - 1));
+            }
 
             double commit_s = 0;
-            if (!stop && (long)emitted.size() < gen_tokens) {
+            if (session_tail || (!stop && (long)emitted.size() < gen_tokens)) {
                 const auto commit_start = std::chrono::steady_clock::now();
                 const int* accepted_path = tree ? tree_paths + leaf * G : nullptr;
                 if (tree) {
-                    const int columns = (int)(m.n_attn * 2 * nh_k * hd);
-                    k_compact_kv<<<(columns + 255) / 256, 256, 0, stc>>>(kv_dev, (int)ctx, (int)hd,
-                        columns, (int)base, (int)committed, accepted_path);
+                    if (tier_kv) {
+                        k_tier_compact<<<m.n_attn * nh_k, kTierHead, 0, stc>>>(tier_cache, base, committed, accepted_path);
+                    } else {
+                        const int columns = (int)(m.n_attn * 2 * nh_k * hd);
+                        k_compact_kv<<<(columns + 255) / 256, 256, 0, stc>>>(kv_dev, (int)ctx, (int)hd,
+                            columns, (int)base, (int)committed, accepted_path);
+                    }
                     const size_t stride = 3 * m.n_embd;
                     for (long d = 0; eagle_on && d < committed; ++d) {
                         const int from = paths[leaf * G + d];
@@ -2981,6 +3594,7 @@ int main(int argc, char** argv) {
                     this_draft_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - sync_start).count();
                 }
                 cur_pos = base + committed;
+                tier_commit(hist, cur_pos);
             }
 
             verify_s += pass_s;
@@ -2992,12 +3606,13 @@ int main(int argc, char** argv) {
             if (oracle)
                 printf("oracle_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,verify_seconds=%.6f,commit_seconds=%.6f,seconds=%.6f,cold_bytes=%llu,free_vram_MiB=%ld\n",
                        cycles, rows - 1, accepted, new_tokens, pass_s, commit_s, cycle_s, (unsigned long long)cold, fv);
-            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,verify_seconds=%.4f,%s=%.4f,seconds=%.4f,cold_bytes=%llu,free_vram_MiB=%ld,tree=%d,tree_leaves=%d\n",
+            printf("spec_cycle,%ld,draft=%ld,matched=%ld,emitted=%ld,verify_seconds=%.4f,%s=%.4f,seconds=%.4f,cold_bytes=%llu,cold_h2d_ms=%.3f,free_vram_MiB=%ld,tree=%d,tree_leaves=%d\n",
                    cycles++, rows - 1, accepted, new_tokens, pass_s, parallel_on ? "parallel_seconds" : eagle_on ? "eagle_seconds" : "mtp_seconds",
-                   this_draft_s, cycle_s, (unsigned long long)cold, fv, tree, tree ? tree_leaf_count : 1);
+                   this_draft_s, cycle_s, (unsigned long long)cold, pass_h2d_ms, fv, tree, tree ? tree_leaf_count : 1);
+            stream_tokens((size_t)new_tokens);
         }
         const double decode_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
-        const long tot_emitted = (long)emitted.size() - 1;
+        const long tot_emitted = (long)emitted.size() - emitted_before_decode;
         const long tot_accepted = mtp_accepted + eagle_accepted + pld_accepted + parallel_accepted;
         const long tot_draft = mtp_draft + eagle_draft + pld_draft + parallel_proposed;
         if (show_text) printf("generated_text,%s\n", tok.decode(emitted).c_str());
@@ -3005,15 +3620,30 @@ int main(int argc, char** argv) {
             printf("parallel_summary,proposed=%ld,accepted=%ld,mean_prefix=%.4f,mean_draft_s=%.6f\n",
                    parallel_proposed, parallel_accepted, cycles ? (double)parallel_accepted / cycles : 0,
                    cycles ? draft_s / cycles : 0);
-        printf("spec_summary,user_sequences=1,cycles=%ld,emitted=%zu,decode_tokens=%ld,mean_emitted_per_cycle=%.3f,draft_acceptance=%.3f,mtp_draft_acceptance=%.3f,mtp_accepted=%ld,mtp_draft=%ld,eagle_draft_acceptance=%.3f,eagle_accepted=%ld,eagle_draft=%ld,pld_draft_acceptance=%.3f,pld_accepted=%ld,pld_draft=%ld,mean_verify_s=%.4f,%s=%.4f,mean_repair_s=%.4f,mean_cycle_s=%.4f,tok_per_s=%.3f,prefill_s=%.4f,request_tok_per_s=%.3f,min_free_vram_MiB=%ld\n",
+        printf("spec_summary,user_sequences=1,cycles=%ld,emitted=%zu,decode_tokens=%ld,mean_emitted_per_cycle=%.3f,draft_acceptance=%.3f,mtp_draft_acceptance=%.3f,mtp_accepted=%ld,mtp_draft=%ld,eagle_draft_acceptance=%.3f,eagle_accepted=%ld,eagle_draft=%ld,pld_draft_acceptance=%.3f,pld_accepted=%ld,pld_draft=%ld,mean_verify_s=%.4f,%s=%.4f,mean_repair_s=%.4f,mean_cycle_s=%.4f,decode_s=%.4f,tok_per_s=%.3f,prefill_s=%.4f,request_tok_per_s=%.3f,min_free_vram_MiB=%ld\n",
                cycles, emitted.size(), tot_emitted, cycles ? (double)tot_emitted / cycles : 0, tot_draft ? (double)tot_accepted / tot_draft : 0,
                mtp_draft ? (double)mtp_accepted / mtp_draft : 0, mtp_accepted, mtp_draft,
                eagle_draft ? (double)eagle_accepted / eagle_draft : 0, eagle_accepted, eagle_draft,
                pld_draft ? (double)pld_accepted / pld_draft : 0, pld_accepted, pld_draft,
                cycles ? verify_s / cycles : 0, parallel_on ? "mean_parallel_s" : eagle_on ? "mean_eagle_s" : "mean_mtp_s",
                cycles ? draft_s / cycles : 0, cycles ? repair_s / cycles : 0,
-               cycles ? decode_s / cycles : 0, decode_s > 0 ? (double)tot_emitted / decode_s : 0,
+               cycles ? decode_s / cycles : 0, decode_s, decode_s > 0 ? (double)tot_emitted / decode_s : 0,
                prefill_s, (double)emitted.size() / (prefill_s + decode_s), free_min);
+        // E167: draft-length distribution (owner gate metric — expected accepted prefix
+        // is the conditional-acceptance sum, so the length distribution is what matters)
+        if (!draft_hist.empty()) {
+            const char* names[7] = {"1-4", "5-8", "9-16", "17-24", "25-32", "33-48", "49-64"};
+            long buckets[7] = {0};
+            long sum_len = 0, max_len = 0;
+            for (long d : draft_hist) {
+                ++buckets[d <= 4 ? 0 : d <= 8 ? 1 : d <= 16 ? 2 : d <= 24 ? 3 : d <= 32 ? 4 : d <= 48 ? 5 : 6];
+                sum_len += d; if (d > max_len) max_len = d;
+            }
+            printf("draft_hist,cycles=%zu,mean_len=%.2f,max_len=%ld", draft_hist.size(),
+                   (double)sum_len / (double)draft_hist.size(), max_len);
+            for (int i = 0; i < 7; ++i) printf(",%s=%ld", names[i], buckets[i]);
+            printf("\n");
+        }
         if (out_ids_path.size()) {
             FILE* f = fopen(out_ids_path.c_str(), "w");
             if (f) { for (long id : emitted) fprintf(f, "%ld\n", id); fclose(f); }
@@ -3037,6 +3667,26 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "LOSSLESS VIOLATION: speculative stream diverges from dense greedy reference\n");
                 return 1;
             }
+        }
+        if (session) {
+            if (session_tail) committed_ids.assign(hist.begin(), hist.begin() + cur_pos);
+            printf("session_turn,reused_tokens=%zu,completion=%s\n", reused, stop ? "eos" : "length");
+            printf("session_ids");
+            for (long id : emitted) printf(",%ld", id);
+            printf("\n");
+            fflush(stdout);
+        }
+        return 0;
+    };
+    if (speculate > 0) {
+        int status = run_request(prompts[0], first_draft, first_gen_tokens);
+        if (status || !session) return status;
+        for (std::string line; std::getline(std::cin, line); ) {
+            std::vector<long> request, hint;
+            long request_tokens;
+            if (!parse_session_request(line, request, hint, request_tokens)) return 2;
+            status = run_request(request, hint, request_tokens);
+            if (status) return status;
         }
         return 0;
     }
@@ -3070,7 +3720,8 @@ int main(int argc, char** argv) {
         std::vector<long> toks(batch);
         for (long v = 0; v < batch; ++v) toks[v] = next_toks[v] >= 0 ? next_toks[v] : m.eos_id;
         double s; uint64_t cold;
-        run_token(toks, batch, pass, &s, &cold);
+        // Only this dense generation call writes records. Prefill leaves no records.
+        run_token(toks, batch, pass, &s, &cold, false, false, -1, capture_file != nullptr);
         n_eos = 0;
         for (long v = 0; v < batch; ++v) {
             gen_ids[v].push_back(toks[v]);
@@ -3090,6 +3741,11 @@ int main(int argc, char** argv) {
                g, s, (double)batch / s, (unsigned long long)cold, fv, toks[0],
                toks[0] >= 0 && toks[0] < (long)tok.vocab.size() ? tok.vocab[toks[0]].c_str() : "?");
     }
+    if (capture_file) {
+        if (fclose(capture_file) != 0) { perror(capture_path); return 1; }
+        check(cudaFreeHost(capture_host), "free capture host");
+        check(cudaFree(capture_dev), "free capture dev");
+    }
     // stash generated ids of sequence 0 for the summary/text
     generated = gen_ids[0];
     all_ids = prompts[0];
@@ -3098,7 +3754,20 @@ int main(int argc, char** argv) {
     // ---- summary ----
     if (out_ids_path.size()) {
         FILE* f = fopen(out_ids_path.c_str(), "w");
-        if (f) { for (long id : generated) fprintf(f, "%ld\n", id); fclose(f); }
+        if (f) {
+            // E169: dense batch mode writes ONE comma-terminated line per sequence
+            // (capture training needs every member's stream); single-sequence modes
+            // keep the one-id-per-line gate format.
+            if (batch > 1 && !multi && !speculate) {
+                for (long v = 0; v < batch; ++v) {
+                    for (long id : gen_ids[v]) fprintf(f, "%ld,", id);
+                    fprintf(f, "\n");
+                }
+            } else {
+                for (long id : generated) fprintf(f, "%ld\n", id);
+            }
+            fclose(f);
+        }
     }
     if (show_text && batch == 1) printf("generated_text,%s\n", tok.decode(generated).c_str());
     if (show_text && batch > 1) {
