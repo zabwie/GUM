@@ -186,3 +186,17 @@ Run contract: owner template + owner addenda given live before departure.
   open it can refuse; drop to GUM_PROFILE=nano (13.4 GiB tier) in that case. RAM at
   runtime: 15.2 GiB pinned + desktop.
   Profiles now: stream (default) / nano / lean / chat / 196k.
+- ~18:15 REPO REORGANIZATION for the pure-streaming era (owner brief: agents previously ran
+  wrong versions, 21->5 tok/s, unknowingly):
+  * HANDOFF.md opens with a STOP banner: current profile, self-check numbers per profile,
+    measured walls pointer, explicit warning that E-era 17-24 tok/s numbers were different
+    configurations. E177 section demoted to "historical context".
+  * README.md baseline table replaced with the profile table + cross-era comparison warning.
+  * AGENT.md gains Rule zero: verify the live configuration before quoting any number;
+    state the profile with every throughput claim.
+  * /health now reports the profile field (verified: "profile":"stream").
+  * scripts/verify_stream.sh: one-command self-check (health profile + live decode turn +
+    in-band/out-of-band verdict). Run output: 5.92 tok/s end-to-end, IN BAND.
+  * Stale probe sources + binaries moved to benchmarks/probes/; stale E172 test binaries
+    untracked and gitignored (preserved on disk). tiered_kv.cuh and real_decode.cu/binary
+    now tracked (fresh-clone builds work).
