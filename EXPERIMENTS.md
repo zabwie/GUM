@@ -2509,3 +2509,15 @@ buffer — the latter doubles as the draft-cost audit item).
 now 93→96% efficient; the remaining non-fetch tail (draft 14–19 ms + repair 2 ms)
 is protected by contention, not idle bandwidth. The frontier is emitted/cycle
 (drafter quality — capture-fed finetune) and prefill (A6 L2 window, untested).
+
+## E188 — CPU second-stream feasibility (2026-11-13)
+
+External claim tested: CPU Q4_0 matmul at verify width (32 rows) could absorb ~4 GB
+of weights per cycle in <0.4 s (+40% ceiling). Measured with the user's llama.cpp
+binary (GPU hidden, 8 P-cores): pp32 = 9.72 t/s = **3.29 s per 14.1 GiB weight pass =
+4.3 GiB/s**, batch-independent (pp512 = 9.78). The batch-1 objection to CPU matmul is
+indeed void — but the 0.4 s claim is 2.4× optimistic. Balanced GPU/CPU split ceiling:
+**+15–20% with perfect per-layer overlap** (f≈16% of weight bytes), contingent on a
+row-split pipeline, exactness gating of CPU-computed tensors, and modest RAM
+contention. CPU compute is not the obstacle; per-layer overlap + exactness are.
+Was excluded by owner directive; reopening is an owner call. Raw: results/e188-*.
