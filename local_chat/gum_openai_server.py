@@ -181,6 +181,12 @@ class GumSession:
             print(f"gum-api: adaptive_respawn_failed,error={exc}", flush=True)
 
     def _adaptive_loop(self) -> None:
+        # E183 policy is calibrated at ctx 32768 (E182 law). Under 196k the engine
+        # is ~10.4 GiB and free sits below reserve permanently — adaptive would
+        # read that as pressure and destroy long-context sessions for nothing.
+        if PROFILE != "stream":
+            print(f"gum-api: adaptive_disabled,profile={PROFILE},reason=calibrated_for_stream_only", flush=True)
+            return
         print(f"gum-api: adaptive_enabled,ceiling_mib={ADAPT_CEILING},reserve_mib={ADAPT_RESERVE},"
               f"poll_s={ADAPT_POLL_S}", flush=True)
         grow_streak = 0

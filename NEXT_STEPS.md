@@ -166,3 +166,22 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     sync-stall trim (~13.6 ms/cycle, E160), and tree-width headroom
     (~13%, E126). Expected: ~20 tok/s chat; the agent/PLD path (23.9 →
     ~27) remains the fastest route toward the owner's 40 goal.
+
+51. **Installed, E182/E183 (2026-11-13):** Stream profile re-baselined at 7.52 decode
+    tok/s (full-pin, calm desktop; verify 0.575 s is link-saturated at ~25 GB/s,
+    non-fetch overhead 4.3% — sync-stall lever spent). Hot tier is token-exact and
+    linear: 42–43 ms/GiB, +0.72 tok/s per GiB (7.52/8.49/9.75/13.70 at
+    hot 0/1600/3200/6400, all outputs identical). **GUM Adaptive installed and
+    default-on:** server supervisor respawns the idle decoder with the hot tier the
+    free VRAM affords (target = hot + free − 5000, clamp 0–6400, stream profile only);
+    live-verified grow/shrink/regrow; equilibrium ~4378 MiB → 9.8–10.8 tok/s, ceiling
+    13.7, floor 7.52 under desktop pressure. verify_stream.sh bands derive from live
+    hot_mib. A8 shortlist coverage: E178 logs show widening gained ≤0.1 emitted/cycle
+    — closed negative.
+52. **Next:** (a) prefetch the next verify pass's weight window during the ~25 ms
+    draft/repair tail (+4–5%, decoder surgery — respect the stream-discipline rules);
+    (b) capture-fed MTP finetune when capture volume suffices (E169 gate: +2pp val
+    top-1 + token-exact bench) — the emitted/cycle term is the only one left at fixed
+    bytes; (c) batched parallel agent streams (E039: 13.17 aggregate tok/s at batch 8,
+    0.77 GiB/token) for throughput-shaped workloads. Do not re-open: compression,
+    zero-copy, small drafters, shortlist widening.
