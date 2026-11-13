@@ -185,3 +185,9 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     bytes; (c) batched parallel agent streams (E039: 13.17 aggregate tok/s at batch 8,
     0.77 GiB/token) for throughput-shaped workloads. Do not re-open: compression,
     zero-copy, small drafters, shortlist widening.
+53. **Measured, E186/E187 (2026-11-13):** Wavefront ring 16/16/12 installed (+3% A/B,
+    exact-gated; 24/24/18 reproducibly worse — do not go deeper). Pre-draft prefetch is
+    a measured NEGATIVE at both hot=0 and hot=4378 (contention, not bandwidth) —
+    reverted, patch preserved. The draft-time "idle window" is not free: the tree's
+    logits readbacks already own it. If attacking it, batch the readbacks first
+    (one pinned buffer per tree level) — that is also the draft-cost audit.

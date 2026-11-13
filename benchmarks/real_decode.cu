@@ -43,8 +43,23 @@
 
 static constexpr size_t kMaxItem = 16u << 20;
 static constexpr size_t kStageBytes = kMaxItem + 8192;
-static constexpr int kStage = 8;
-static constexpr int kSlots = 8;   // E047: deeper slot ring
+// E186 GUM-Fuse wavefront sweep knobs. In-flight bytes = kSlots * 16 MiB; the
+// release-window back-pressure (see pending handling) must stay < kStage because
+// the copy-event sync indexes o % kStage. E186 sweep (repeated twice, token-exact):
+// (8,8,6)=6.98 tok/s, (16,16,12)=7.17 (+3.0%), (24,24,18)=6.66 — deeper queues
+// DEGRADE past 16; do not raise further without a new hypothesis.
+#ifndef GUM_KSTAGE
+#define GUM_KSTAGE 16
+#endif
+#ifndef GUM_KSLOTS
+#define GUM_KSLOTS 16
+#endif
+#ifndef GUM_WINDOW
+#define GUM_WINDOW 12
+#endif
+static constexpr int kStage = GUM_KSTAGE;
+static constexpr int kSlots = GUM_KSLOTS;   // E047: deeper slot ring
+static constexpr int kWindow = GUM_WINDOW;
 static constexpr uint64_t kMapMargin = 64ull << 20;
 static constexpr int kGGML_F32 = 0, kGGML_F16 = 1, kGGML_Q4_0 = 2, kGGML_Q8_0 = 8;
 
@@ -2373,6 +2388,13 @@ int main(int argc, char** argv) {
         }
         tier_packed = end;
     };
+    // E187 negative: pre-draft prefetch of the next pass's first copies (position-keyed
+    // into the slot ring, skip-on-consume in mat) measured NET NEGATIVE — token-exact
+    // but −0% at hot=0 (draft readbacks simply contend for the saturated link) and
+    // −4% at hot=4378 (verify +9 ms, mtp +7.5 ms; link had 32 ms of slack, so the loss
+    // is ordering/L2-eviction interference, not bandwidth). Reverted; patch and raw
+    // runs preserved in results/e187-prefetch-negative-20261113/. Do not re-attempt
+    // without a mechanism for readback isolation.
     auto run_token = [&](const std::vector<long>& toks, long B, int pass, double* tok_s_out, uint64_t* cold_out,
                          bool record_recurrent = false, bool tree = false, long head_row = -1, bool capture = false,
                          long physical_rows = 0, PrefillDraft draft = PrefillDraft{}, double* h2d_ms_out = nullptr) {
@@ -2529,7 +2551,7 @@ int main(int argc, char** argv) {
                 multiply(dst);
                 check(cudaEventRecord(evc[cold_k % kSlots], stc), "evc");
                 pending.push_back((int)cold_k);
-                if (pending.size() >= 6) {   // E047: deeper release window
+                if (pending.size() >= kWindow) {   // E047 deeper window; E186 sweeps it (must be < kStage)
                     const int o = pending.front(); pending.erase(pending.begin());
                     check(cudaEventSynchronize(ev[o % kStage]), "ev sync");
                     if (measure_h2d) {

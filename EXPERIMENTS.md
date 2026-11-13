@@ -2469,3 +2469,43 @@ Hunted the "1–2% items that stack". Results:
   ~42 ms/cycle (deeper staging prefetch queue, E184) and the draft's 13.5 ms internal
   split (CPU tree top-k scoring — accuracy closed by E178, but the COST side is
   unaudited). Repair 2 ms and logits scratch are not worth touching.
+
+## E186 — GUM-Fuse wavefront: deeper in-flight ring (installed, 2026-11-13)
+
+The E186 audit showed ~19–42 ms/cycle of kernel-stretch; the pipeline's in-flight
+buffer was 8 slots × 16 MiB ≈ 5 ms of link time with a 6-item CPU back-pressure sync.
+Made the ring depth compile-time sweepable (`GUM_KSTAGE/GUM_KSLOTS/GUM_WINDOW`) and
+swept under the production verify path, hot=0, same fixture, twice per point, every
+point session_ids-identical to the dense reference:
+
+| ring (stage/slots/window) | verify | cycle | tok/s |
+|---|---|---|---|
+| 8/8/6 (E047 baseline) | 0.6050 | 0.6208 | 6.98 |
+| **16/16/12 (installed)** | **0.5880** | **0.6039** | **7.18 (+3.0%)** |
+| 24/24/18 | 0.6347 | 0.6509 | 6.66 — reproducibly WORSE |
+
+Deeper queues degrade past 16 (copy-engine scheduling / slot-cycling L2 effects —
+mechanism unconfirmed, but the direction is consistent). Installed as compiled
+defaults; production warm-run delta is smaller (+0.4%, within ±1% variance) because
+the pinned-0-7 production path already ran nearer the floor than the unpinned A/B
+shell. VRAM cost: +128 MiB slots, +128 MiB host staging ring.
+
+## E187 — Prefetch-during-draft: negative (reverted)
+
+Implemented the FlashAttention-style fusion: the weight schedule is static, so the
+next pass's first copies can be issued during the draft's link-idle window
+(position-keyed into the slot ring, skip-on-consume in mat). Token-exact everywhere,
+but: **hot=0 net zero** (verify −6.3 ms, mtp +5.6 ms — the draft's logits readbacks
+simply contend for the saturated link; hiding bytes in the draft window reshuffles
+link demand, it does not create it) and **hot=4378 −4%** (verify +9 ms, mtp +7.5 ms,
+despite 32 ms of measured link slack — ordering/L2-eviction interference, not
+bandwidth). Reverted from the tree; the full patch, raw runs and IDs are preserved
+in results/e187-prefetch-negative-20261113/. Do not re-attempt without a mechanism
+that isolates the draft's D2H readbacks from prefetch H2D traffic (e.g., a dedicated
+readback stream with priority, or batching the tree's logits readbacks into one
+buffer — the latter doubles as the draft-cost audit item).
+
+**Where this leaves the decode equation:** at hot=0 the cycle is link-saturated and
+now 93→96% efficient; the remaining non-fetch tail (draft 14–19 ms + repair 2 ms)
+is protected by contention, not idle bandwidth. The frontier is emitted/cycle
+(drafter quality — capture-fed finetune) and prefill (A6 L2 window, untested).

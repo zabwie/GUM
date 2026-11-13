@@ -1,0 +1,118 @@
+diff --git a/benchmarks/real_decode.cu b/benchmarks/real_decode.cu
+index d2bfda4..5b37a7c 100644
+--- a/benchmarks/real_decode.cu
++++ b/benchmarks/real_decode.cu
+@@ -43,8 +43,23 @@
+ 
+ static constexpr size_t kMaxItem = 16u << 20;
+ static constexpr size_t kStageBytes = kMaxItem + 8192;
+-static constexpr int kStage = 8;
+-static constexpr int kSlots = 8;   // E047: deeper slot ring
++// E186 GUM-Fuse wavefront sweep knobs. In-flight bytes = kSlots * 16 MiB; the
++// release-window back-pressure (see pending handling) must stay < kStage because
++// the copy-event sync indexes o % kStage. E186 sweep (repeated twice, token-exact):
++// (8,8,6)=6.98 tok/s, (16,16,12)=7.17 (+3.0%), (24,24,18)=6.66 — deeper queues
++// DEGRADE past 16; do not raise further without a new hypothesis.
++#ifndef GUM_KSTAGE
++#define GUM_KSTAGE 16
++#endif
++#ifndef GUM_KSLOTS
++#define GUM_KSLOTS 16
++#endif
++#ifndef GUM_WINDOW
++#define GUM_WINDOW 12
++#endif
++static constexpr int kStage = GUM_KSTAGE;
++static constexpr int kSlots = GUM_KSLOTS;   // E047: deeper slot ring
++static constexpr int kWindow = GUM_WINDOW;
+ static constexpr uint64_t kMapMargin = 64ull << 20;
+ static constexpr int kGGML_F32 = 0, kGGML_F16 = 1, kGGML_Q4_0 = 2, kGGML_Q8_0 = 8;
+ 
+@@ -2373,9 +2388,41 @@ int main(int argc, char** argv) {
+         }
+         tier_packed = end;
+     };
++    // ---- E187 GUM-Fuse: prefetch the next pass's first copies during the draft ----
++    // The weight schedule is static, so position k of the next pass's cold list is
++    // known before the draft runs and the link would otherwise sit idle. Copies are
++    // issued on st into the same slots run_token's numbering would use (position %
++    // ring size); the consuming pass skips re-issue and waits the recorded event.
++    // Self-limiting: only direct-pin items (the full-pin steady state), depth capped
++    // below kSlots so a prefetch position never aliases a live slot beyond its own.
++#ifndef GUM_PREFETCH
++#define GUM_PREFETCH 14
++#endif
++    std::vector<int> gumf_cold;
++    for (int idx : sched) if (items[idx].tier != kHot) gumf_cold.push_back(idx);
++    bool gumf_armed = false;
++    long gumf_armed_n = 0;
++    auto gumf_prefetch = [&]() {
++        gumf_armed = false;
++        gumf_armed_n = 0;
++        for (long k = 0; k < (long)std::min<long>(GUM_PREFETCH, (long)gumf_cold.size()); ++k) {
++            const int idx = gumf_cold[k]; Item& it = items[idx];
++            const bool in_pin = (uint64_t)it.res_off + it.bytes <= pin_bytes;
++            if (!in_pin || !cached[idx]) break;   // only the direct-pin steady state
++            uint8_t* dst = slots + (size_t)(k % kSlots) * kMaxItem;
++            check(cudaStreamWaitEvent(st, evc[k % kSlots], 0), "prefetch slot wait");
++            check(cudaMemcpyAsync(dst, pinned_cache + it.res_off, it.transfer, cudaMemcpyHostToDevice, st), "prefetch copy");
++            check(cudaEventRecord(ev[k % kStage], st), "prefetch ev");
++            gumf_armed_n = k + 1;
++        }
++        gumf_armed = gumf_armed_n > 0;
++    };
++
+     auto run_token = [&](const std::vector<long>& toks, long B, int pass, double* tok_s_out, uint64_t* cold_out,
+                          bool record_recurrent = false, bool tree = false, long head_row = -1, bool capture = false,
+                          long physical_rows = 0, PrefillDraft draft = PrefillDraft{}, double* h2d_ms_out = nullptr) {
++        const bool gumf_consume = gumf_armed;   // exactly one run_token consumes an arm
++        gumf_armed = false;
+         if (tier_kv) tier_written = std::max(tier_written, cur_pos + B);
+         g_batch = mat_width(physical_rows ? physical_rows : B);
+         const long prompt_rows = B - draft.rows;
+@@ -2512,24 +2559,31 @@ int main(int argc, char** argv) {
+                 }
+                 const bool in_pin = (uint64_t)it.res_off + it.bytes <= pin_bytes;
+                 const bool direct_pin = pass > 0 && in_pin && cached[idx];
++                // E187: position already fetched by the pre-draft prefetch — its copy is
++                // in flight or done and ev[k%kStage] is recorded; skip straight to the wait.
++                const bool prefetched = gumf_consume && cold_k < gumf_armed_n;
+                 uint8_t* dst = slots + (size_t)(cold_k % kSlots) * kMaxItem;
+                 const uint8_t* csrc;
+-                if (!direct_pin) {
++                if (prefetched) {
++                    csrc = pinned_cache + it.res_off;
++                } else if (!direct_pin) {
+                     const int b = (int)(cold_k % kStage);
+                     while (ready[b].load() != (long)cold_k + 1) { if (fail.load()) exit(1); std::this_thread::yield(); }
+                     csrc = stage[b] + it.head;
+                 } else {
+                     csrc = pinned_cache + it.res_off;
+                 }
+-                check(cudaStreamWaitEvent(st, evc[cold_k % kSlots], 0), "slot wait");
+-                if (measure_h2d) check(cudaEventRecord(h2d_start[cold_k % kStage], st), "H2D timing start");
+-                check(cudaMemcpyAsync(dst, csrc, it.transfer, cudaMemcpyHostToDevice, st), "copy");
+-                check(cudaEventRecord(ev[cold_k % kStage], st), "ev");
++                if (!prefetched) {
++                    check(cudaStreamWaitEvent(st, evc[cold_k % kSlots], 0), "slot wait");
++                    if (measure_h2d) check(cudaEventRecord(h2d_start[cold_k % kStage], st), "H2D timing start");
++                    check(cudaMemcpyAsync(dst, csrc, it.transfer, cudaMemcpyHostToDevice, st), "copy");
++                    check(cudaEventRecord(ev[cold_k % kStage], st), "ev");
++                }
+                 check(cudaStreamWaitEvent(stc, ev[cold_k % kStage], 0), "wait copy");
+                 multiply(dst);
+                 check(cudaEventRecord(evc[cold_k % kSlots], stc), "evc");
+                 pending.push_back((int)cold_k);
+-                if (pending.size() >= 6) {   // E047: deeper release window
++                if (pending.size() >= kWindow) {   // E047 deeper window; E186 sweeps it (must be < kStage)
+                     const int o = pending.front(); pending.erase(pending.begin());
+                     check(cudaEventSynchronize(ev[o % kStage]), "ev sync");
+                     if (measure_h2d) {
+@@ -3282,6 +3336,7 @@ int main(int argc, char** argv) {
+         bool hint_matches = !hint_rejected && prefilled_output < (long)hint.size() && hint[prefilled_output] == known;
+         while (!stop && (long)emitted.size() < gen_tokens) {
+             const auto cycle_start = std::chrono::steady_clock::now();
++            gumf_prefetch();   // E187: fill the draft-time link idle window
+             const long base = cur_pos;
+             const long remaining = gen_tokens - (long)emitted.size();
+             const long limit = std::min(G, remaining) - 1;
