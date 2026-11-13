@@ -10,11 +10,19 @@
 >
 > | profile | engine VRAM | desktop free | decode tok/s | claim check |
 > |---|---|---|---|---|
-> | **stream** (default) | ~3.0 GiB | ~9 GiB | **~5.5** | if you measure 5–6, you are correct |
+> | **stream** (default) | ~3.0 GiB | ~9 GiB | **7.5** (full-pin, calm desktop; frozen 5.5 predates full-pin) | if you measure 7–8, you are correct |
+> | **GUM Adaptive (E183, live)** | 0–6.4 GiB hot, auto | ≥4.6 GiB reserved | **9.8–13.7** at equilibrium, 7.5 floor under pressure | /health reports live `hot_mib` |
 > | nano | ~4.6 GiB | ~7.1 GiB | 6.27 | |
 > | lean | ~6.1 GiB | ~5.3 GiB | 7.19 | |
 > | chat | ~10.2 GiB | ~2.1 GiB | 10.79 | |
 > | 196k (E181 long-output) | ~10.4 GiB | ~1.5 GiB | workload-dependent | |
+>
+> **E182/E183 (2026-11-13):** hot-tier residency is token-exact and linear at
+> 42–43 ms verify time per hot GiB (+0.72 tok/s per GiB at the standard fixture). The
+> stream profile is now link-saturated (verify 0.575 s ≈ cold bytes ÷ ~25 GB/s;
+> non-fetch overhead 4.3% of the cycle — the sync-stall lever is spent). GUM Adaptive
+> respawns the idle decoder with the hot tier the free VRAM affords and shrinks back
+> under desktop pressure; see EXPERIMENTS.md E182/E183 before touching residency code.
 >
 > **Historical numbers (17–24 tok/s, E149/E177 era) were DIFFERENT configurations**
 > (8 GiB hot tier, 2K ctx bench contexts). If you measure 2–6 tok/s while believing you

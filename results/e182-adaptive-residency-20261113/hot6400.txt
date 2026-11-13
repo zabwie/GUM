@@ -1,0 +1,12 @@
+To understand why a pendulum clock runs slow in a steadily accelerating train, we must look at how the pendulum perceives gravity and how its path changes when the train moves along a curve.
+
+### 1. The Effective Gravity Direction
+
+In a stationary frame, a pendulum hangs vertically under the influence of Earth’s gravity ($g$). However, inside an accelerating train, the pendulum is in a non-inertial reference frame. To an observer inside the train, it appears as if there is a fictitious force acting on the pendulum bob, opposite to the direction of the train’s acceleration.
+
+Let’s define the vectors:
+- $\vec{g}$: The real gravitational acceleration, pointing downward.
+- $\vec{a}$: The acceleration of the train.
+
+The **effective gravity** ($\vec{g}_{eff}$) experienced by the pendulum is the vector sum of real gravity and the fictitious inertial force:
+$$ \vec

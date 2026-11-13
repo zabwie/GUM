@@ -52,6 +52,25 @@ CACHE_MIB = os.environ.get("GUM_CACHE_MIB", str(_pcache))
 API_KEY = os.environ.get("LOCAL_GUM_API_KEY", "local-gum-key")
 MODEL_ID = "qwen3.8-27b-gum"
 
+# GUM Adaptive (E183): runtime residency manager. The stream profile keeps the
+# engine at ~3 GiB so desktop apps can use VRAM; when the desktop is NOT using
+# it, that VRAM is wasted on nothing. This supervisor respawns the idle decoder
+# with a larger --hot-mib (E182: token-exact, +0.72 tok/s per hot GiB) and
+# shrinks back when free VRAM gets tight. Policy:
+#   target_hot = hot_now + free_vram - RESERVE - MARGIN, clamped [0, CEILING]
+#   grow if target >= hot+400 MiB stable for GROW_SAMPLES polls (hysteresis)
+#   shrink if target <= hot-400 MiB for 2 polls, or 1 poll when free < reserve
+#   never mid-request (guarded by the session lock); skipped after long prompts
+#   (a respawn drops session KV and a long re-prefill costs more than it saves)
+GUM_ADAPTIVE = os.environ.get("GUM_ADAPTIVE", "0") == "1"
+ADAPT_CEILING = int(os.environ.get("GUM_ADAPT_CEILING_MIB", "6400"))
+ADAPT_RESERVE = int(os.environ.get("GUM_ADAPT_RESERVE_MIB", "4600"))
+ADAPT_MARGIN = int(os.environ.get("GUM_ADAPT_MARGIN_MIB", "400"))
+ADAPT_LONG_PROMPT = int(os.environ.get("GUM_ADAPT_LONG_PROMPT", "2000"))
+ADAPT_POLL_S = float(os.environ.get("GUM_ADAPT_POLL_S", "10"))
+ADAPT_GROW_SAMPLES = int(os.environ.get("GUM_ADAPT_GROW_SAMPLES", "3"))
+ADAPT_COOLDOWN_S = float(os.environ.get("GUM_ADAPT_COOLDOWN_S", "120"))
+
 
 class GumSession:
     def __init__(self) -> None:
@@ -67,6 +86,10 @@ class GumSession:
         self.proc: subprocess.Popen[str] | None = None
         self.gpu_lock = None
         self.lock = threading.Lock()
+        self.hot_mib: int | None = None          # hot tier of the live decoder
+        self.last_prompt_tokens = 0              # KV re-prefill cost of a respawn
+        if GUM_ADAPTIVE:
+            threading.Thread(target=self._adaptive_loop, daemon=True).start()
 
     @staticmethod
     def invalid_template(message: str) -> None:
@@ -104,6 +127,106 @@ class GumSession:
         if self.gpu_lock is not None:
             self.gpu_lock.close()
             self.gpu_lock = None
+
+    def _spawn(self, hot_mib: int) -> None:
+        command = [
+            str(DECODER), "--model", str(TARGET), "--mtp", str(MTP),
+            "--session", "1", "--session-tail", "1", "--session-stream", "1", "--prefill-chunks", "8",
+            "--speculate", "32", "--packed-verify", "1", "--pld", "0",
+            "--draft-max", "31", "--ctx", str(CTX), "--gen-tokens", str(GEN_TOKENS),
+            "--hot-mib", str(hot_mib), "--cache-mib", CACHE_MIB, "--kv-cache", KV_CACHE, "--show-text", "0",
+            "--prompt-ids", "-",
+        ]
+        benchmark_cpus = sorted(os.sched_getaffinity(0) & {0, 1, 2, 3})
+        if benchmark_cpus and shutil.which("taskset"):
+            command = ["taskset", "-c", ",".join(map(str, benchmark_cpus)), *command]
+        self.lines = queue.Queue()
+        self.gpu_lock = open("/tmp/gum-gpu.lock", "a")
+        try:
+            fcntl.flock(self.gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                pass_fds=(self.gpu_lock.fileno(),),
+            )
+        except BlockingIOError:
+            self.close()
+            raise RuntimeError("Another GUM job is using the GPU. Retry when it finishes.") from None
+        except OSError:
+            self.close()
+            raise
+        self.hot_mib = hot_mib
+        threading.Thread(target=self._read_stdout, args=(self.proc, self.lines), daemon=True).start()
+
+    @staticmethod
+    def _free_vram_mib() -> int | None:
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10)
+            return int(out.stdout.strip().splitlines()[0])
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+            return None
+
+    def _adaptive_respawn(self, target: int, free: int, action: str) -> None:
+        print(f"gum-api: adaptive,{action},hot_from={self.hot_mib},hot_to={target},free_vram_mib={free}", flush=True)
+        self.close()
+        try:
+            self._spawn(target)
+        except RuntimeError as exc:
+            print(f"gum-api: adaptive_respawn_failed,error={exc}", flush=True)
+
+    def _adaptive_loop(self) -> None:
+        print(f"gum-api: adaptive_enabled,ceiling_mib={ADAPT_CEILING},reserve_mib={ADAPT_RESERVE},"
+              f"poll_s={ADAPT_POLL_S}", flush=True)
+        grow_streak = 0
+        shrink_streak = 0
+        last_action = 0.0
+        while True:
+            time.sleep(ADAPT_POLL_S)
+            free = self._free_vram_mib()
+            # Holding the session lock means a turn is NOT in flight — the only
+            # safe moment to respawn the decoder.
+            if free is None or not self.lock.acquire(blocking=False):
+                continue
+            try:
+                hot = self.hot_mib
+                if self.proc is None or hot is None or self.proc.poll() is not None:
+                    continue
+                target = max(0, min(ADAPT_CEILING, hot + free - ADAPT_RESERVE - ADAPT_MARGIN))
+                long_ctx = self.last_prompt_tokens > ADAPT_LONG_PROMPT
+                pressure = free < ADAPT_RESERVE
+                if time.monotonic() - last_action < ADAPT_COOLDOWN_S:
+                    continue
+                if pressure:
+                    # Desktop needs VRAM now; long-context guard yields only to
+                    # hard pressure, where losing session KV beats starving it.
+                    if target < hot and (free < 1500 or not long_ctx):
+                        self._adaptive_respawn(target, free, "shrink")
+                        last_action = time.monotonic()
+                        grow_streak = shrink_streak = 0
+                elif target <= hot - ADAPT_MARGIN:
+                    shrink_streak += 1
+                    grow_streak = 0
+                    if shrink_streak >= 2 and not long_ctx:
+                        self._adaptive_respawn(target, free, "shrink")
+                        last_action = time.monotonic()
+                        shrink_streak = 0
+                elif target >= hot + ADAPT_MARGIN:
+                    grow_streak += 1
+                    shrink_streak = 0
+                    if grow_streak >= ADAPT_GROW_SAMPLES:
+                        self._adaptive_respawn(target, free, "grow")
+                        last_action = time.monotonic()
+                        grow_streak = 0
+                else:
+                    grow_streak = shrink_streak = 0
+            finally:
+                self.lock.release()
 
     def _wait_turn(self, on_tokens: Callable[[list[int]], None] | None,
                    on_prefill: Callable[[], None] | None) -> tuple[list[int], str]:
@@ -172,40 +295,11 @@ class GumSession:
         prompt = f"{max_tokens}:" + ",".join(map(str, prompt_ids))
         with self.lock:
             print(f"gum-api: admitted_prompt_tokens={len(prompt_ids)},output_budget={max_tokens}", flush=True)
+            self.last_prompt_tokens = len(prompt_ids)
             if self.proc is not None and self.proc.poll() is not None:
                 self.close()
             if self.proc is None:
-                command = [
-                    str(DECODER), "--model", str(TARGET), "--mtp", str(MTP),
-                    "--session", "1", "--session-tail", "1", "--session-stream", "1", "--prefill-chunks", "8",
-                    "--speculate", "32", "--packed-verify", "1", "--pld", "0",
-                    "--draft-max", "31", "--ctx", str(CTX), "--gen-tokens", str(GEN_TOKENS),
-                    "--hot-mib", HOT_MIB, "--cache-mib", CACHE_MIB, "--kv-cache", KV_CACHE, "--show-text", "0",
-                    "--prompt-ids", "-",
-                ]
-                benchmark_cpus = sorted(os.sched_getaffinity(0) & {0, 1, 2, 3})
-                if benchmark_cpus and shutil.which("taskset"):
-                    command = ["taskset", "-c", ",".join(map(str, benchmark_cpus)), *command]
-                self.lines: queue.Queue[str | None] = queue.Queue()
-                self.gpu_lock = open("/tmp/gum-gpu.lock", "a")
-                try:
-                    fcntl.flock(self.gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self.proc = subprocess.Popen(
-                        command,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        pass_fds=(self.gpu_lock.fileno(),),
-                    )
-                except BlockingIOError:
-                    self.close()
-                    raise RuntimeError("Another GUM job is using the GPU. Retry when it finishes.") from None
-                except OSError:
-                    self.close()
-                    raise
-                threading.Thread(target=self._read_stdout, args=(self.proc, self.lines), daemon=True).start()
+                self._spawn(int(HOT_MIB))
             assert self.proc.stdin is not None
             try:
                 self.proc.stdin.write(prompt + "\n")
@@ -249,7 +343,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._json(200, {"status": "ok", "model": MODEL_ID, "profile": PROFILE,
                              "loaded": SESSION.proc is not None and SESSION.proc.poll() is None,
-                             "context": CTX, "max_tokens": GEN_TOKENS, "kv_cache": KV_CACHE})
+                             "context": CTX, "max_tokens": GEN_TOKENS, "kv_cache": KV_CACHE,
+                             "hot_mib": SESSION.hot_mib, "adaptive": GUM_ADAPTIVE,
+                             "free_vram_mib": SESSION._free_vram_mib()})
             return
         if self.path == "/v1/models":
             if not self._authorized():

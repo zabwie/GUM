@@ -1948,3 +1948,488 @@ Stage V commitment. Per the owner's rule, two success definitions are
 recorded (performance ≥25% vs memory-efficiency 15–20% safe), and no
 drafter campaign launches from a C1 failure. Raw:
 `results/e165-*-20261111.txt` (screen logs), `/tmp/gum-q*.gguf` variants.
+
+## E166 — MMA width-64 validation probe (positive, prerequisite)
+
+Owner-required independent validation of the packed-verify dispatch at verify widths
+48/64 before any decoder change. Standalone probe (`benchmarks/microbench/e166-mma-width-probe.cu`)
+instantiating `q4_mma<8,8,8>` (K<17408), `q4_mma<16,8,4>` (K≥17408) and `q4_mma<8,8,6>`
+(width-48 reserve) against (a) per-group `q4_mma<NB,8,1>` decomposition — must be
+BIT-IDENTICAL since GROUPS only offsets activation/y pointers — and (b) the dp4a
+`k_mat_q4<NB>` fallback. All 8 cases (K=4096/5120/12288/17408 × rows=33/47/48/63/64)
+bit_diff=0, dp4a worst_rel=0. Occupancy: 56 regs (NB=8, max_threads 1024), 106 regs
+(NB=16, max_threads 512) at 256 threads — no pressure. Probe-harness lessons recorded:
+activation buffers must be sized for the verify WIDTH (not rows), and the tiled
+weight layout rounds rows up to 16. Raw: `results/e166-mma-width-probe-20261111.txt`.
+
+## E167 — Deep-γ PLD: verify width 64 + adaptive direct-chain override (positive; exact-gated)
+
+**Decoder changes** (all in `real_decode.cu` / `eagle4_draft.cuh`): packed default
+γ 24→64 (`--speculate 24 --packed-verify 1` preserved byte-for-byte); new MMA dispatch
+`q4_mma<8,8,8>`/`q4_mma<16,8,4>` for widths 33–64 (E166-validated); `speculate > 64`
+cap; prefill pinned at 32 rows (a 64-row prefill flips near-tie argmaxes at token 0
+via the E050 reduction-order class — found and fixed during gating); tree node budget
+stays at `mtp_limit` (deeper trees only added rejected width); replay buffer (+~190 MiB
+VRAM) now included in the VRAM plan; `draft_hist` per-cycle draft-length distribution
+added to the summary (owner gate metric — expected accepted prefix is the conditional
+sum, not the per-position rate).
+
+**Deep-γ engagement mechanism**: the E149 guided-tree caps history chains at 23. New
+override — when the longest exact history continuation exceeds the tree budget, verify
+it as one direct linear chain (no drafter forwards, no tree), gated on the running
+acceptance of DIRECT chains only (≥0.75; cold start probes +16 positions past the
+budget to buy evidence cheaply). `lookup_drafts` now prefers the occurrence with the
+longest continuation (the most-recent-occurrence scan capped chains at one repeat
+period). Tree-mode acceptance was unchanged by deeper budgets (measured: identical
+22 cycles / acceptance, only wasted width), which is why the tree stays at 23.
+
+**Exact gate: all six prompts lossless** (`results/e167-deepgamma-*-20261111.txt`),
+plus preserved γ=24 controls and boundary tests: oracle full-accept at 46 drafts in
+one 534 ms verify pass (47 tokens, one cold-set transfer — the thesis in one line);
+end-of-generation chains shrink with remaining budget, lossless.
+
+**Measured (verbatim-repeat workload, 128 gen tokens, lossless 124/124):**
+11 cycles vs 15 tree-mode, 11.18 emitted/cycle (tree 8.20), **36.86 tok/s** —
+deep chains to 52 positions. This is the first measured >30 tok/s single-user
+number on exact/repetitive structure, losslessly.
+
+**Chat neutrality proven by same-state controls**: γ=24 control vs γ=64 back-to-back
+on the e110 chat prompt: 16.500 vs 16.370 tok/s, verify 0.2323 vs 0.2346 s — within
+noise. Agent prompt: 23.022 (γ=24 ctrl) vs 20.856–21.414 (γ=64, includes the one
+bounded cold-probe cycle + machine-state drift). **Machine-state caveat: the desktop
+held 300–700 MiB more VRAM than during E149 and every pass ran ~5–15 ms slower at
+BOTH γ=24 and γ=64; the E149 table should be re-baselined on a calm desktop before
+comparing absolute tok/s.** Six-prompt E167 runs: agent 20.86 / coding 16.80 /
+explain 15.87 / eventlog 17.83 / chat 16.30 / chat2 15.78 — all match=yes.
+
+## E167b — EAGLE-scale capture pipeline (infrastructure, pilot positive)
+
+`scripts/capture_when_idle.sh` drives the E159 batched rig under owner-required
+safeguards: exclusive GPU flock (`/tmp/gum-gpu.lock`, shared with all benchmark runs),
+run_when_idle-style preflight per cycle, atomic *.part→validate→publish, per-sequence
+dedup ledger, 40 GB storage budget, quarantine for failed validations, `capture/STOP`
+switch. Pilot (3 groups): 1280 positions/group at 163,841 B/position (~200 MiB/group,
+~85 s), 7/8 new sequences per group (dedup caught one truncated-prompt collision),
+~14 unique positions/s. 100k unique positions ≈ 18.7 GB. Hourly idle-gated automation
+enabled (first acts: lock + preflight + STOP check); schedule gated on pilot metrics
+per owner. Capture products live in `capture/` (gitignored). The pilot used
+`/tmp/vanta-e158`; E169 moved capture into `benchmarks/real_decode`.
+Raw: `capture/LEDGER.md`, `results/e167-*`.
+
+## E168 — Realistic-session measurement: deep-γ is span-conditional, drafter quality binds (honest negative + infrastructure)
+
+Owner correction: 36.9 tok/s was a literally-repeating prompt — a synthetic ceiling, not a
+session. New fixture `results/e168-session-prompt.txt`: multi-turn agent dialogue (design
+discussion, corrections, "Proceed", "what if" turns, tool-call boilerplate, novel
+reasoning), 732 rendered tokens, 77-token response, exact-gated (`results/e168-session-*.txt`).
+
+**Measured, same machine state, all lossless:** γ=64 default 16.944 / γ=24 control 16.974 /
+`--chain-min 14` 16.878 / `--chain-min 10` 16.886 / `--chain-min 6` 16.816 tok/s — all
+identical cycle profiles, 4.222 emitted/cycle, longest exact continuation on this fixture:
+**15 tokens**. Deep-γ never fires (correctly) and the threshold knob is a measured wash:
+direct chains save the ~10 ms drafter forwards but forfeit the tree's model proposals.
+**Session tok/s is drafter-bound, not span-bound.** The EWMA recovery gate (replaces the
+cumulative direct-chain q, which could never re-fire after one bad stretch) and the
+`--chain-min` knob landed with this experiment; six-prompt gate re-passed lossless on the
+EWMA build.
+
+**Two product findings for sessions:** (1) the approximate `--prompt` tokenizer inflated the
+732-token fixture past ctx 1024 — sessions must use `--prompt-ids`, and the ctx=1024
+launcher holds only ~250 generated tokens of session headroom; ctx 1536-2048 is feasible
+VRAM-wise (~201-268 MiB KV) but is a policy change against the E149 dense references.
+(2) Request-level session latency includes re-prefill of the whole context each turn
+(prefill_s ≈ 2-6 s at 32-row chunks).
+
+**Where session tok/s can still move, ranked:** (1) drafter quality on novel text
+(4.2 emitted/cycle → 6-8 would put sessions at 21-28 tok/s) — the E167b capture pipeline
+is the only measured-physical route and is accumulating hourly; (2) sync-stall trim
+(~13.6 ms/cycle, E160 — out of scope by owner); (3) prefill width (policy: changes the
+dense-reference ULP baseline). Deep-γ's value remains exactly what it was designed for:
+verbatim-heavy spans (file dumps, logs, repeated templates), where it measured 36.9.
+
+## E169 — MTP fine-tune Phase A (2026-11-11, no-go: need volume)
+
+`scripts/finetune_mtp.py` reconstructed the native nextn forward from the
+original MTP GGUF. It read each final pre-norm target residual, applied the
+target output RMS norm, and paired the previous hidden state and current
+token embedding with the next greedy token. The pilot used groups 000–002
+for training (24 streams, 3,792 pairs) and held out group 003 (8 streams,
+1,264 pairs). The training and validation groups had no exact prompt-ID
+overlap.
+
+| Run | Val top-1 | Val top-8 | Val loss |
+| --- | ---: | ---: | ---: |
+| Original head | 79.27% | 97.63% | 0.7377 |
+| Shakedown, best top-1 epoch | 74.45% | 96.91% | 0.8745 |
+| Gentle run, best top-1 epoch | 79.35% | 97.78% | 0.7224 |
+
+The original head's 79.27% top-1 validated the capture-to-token alignment
+on the pilot. In the shakedown, train loss fell from 0.9263 to 0.0608 while
+val loss rose from 0.8745 to 1.1882. The gentle run's +0.08 percentage
+points in top-1 amounted to one extra correct validation label. Phase A
+called for +2 points in top-1 or +3 in top-8. With 97.63% baseline top-8,
+the second threshold was above the split's 100% ceiling. Neither run
+cleared the gate. **Need volume** before another training decision.
+Raw runs: [shakedown](results/e169-finetune-shakedown-20261111.txt) and
+[gentle](results/e169-finetune-gentle-20261111.txt).
+
+### Capture restoration (2026-11-12)
+
+The idle wrapper uses the in-tree decoder and a greedy Python tokenizer
+over the model's GGUF vocabulary.
+With `GUM_MID_CAPTURE=8,16,24,32,40,48,56` and `GUM_MID_CAPTURE_FILE` set,
+dense batch generation writes one fp32 record per step. The header is
+`[position, layer count, batch width]`, followed by the layer residuals
+in ascending order and the final pre-norm residual. Prefill writes no
+records. The wrapper checks every record header, file size, finite values,
+and generated stream lengths before publishing the batch.
+
+The shipped seed pool now includes 16 synthetic multi-turn sessions with
+revisions, follow-up questions, and tool-call text. Equal-length batching
+keeps the final user turn and assistant handoff. Once the authored pool is
+exhausted, the wrapper samples continuation slices from all eligible
+generated streams.
+
+The RTX 3060 smoke held out a new eight-session group with 68 prompt
+tokens and 32 generation steps. It published 256 positions in 40 MiB.
+The 32 records covered positions 68–99, with seven mid-layer residuals
+and one final pre-norm residual per sequence at each step. All values
+were finite. Eval-only on the original MTP head scored **78.33% top-1**
+and **98.33% top-8** on 240 pairs. A second decode with capture disabled
+produced the same 256 token IDs. A second capture exercised seed exhaustion
+and published 64 positions using slices of the existing 160-token streams.
+The smoke group lives in
+`capture/e169-smoke-20261112/` and was evaluated with legacy group 004
+as the split companion. Raw: [capture and eval-only smoke](results/e169-capture-restored-20261112.txt).
+
+## E170 — Ten verified tokens per pass on a single-user repository job
+
+The benchmark used the current E169 publisher and a real crash-window
+reproduction. An isolated directory contained a complete group 004 and
+group 005's published text sidecar with its binary still absent. The
+wrapper's group scan advanced to 006 and seed index 48. The evaluator's
+binary glob saw only group 004. Turn one produced the triage record from
+that tool output. Turn two turned it into a regression fixture. Both
+structured answers were checked against the reproduction and reached
+EOS. Exploratory prompts that hit the output limit or misidentified the
+next group were excluded from the job timing.
+
+The RTX 3060 ran one sequence at a time with the original 27B Q4_0 target.
+The GGUF chat template and exact tokenizer produced 805 and 939 prompt
+IDs. Every timed arm returned the same 113 output IDs as the installed
+greedy verifier. External wall timing starts at submission of the rendered
+IDs and includes model startup where applicable, prefill, and generation.
+The two-turn total sums the requests without time between turns.
+
+| Configuration | Two-turn wall s | Full-job tok/s | Follow-up wall s | Follow-up tok/s | Tokens/pass across both turns |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Installed native MTP, restart for each turn | 27.481 | 4.11 | 14.352 | 4.18 | 6.53 |
+| Persistent session, default draft policy | 16.867 | 6.70 | 4.060 | 14.78 | 6.53 |
+| Persistent session, history drafting off, 23 draft nodes | 14.536 | 7.77 | 2.845 | 21.09 | 9.25 |
+| Persistent session, history drafting off, 31 draft nodes | 14.640 | 7.72 | 2.799 | 21.44 | **10.09** |
+
+Tokens per pass exclude the first token of each turn, which prefill
+produces. The 31-node run emitted 52 tokens in six verification passes
+on the first turn and 59 in five on the follow-up. The 23-node run had
+similar job latency. Widening the tree while leaving history drafting
+enabled took 29.235 seconds. The history-enabled baseline accepted 17
+out of 284 history proposals across the job.
+
+Session mode checkpoints the recurrent state at a full prefill chunk
+boundary and keeps the model and attention state loaded. The follow-up
+reused 800 prompt IDs and evaluated 139 new ones. Separate dense-reference
+checks passed 512/512 IDs across fresh, changed-prefix, reused-prefix,
+and changed-back requests. The two-turn benchmark establishes performance
+for this repository job. The draft flags remain opt-in for workloads
+where repeating text can make history drafting valuable.
+
+The normal launcher reproduced 111 generated tokens in 11 passes and
+113/113 matching IDs. Its two-turn wall time was 27.511 seconds with
+restarts and 14.592 seconds with `--session 1 --pld 0 --draft-max 31`.
+The follow-up went from 14.285 to 2.750 seconds. Both used
+`--ctx 2048 --gen-tokens 384`. Raw [launcher repeat](results/e170-launcher-repeat-20261112/timings.jsonl).
+
+Reproduce via `scripts/bench_e170_job.py` with arms `baseline` and
+`session-no-history-31`. Raw [timings](results/e170-verified-job-20261112/timings.jsonl),
+[first answer](results/e170-verified-job-20261112/answer-1.txt),
+[test fixture](results/e170-verified-job-20261112/answer-2.txt), and
+[dense gate](results/e170-verified-job-20261112/dense-boundary.log).
+
+## E171 — Reuse committed reply state and group exact prefill
+
+The E170 repository job was replayed on one RTX 3060 sequence with the
+same two rendered prompts and the same 113 reference output IDs. Both
+turns completed. External wall time includes process startup, prompt
+processing, and generation, and sums the two requests.
+
+The decoder now pipelines initial hot-weight uploads through its existing
+pinned staging ring. The grouped prompt path streams weights once for
+up to four canonical 32-token chunks. It keeps the FP32 reduction order
+and native MTP cache updates. In a session, a follow-up can reuse already
+committed reply tokens when the complete token prefix matches. If it
+changes, the decoder restores the matching prefill checkpoint or resets
+state and evaluates the new request.
+
+The E170 follow-up reused 858 of 939 input IDs. Its 81 new prompt IDs
+took two target passes. The prior session processed 139 new IDs in five
+passes. The five generation passes produced the same 59 tokens after
+the first token from prefill. The uninstrumented release candidate
+finished in 12.860 seconds across both turns, including a 2.329-second
+follow-up (25.76 tok/s).
+
+| Matched normal-launcher run | Full job | Follow-up | Follow-up tok/s |
+| --- | ---: | ---: | ---: |
+| E170 control | 15.062 s | 2.754 s | 21.79 |
+| E171 | 13.035 s | 2.370 s | 25.32 |
+
+The installed run matched 113/113 IDs. Follow-up prefill fell from
+1.277 to 0.821 seconds, and the number of generation passes stayed at
+five. The raw-upload CPU control matched all 202 hot chunks byte for
+byte and had zero argmax mismatches over 16 positions.
+
+Correctness checks compared separate fingerprints over the full recurrent
+and convolution state, live target KV, live MTP KV, and final hidden state
+at the end of prefill. They matched on both job turns and on six turns
+across two independent prompts, with 192/192 matching output IDs on the
+independent checks. These included a changed reply that fell back to the
+96-token prefill checkpoint, a reset, and committed-state reuse after an
+output limit. All 535 resident packed chunks matched the reference byte
+layout. State instrumentation runs are excluded from the speed result.
+
+The tested launcher flags are `--session 1 --session-tail 1 --prefill-chunks 4
+--speculate 32 --packed-verify 1 --pld 0 --draft-max 31 --ctx 2048 --gen-tokens 384`. Draft
+budgets of 35 and 39 took longer on this job. Repacking the shared output
+head yielded a small follow-up change with no convincing job-time gain.
+
+Raw [timings and exact checks](results/e171-session-20261112/timings.jsonl),
+[follow-up state check](results/e171-session-20261112/release-state-2.log),
+and [changed-prefix gate](results/e171-session-20261112/release-e110-chat-optimized.log).
+
+## E172 — Draft retrieval and one-pass follow-up prefill
+
+The interrupted run probed the E171 repository job with native-MTP tree
+traces. Full-vocabulary drafting left both follow-up miss points outside the
+top eight and retained five verification passes. History retrieval increased
+the first accepted span from eight to thirteen positions but still required
+five passes. A digit prior alone raised the count to seven.
+
+Merging the two follow-up prefill passes preserved the output IDs and reduced
+the pass count to one. In the matched run, prefill took 0.824 s against
+0.829 s for the two-pass control. A subsequent probe measured 0.736 s.
+The wall-time gain was unstable. The unfinished previous-reply proposal
+prototype aborts on rejection and remains an experimental source.
+
+[E172 timings](results/e172-20261112/timings.jsonl) and
+[baseline follow-up trace](results/e172-20261112/baseline-2.log).
+
+## E173 — Wider exact prefill
+
+For the same 805-token first request, allowing eight canonical chunks per
+weight pass reduced prompt evaluation from eight passes to five. Each
+32-token chunk retains its per-row reduction order. Target and MTP weights,
+resident memory budget, and the 32-position decode verifier stay fixed.
+
+Two alternating normal-launcher runs per mode gave median job times of
+11.848 s at eight chunks and 12.941 s at four chunks, with all 113 output
+IDs matching in each run and both turns reaching EOS. Median first-turn
+prefill fell from 6.610 to 5.551 s. The follow-up stayed at five verification
+passes and about 25.9 output tok/s including prompt evaluation.
+Eight chunks used about 55 MiB more device memory at the minimum-free watermark.
+
+One 800-row group, under a smaller hot-weight budget, reduced first-turn
+prefill to two target passes but was slower than 256 rows at that same budget.
+The 32-row MMA tile and first-use direct pinned packing also failed to improve
+wall time. A 64-position draft removed one generation pass on the first turn
+but took 3.505 s on the follow-up against 2.345 s for its matched 32-position
+control. It kept five passes and raised mean target verification from roughly
+0.27 s to 0.49 s. Splitting the wide raw matvec into two 32-row launches
+recovered little and still left the follow-up at 3.45 s with five passes.
+One prefill arm was stopped by the existing swap guard and excluded.
+
+The original follow-up needs to finish within 1.50 s to reach 40 output
+tok/s. At roughly 0.83 s prefill and 0.30 s per verification round, that
+means at most two rounds, or faster prompt evaluation paired with three
+rounds. Five rounds transfer about 26.2 GB of target weights. Larger
+trees at the current proposal quality failed to reduce that traffic.
+
+Reproduce with the E171 flags and `--prefill-chunks 8`.
+[Normal launcher timings](results/e173-launcher-20261112/timings.jsonl) and
+[exploratory runs](results/e173-20261112/timings.jsonl).
+
+## E174 — Reuse shared context across separate requests
+
+The E171 session can reuse the previous reply when the next request extends
+it. The new optional `--session-prefix-tokens` boundary also serves
+independent requests that diverge after a shared tool transcript. It stores
+the target's recurrent and convolution state plus the MTP handoff hidden
+state in host RAM. Target and MTP attention KV stay in their normal device
+buffers. Reuse checks the rendered token IDs up to the 32-aligned boundary.
+An edit before the boundary or a request too short to safely retain it
+invalidates the shared checkpoint.
+
+The single-user benchmark asks the same model for two independently rendered,
+checkable repository maintenance outputs from the real E169 capture failure.
+It repeats the pair after editing the shared context. The two modes use the
+same 256-row prefill and 32-position verifier. Each run starts one process and
+submits the four requests serially. The comparison includes startup in the
+first request, and prefill and decode in every request.
+
+In two runs per mode through the installed launcher, the median request
+that could reuse 704 context IDs fell from 6.648 s to 2.277 s
+(9.03 to 26.35 output tok/s). Prefill for those requests fell from 4.895 s
+to 0.496 s. Median time for all four requests, including the edited context
+and cold startup, fell from 29.516 s to 21.016 s. Both modes generated the
+same 226 IDs per run, and every answer reached EOS and passed the task
+check. The option requires about 150 MiB of additional host memory.
+[Normal launcher timings](results/e174-launcher-20261112/timings.jsonl).
+
+Run `python3 scripts/bench_e174_shared_prefix.py results/e174-repeat` with
+the normal launcher and an exact model tokenizer. The harness verifies that
+each answer finishes and matches the independently computed fixture, and
+checks every emitted ID against the uncached control.
+
+An instrumented seven-request sequence matched all 193 output IDs and the
+fingerprints for recurrent state, convolution state, live target and MTP
+KV for every head, and the MTP handoff hidden state. It included an edited
+prefix, a short prompt that invalidated the checkpoint, and a rebuilt
+checkpoint that subsequently hit. The instrumented timings are excluded.
+[State probe](results/e174-20261112/prefill-state-probe.patch) and
+[cache rebuild evidence](results/e174-20261112/live-state-cache-7.log).
+
+## E175 — Verify tool drafts during prefill
+
+The original E170 follow-up uses source files and the output of the capture
+failure reproduction to request a JSON fixture. A client can construct a
+candidate from those observations while the session is warm. The E175
+client extracts the listing, visible groups, cursor, and seed information
+from the actual prompt and tokenizes its JSON draft. Baseline output IDs
+are used only by the checker. The timed requests include draft construction,
+tokenization, prompt evaluation, verification and any fallback generation.
+Tokenizer initialization is outside the per-request measurements.
+
+`--session-draft-hints 1` appends draft rows to the final prompt pass.
+The verifier uses the full target vocabulary and follows the same greedy
+argmax. The convolution and delta-net kernels retain prompt-boundary state
+and put candidate end state in the existing replay arena. A rejected fused
+draft discards its entire trial state and restarts generation from the
+prompt boundary. Accepted rows advance target KV, recurrent state and MTP
+KV for the next request. EOS is verified by the target. If the proposed
+response extends beyond the fused width, remaining candidates can be
+verified in the regular decode loop. Prompts without hints follow the
+ordinary path.
+
+The original follow-up can verify all 60 generated tokens alongside the
+81 uncached prompt tokens in a single target weight pass. At the same
+resident weight budget, this replaces two prompt passes and five decode
+passes. The one-pass follow-up streams 5.24 GB instead of 36.69 GB of cold
+weights across those seven passes.
+
+The two alternating launcher runs per arm gave medians of 2.295 s for
+the follow-up control and 1.050 s with the tool draft (26.1 and 57.1
+output tok/s). The two-turn job including model startup fell from
+11.780 s to 9.079 s. Both turns reached EOS and all 113 output IDs matched
+in both repeats. A second set on the same build measured 55.4 output tok/s.
+
+**Interpretation caveat:** 57.1 tok/s (and the 55.4 repeat) is the rate for a
+task-specific candidate constructed from the client's tool/source context and
+then target-verified. The final committed IDs are real target output, but the
+candidate is not ordinary self-drafted open-ended generation. Treat this as a
+verified tool-answer fast path; it does not establish 55–57 tok/s novel-prompt
+throughput or a general 60 tok/s single-user agent rate. E176 measures fresh,
+unhinted prompts separately.
+
+The feature applies to requests where a client has a useful proposal.
+The deliberately corrupted fixture matched 47 of 60 tokens before
+rejection. Fallback took 2.549 s and reproduced the full control output.
+A third turn reused the 999-token prefix that included the accepted
+fixture and produced all ten expected IDs without a draft.
+Instrumented runs matched fingerprints for the complete recurrent and
+convolution states, all live target and MTP KV, and the MTP handoff hidden
+state after both original turns. A separate 128-token oracle test covered
+the fused-width boundary, a late rejection in the ordinary verifier, and
+the output limit. Both streams matched all 128 IDs. Those oracle timings
+are excluded from the performance result.
+On a changed capture incident, the target's baseline output itself
+disagreed with the on-disk facts. The exact decoder reproduced that
+baseline output. The altered incident is a fallback check and is outside
+the speed result.
+
+Reproduce with `python3 scripts/bench_e175_tool_drafts.py results/e175-repeat`
+using the normal launcher and `llama-cpp-python` for the vocabulary-only
+tokenizer. See [launcher timings](results/e175-final-20261112/timings.jsonl),
+[rejection and recovery](results/e175-final-20261112/rejected-draft-2.log),
+[changed reproduction](results/e175-final-20261112/changed-oracle.json),
+and [state instrumentation](results/e175-state-20261112/session-state-probe.patch).
+
+## E177 — Unhinted agent baseline and merged final prefill
+
+The fixed development and held-out suites cover fresh coding, reasoning,
+technical explanation, structured JSON, document context and a live file
+tool workflow. The 27B packed native MTP baseline at 8064 MiB resident
+delivered 17.56 and 18.33 aggregate committed decode tok/s and moved
+5.242 GB per verifier cycle. A separate 14-cycle Nsight trace at 7168 MiB
+resident recorded 263 ms of DMA per cycle, of which 105 ms had no active
+GPU kernel. Increasing the native tree's depth priority and re-enabling
+history proposals both increased the number of verifier passes.
+
+The merged prefill path retains the exact prompt checkpoint while avoiding
+one weight pass where the final prompt segment and the preceding group fit.
+It improves prefill latency. The output and the decode cycle count match the
+control, including a changed-suffix checkpoint restore. See the
+[E177 ledger, raw data, and reproduction commands](results/e177-general-20261112/README.md).
+
+## E182 — Hot-tier sweep under full-pin (stream era)
+
+2026-11-13, live production path. The pure-streaming profile (hot=0) re-measured at
+7.52 decode tok/s on the server's fixed pendulum fixture (46 prompt tokens, 200 output,
+44 cycles, emitted/cycle 4.52, cycle 0.602 s) — the frozen 5.5 reference predates the
+root full-pin deployment. The verify pass is now link-saturated: 0.575 s ≈ cold bytes
+÷ ~25 GB/s, non-fetch overhead (MTP draft 23.7 ms + repair 2 ms) only 4.3% of the
+cycle; the E160-era sync-stall lever is spent.
+
+`systemctl` env overrides (`GUM_PROFILE=stream GUM_HOT_MIB=H`, sudo) swept the hot
+tier through the production server, one 200-token run per point:
+
+| hot MiB | verify pass | cycle | decode tok/s | min free VRAM |
+|---:|---:|---:|---:|---:|
+| 0 | 0.575 s | 0.602 s | 7.52 | 8.5 GiB |
+| 1600 | 0.506 s | 0.533 s | 8.49 | 6.5 GiB |
+| 3200 | 0.438 s | 0.464 s | 9.75 | 5.1 GiB |
+| 6400 | 0.304 s | 0.330 s | 13.70 | 1.8 GiB |
+
+All four outputs **token-identical** (869-char completion diffed byte-for-byte). The
+E164 local byte law holds linearly: Δverify = 42–43 ms per hot GiB across all three
+deltas, i.e. **+0.72 tok/s per hot GiB** at this fixture's acceptance. hot=6400 leaves
+1.8 GiB free — unusable as a static desktop default, which is exactly the gap E183 fills.
+
+Raw: results/e182-adaptive-residency-20261113/ (per-point JSON/text/spec summaries).
+
+## E183 — GUM Adaptive: runtime residency supervisor (installed, default-on)
+
+The owner's 3 GiB engine directive exists so desktop apps can use VRAM; when they
+don't, that VRAM sat idle. E183 makes residency a runtime decision: a supervisor
+thread in `local_chat/gum_openai_server.py` polls free VRAM every 10 s and respawns
+the idle decoder with a resized `--hot-mib`:
+
+- `target = hot + free − reserve(4600) − margin(400)`, clamped [0, 6400]
+- grow after 3 stable samples; shrink after 2, or immediately when free < reserve
+- never mid-request (guarded by the session lock), 120 s cooldown, ±400 MiB deadband
+- skips respawns after long prompts (>2000 tokens): a respawn drops session KV and
+  the re-prefill costs more than the residency gain (hard pressure overrides)
+- respawn reload ≈ 60–90 s, absorbed at request boundaries; engine spawn path
+  shared with the request path (`_spawn`)
+
+Live-verified all three paths in production: grow 0→3308 MiB at free 8308; forced
+shrink 3308→2183 under a synthetic 5 GiB desktop hog (6.2 GiB returned to the desktop);
+regrow to equilibrium 4378 with free settling at 5002 MiB (= reserve + margin exactly).
+Throughput at equilibrium: **9.84–10.8 tok/s decode, token-identical to stream**;
+ceiling 13.7 when the desktop frees more VRAM; floor 7.52 (hot=0) under pressure.
+
+Enabled via `/etc/systemd/system/gum-openai.service.d/adaptive.conf`
+(`GUM_ADAPTIVE=1`); disable by removing the drop-in or setting 0. Policy knobs:
+`GUM_ADAPT_CEILING_MIB`, `GUM_ADAPT_RESERVE_MIB`, `GUM_ADAPT_MARGIN_MIB`,
+`GUM_ADAPT_LONG_PROMPT`, `GUM_ADAPT_POLL_S`, `GUM_ADAPT_GROW_SAMPLES`,
+`GUM_ADAPT_COOLDOWN_S`. /health now reports `hot_mib`, `adaptive`, `free_vram_mib`;
+scripts/verify_stream.sh expects throughput from the E182 law given the live hot tier.
+
+Raw: results/e183-adaptive-turn2.json; journalctl gum-openai.service adaptive, lines.
