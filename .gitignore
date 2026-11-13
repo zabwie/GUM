@@ -12,3 +12,7 @@ tier_data/
 
 # python
 __pycache__/
+
+# E167 capture pipeline (EAGLE-scale drafter training data)
+/capture/
+benchmarks/.real_decode-e172-*
