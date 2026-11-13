@@ -2446,3 +2446,26 @@ The link itself delivers 78% of gen4 spec; that gap is protocol overhead, config
 slack, sized: ~16 ms/cycle serial draft+repair tail with the link idle (prefetch-during-
 draft ≈ +4–5%) and the 7% stretch (deeper staging prefetch queue). Combined realistic
 recovery ~6–8%; the link constant is otherwise closed.
+
+## E185 — Stacking-small-efficiencies audit (2026-11-13)
+
+Hunted the "1–2% items that stack". Results:
+
+- **GPU clocks: falsified.** SW power cap never active during decode; SM held 1942 MHz
+  through the pass, downshifting to 817 only after the run (the 2928 s lifetime
+  power-cap counter came from other workloads). No clock-locking change warranted.
+- **PCIe: clean.** gen4 x16 held through decode, persistence on.
+- **CPU affinity: real win, installed.** Same-prompt A/B (fresh runs, hot=0):
+  taskset 0–3 (production) 6.89 tok/s / verify 0.614 s; **0–7 → 7.04 tok/s / verify
+  0.600 s (+2.3%)**; 0–15 (all SMT siblings) 6.98 — worse than 0–7, and unpinned 6.97.
+  Topology (12700K, 20 threads): cpu 0–7 = one thread per physical P-core; 8–15 = SMT
+  siblings; 16–19 = E-cores. Production was pinning to HALF its P-cores; 0–7 wins
+  because the staging readers + draft CPU scoring get 8 real cores without SMT
+  contention. Installed via systemd drop-in (CPUAffinity=0-7, overrides the unit's
+  0 1 2 3) and server `_spawn` taskset set {0..7}. Token stream identical to the E182
+  baseline; production warm-run delta +0.5–2.3% (run-to-run variance ±1%).
+- Cycle composition is tight everywhere (verify+mtp+repair = cycle within ~1 ms) —
+  no scheduling gaps left. Remaining stacking candidates, sized: kernel-stretch
+  ~42 ms/cycle (deeper staging prefetch queue, E184) and the draft's 13.5 ms internal
+  split (CPU tree top-k scoring — accuracy closed by E178, but the COST side is
+  unaudited). Repair 2 ms and logits scratch are not worth touching.

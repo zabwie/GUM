@@ -137,7 +137,7 @@ class GumSession:
             "--hot-mib", str(hot_mib), "--cache-mib", CACHE_MIB, "--kv-cache", KV_CACHE, "--show-text", "0",
             "--prompt-ids", "-",
         ]
-        benchmark_cpus = sorted(os.sched_getaffinity(0) & {0, 1, 2, 3})
+        benchmark_cpus = sorted(os.sched_getaffinity(0) & {0, 1, 2, 3, 4, 5, 6, 7})
         if benchmark_cpus and shutil.which("taskset"):
             command = ["taskset", "-c", ",".join(map(str, benchmark_cpus)), *command]
         self.lines = queue.Queue()
