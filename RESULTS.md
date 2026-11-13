@@ -33,6 +33,27 @@ timing, wall-clock cross-checked). Median [min–max] across sweeps and prompts.
 All numbers are general-purpose (20 diverse prose prompts; the JSON-repeat workload that
 produced 51 tok/s in an earlier probe is excluded by construction from the frozen bench).
 
+## Post-ledger keep (owner pushback reopened the run): right-sized chat profile
+
+The one lever the plateau analysis under-weighted: the 4.3 GiB KV tier is sized for the
+196,608-token context that ordinary chat never touches. Right-sizing the context budget
+moves that VRAM into resident weights (cold bytes/pass 10.6 -> ~8.7 GB; verify 0.459 ->
+0.323 s). Gate: **40/40 turns token-for-token identical** to the 196K goldens, 2 full
+sweeps, same frozen bench, same prompts:
+
+| bucket | decode baseline -> chat profile | Δ | prefill | min free VRAM |
+|---|---|---|---|---|
+| 128 | 7.75 -> **10.79** tok/s | +39% | 118 (unchanged) | 2064 MiB |
+| 1k | 7.42 -> **9.64** tok/s | +30% | 121 (unchanged) | 2086 MiB |
+| 4k | 6.57 -> **7.92** tok/s | +21% | 103 (unchanged) | 2073 MiB |
+
+Live server confirmation: 9.0–9.7 tok/s on real requests. KEPT as `GUM_PROFILE=chat`
+(default) in `gum_openai_server.py`; `GUM_PROFILE=196k` restores the E181 long-output
+configuration exactly (one env var). Same decoder, same code path — this is configuration,
+reported as configuration. It is also the stopgap form of GUM Adaptive: the architecture
+fix (grow-on-demand context) removes the profile trade-off entirely and remains the
+recommended next build. Prefill is unchanged because it is compute-bound, not fetch-bound.
+
 ## Kept changes
 
 1. **Source recovery (integrity, not throughput).** Uncommitted E177–E181 decoder source
