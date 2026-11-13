@@ -75,12 +75,14 @@ compute spills the 0.555 s DMA window at R≥64), and acceptance headroom.
 
 ## Open decisions (owner)
 
-1. **BF16 source for the codec lever (+28%)**: Qwen3.8-27B is a public Apache-2.0 release
-   (GGUF metadata); models dir holds only the Q4_0 artifact + BF16 mmproj. If the
-   full-precision original is re-obtainable (HF or your conversion source), run the 3-way
-   KL test (Q4_0→BF16, (3,64)→BF16, teacher-forced) — the paused TOLERANCE track reopens
-   ONLY if 3.5 bpw beats Q4_0's own distance-from-BF16. If no source exists, Q4_0 is the
-   only ground truth and the lever closes permanently.
+1. **RESOLVED-CLOSED (2026-11-13): codec lever (+28%) closed permanently.** Full-disk
+   sweep confirms no full-precision Qwen3.8-27B exists anywhere on this machine (the
+   F32 file an earlier agent cited is the 1.8 GB mmproj vision projector; the only
+   safetensors anywhere are nvidia/Qwen3.6-35B — a different model), and no HF source
+   is re-obtainable (owner searched). Q4_0 is therefore the ONLY ground truth that has
+   ever existed: "agreement with Q4_0" IS the quality metric, the (3,64) 81% figure
+   stands as the measured quality-loss signal, and the TOLERANCE track stays closed
+   on its own terms. No quality ambiguity; the exactness contract is absolute.
 2. CPU offload directive: E191 turns the excluded lever into +30–45%; owner verbally
    approved "apply every boost" — treat as reopened, keep the exactness gates.
 3. Target-side adaptation changes the exactness baseline to the adapted model (owner

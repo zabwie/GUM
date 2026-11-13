@@ -2588,3 +2588,18 @@ activation exchange, RAM contention: CPU 32 GiB/s + DMA 23 GiB/s vs DDR5-5600 re
 ~65 GB/s — tight but within budget). The batch-1 exclusion and the "not worth it"
 conclusion are both overturned: CPU offload excluded by owner directive only, and
 the reviewer's 2×→+35% estimate was itself conservative. Raw: results/e191-*.
+
+## E192 — Codec-lever provenance audit: source weights do not exist (2026-11-13)
+
+The reviewer's codec test (compare Q4_0 and (3,64) against a full-precision reference)
+requires a BF16/FP32 original. Full-disk sweep (`*.gguf`/`*.safetensors` > 2 GB across
+/home): the ONLY large text-model artifact is Qwen3.8-27B-STRICT-Q4_0.gguf (15 GB). The
+F32 file an external agent cited is mmproj-STRICT-Q4-EXPANDED-F32.gguf — the 1.8 GB
+vision projector, not the language model. The only safetensors on the system belong to
+nvidia/Qwen3.6-35B-A3B-NVFP4 (a different model). Owner confirmed no HF source is
+re-obtainable. **Verdict: Q4_0 is the only ground truth that has ever existed; agreement
+with Q4_0 is definitionally the quality metric; the codec lever (+28%) closes permanently
+and the (3,64) 81% agreement figure stands as the quality-loss signal.** The exactness
+contract is now unambiguous by construction. Effort concentrates on the live levers:
+CPU row-split (E191, +30-45%), W4A8 MMA kernels (prefill + width knee), finetune campaign
+(corpus accumulating via the 20-min automation).
