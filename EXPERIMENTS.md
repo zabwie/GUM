@@ -2597,9 +2597,11 @@ requires a BF16/FP32 original. Full-disk sweep (`*.gguf`/`*.safetensors` > 2 GB 
 F32 file an external agent cited is mmproj-STRICT-Q4-EXPANDED-F32.gguf — the 1.8 GB
 vision projector, not the language model. The only safetensors on the system belong to
 nvidia/Qwen3.6-35B-A3B-NVFP4 (a different model). Owner confirmed no HF source is
-re-obtainable. **Verdict: Q4_0 is the only ground truth that has ever existed; agreement
-with Q4_0 is definitionally the quality metric; the codec lever (+28%) closes permanently
-and the (3,64) 81% agreement figure stands as the quality-loss signal.** The exactness
-contract is now unambiguous by construction. Effort concentrates on the live levers:
+re-obtainable. **Verdict (amended on owner review): on this machine Q4_0 is the only existing ground
+truth, so agreement-with-Q4_0 is the operative quality metric and the (3,64) 81% figure
+stands as the quality-loss signal. The codec lever is ON STANDBY, not closed: the owner
+is still searching for a full-precision source; the 3-way KL test (Q4_0→source,
+(3,64)→source, teacher-forced) is fully specified and reopens the TOLERANCE track the
+day the source surfaces. Until then effort concentrates on the live levers.** Effort concentrates on the live levers:
 CPU row-split (E191, +30-45%), W4A8 MMA kernels (prefill + width knee), finetune campaign
 (corpus accumulating via the 20-min automation).
