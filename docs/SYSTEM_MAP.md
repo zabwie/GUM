@@ -78,9 +78,11 @@ deep-γ / drafter) by span type; optimize the blended user-experienced tok/s.
 
 ## 6. The 6 GiB engine budget (owner directive)
 
-Fixed non-weight overhead at 32K ctx: KV 723 MiB + scratch 151 + slots 128 + MTP 978 +
-logits 254 (can shrink: `compact_target_logits`) + activations ~500 + CUDA context ~300
-≈ **3.0 GiB** → hot tier ≈ 3.0–3.6 GiB → cold 11.5–12.1 GB/pass → verify ≈ 0.47–0.49 s →
+Fixed non-weight overhead at 32K ctx (E189-corrected): KV 723 MiB + scratch 151 + slots 256
+(E186) + MTP 978 — of which 715 MiB is the SHARED TARGET OUTPUT HEAD (device-resident,
+already excluded from the cold stream) and the drafter itself is Q4_0-native (~260 MiB
+specific) + logits ~32 (`compact_target_logits` already default-on) + activations ~500 +
+CUDA context ~300 ≈ **2.0 GiB true overhead** → hot tier ≈ 3.0–3.6 GiB → cold 11.5–12.1 GB/pass → verify ≈ 0.47–0.49 s →
 decode ≈ **7.1–7.5 tok/s** — i.e., the 6 GiB cap costs roughly the 196K baseline's
 throughput, and the claw-backs (compact logits, KV regime A4) are worth ~0.4–0.8 tok/s
 of it. Everything beyond that must come from the anomaly ledger and the agenda above.

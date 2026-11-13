@@ -2521,3 +2521,27 @@ indeed void — but the 0.4 s claim is 2.4× optimistic. Balanced GPU/CPU split 
 row-split pipeline, exactness gating of CPU-computed tensors, and modest RAM
 contention. CPU compute is not the obstacle; per-layer overlap + exactness are.
 Was excluded by owner directive; reopening is an owner call. Raw: results/e188-*.
+
+## E189 — Fixed-VRAM audit: the reclaimable block is already spent (2026-11-13)
+
+Follow-up to the CPU/codec evaluation, which proposed reclaiming ~0.73 GiB (254 MiB
+logits + 489 MiB drafter FP32→Q8). Audited against the live decoder — both figures
+were stale SYSTEM_MAP §6 numbers:
+
+- **Logits: already compact.** `compact_target_logits` is default-on in speculate
+  mode (logit_rows = speculate = 32 → ~32 MiB, not 254). Shipped long ago.
+- **Drafter: already Q4_0-native.** Live load prints `mtp_plan,q4_MiB=910,f32_MiB=0`
+  — no FP32 blob exists. Moreover **715 MiB of the 910 is the shared target output
+  head** (`share_output`, verified byte-identical): it is device-resident and
+  therefore already excluded from the 13.70 GB cold stream. The drafter-specific
+  footprint is only ~260 MiB (Q4 weights ~195 + FP32 KV ~17 + scratch ~50), which
+  five drafter probes (E153–E159) established as the smallest head that holds p₁.
+  Raising drafter precision to Q8 would COST 195 MiB for no acceptance gain.
+
+Corrected fixed overhead at 32K/stream: KV 723 (quality-bearing) + MTP-specific ~260
+(already minimal) + activations ~500 (prefill-width structural) + attention scratch
+151 + slots 256 (buys the E186 +3%) + logits 32 + CUDA ctx ~300 ≈ 2.0 GiB of true
+overhead + the shared 715 MiB head. Reclaimable without quality loss: **tens of MiB
+(drafter KV→FP16, misc) ≈ +1–2%, not +7%**. The +7% quick pair promised earlier does
+not exist — withdrawn. The VRAM-neutral, quality-neutral levers that remain are the
+capture-fed MTP finetune (emitted/cycle) and the A6 prefill L2 window.
