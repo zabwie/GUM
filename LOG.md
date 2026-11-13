@@ -177,3 +177,12 @@ Run contract: owner template + owner addenda given live before departure.
   Further shrink documented, not built: ctx 16384 halves KV (880->440 MiB), compact logits
   (~250 MiB), drafter streaming (978 MiB at a draft-time cost) — a ~2.3 GiB pure-stream
   engine at ~5.2-5.5 tok/s is physically reachable if wanted.
+- ~18:00 OWNER DECISION: pure streaming installed as default. GUM_PROFILE=stream
+  (hot 0, cache 15600, ctx 32768): engine ~2.9-3.0 GiB (total card 3.51 GiB incl
+  desktop), ~9 GiB free for agentic work, ~5.5 tok/s decode. Exactness: 256/256 tokens
+  identical to baseline golden (mid_pond, full protocol). Live chat verified.
+  Operational caveat: the stream profile's host tier is ~15.2 GiB; the decoder's
+  MemAvailable guard wants floor+host (~21.3 GiB) at LAUNCH — with heavy desktop apps
+  open it can refuse; drop to GUM_PROFILE=nano (13.4 GiB tier) in that case. RAM at
+  runtime: 15.2 GiB pinned + desktop.
+  Profiles now: stream (default) / nano / lean / chat / 196k.

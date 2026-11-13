@@ -38,8 +38,9 @@ KV_CACHE = os.environ.get("GUM_KV_CACHE", "turboquant-ttkv")
 # frozen 20-prompt suite, decode +39/+30/+21% at 128/1k/4k prompt lengths with MORE free
 # VRAM (results/perf-auto/ctx32k). "196k" is the E181 long-output profile (131072-token
 # outputs, 4.3 GiB KV tier) — same decoder, same code path, one env var away.
-PROFILE = os.environ.get("GUM_PROFILE", "nano")
-_PROFILE = {"nano": (32768, 32768, 1600, 14000),   # ~4.6 GiB engine, ~7.1 GiB free, 6.27 tok/s
+PROFILE = os.environ.get("GUM_PROFILE", "stream")
+_PROFILE = {"stream": (32768, 32768, 0, 15600),    # pure streaming: ~3.6 GiB engine, ~8.7 GiB free, ~5.5 tok/s
+            "nano": (32768, 32768, 1600, 14000),   # ~4.6 GiB engine, ~7.1 GiB free, 6.27 tok/s
             "lean": (32768, 32768, 3200, 12400),   # ~6.1 GiB engine, ~5.3 GiB free, 7.19 tok/s
             "chat": (32768, 32768, 6400, 8700),    # ~10.2 GiB engine, 10.79 tok/s on the frozen suite
             "196k": (196608, 131072, 3456, 10240)} # E181 long-output profile, 4.3 GiB KV tier
