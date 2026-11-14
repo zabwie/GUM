@@ -257,3 +257,13 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     plain perplexity IF the loader tolerates it... it does not; the strip is required.
     Codec suite (Q4_0 + k3g64 ppl) running in background; BF16 stage auto-fires when
     the stripped file validates. Verdict rule unchanged (NEXT_STEPS #56).
+62. **QTIP-class 3-bit test (QUEUED behind E195, owner-approved 2026-11-13):** E194
+    closed the NAIVE uniform 3-bit grid (PPL 8.75 vs Q4_0 7.04) but NOT the trellis/VQ
+    class. Two-step falsification path, each cheap: (1) run an open-source QTIP/QuIP#
+    pipeline on the BF16 source (~/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf,
+    calibration on wikitext + capture corpus) → PPL decision rule: trellis-3bit ≤
+    Q4_0's 7.04 = quality passes; (2) if quality passes, measure trellis decode
+    throughput with the E191 methodology — our decode is LINK-BOUND (SMs 90% idle),
+    so the kernel only needs to beat 24.7 GB/s, not dp4a — 10-15 GB/s SM-side suffices.
+    Both pass → +28% lever reopens with a real kernel build. Fails either → lever
+    closes with data. NOTE: requantize from the BF16 source directly, never from Q4_0.
