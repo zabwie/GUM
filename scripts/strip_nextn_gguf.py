@@ -25,10 +25,11 @@ for name, field in r.fields.items():
     elif t == GGUFValueType.ARRAY:
         vt = GGUFValueType(field.types[1]) if len(field.types)>1 else t
         if vt == GGUFValueType.STRING:
-            w.add_array(name, [bytes(p).decode() for p in field.parts[1:]], GGUFValueType.STRING)
+            w.add_array(name, [bytes(p).decode() for p in field.parts[1:]])
         else:
-            w.add_array(name, list(field.contents[1]) if hasattr(field.contents[1],'__len__') else field.contents[1], vt)
+            w.add_array(name, list(field.contents[1]) if hasattr(field.contents[1],'__len__') else field.contents[1])
     else:
+        w.add_key_value(name, field.contents, GGUFValueType(field.types[0]))
 
 kept = dropped = 0
 for t in r.tensors:
