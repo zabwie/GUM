@@ -2638,3 +2638,23 @@ and the SIMD in broken cases — pointing at a snapshot-vs-GEMV data mismatch no
 isolated. Production RESTORED to the known-good build (E193 inactive at default
 cpu-rows=0; baseline IN BAND). WIP source + debug tooling committed; next session
 picks up from this exact state.
+
+## E194 — Codec verdict: teacher-forced perplexity closes the lever (2026-11-13)
+
+The reviewer's decisive test, run to completion. BF16 ground truth exported from the
+provenance-pinned upstream (Qwen/Qwen3.8-27B @ 1d4bf0f2ff, converted, nextn block
+stripped). Teacher-forced perplexity, wikitext-2-raw test, 200 chunks, hybrid offload:
+
+| format | PPL |
+|---|---|
+| **Q4_0 (installed)** | **7.0410 ± 0.077** |
+| **(3,64) requant** | **8.7486 ± 0.101** — 24% worse, teacher-forced |
+
+The (3,64) candidate is decisively farther from ground truth than Q4_0 — the 81%
+agreement figure was a genuine quality-loss signal, NOT a free-running artifact.
+Combined with the research finding that no 2024-26 sub-4.5bpw codec decodes as fast
+as Q4_0 dp4a, the codec lever is closed as MEASURED-NEGATIVE (stronger than the
+previous standby). The TOLERANCE track's own reference measurement now exists; any
+future candidate must beat this bar. Raw: results/e194-codec-kl/. Also: watchdog
+installed (scripts/watchdog.sh + 20-min cron) after it caught two silent failures
+on its first run — empty-result ppl runs and the strip script's AttributeError.

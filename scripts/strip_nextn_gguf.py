@@ -20,11 +20,11 @@ for name, field in r.fields.items():
 from gguf import GGUFValueType
 for name, field in r.fields.items():
     if 'nextn_predict_layers' in name: continue
-    t = GGUFValueType(field.type)
+    t = GGUFValueType(field.types[0])
     if t == GGUFValueType.STRING:
         w.add_string(name, bytes(field.parts[-1]).decode())
     elif t == GGUFValueType.ARRAY:
-        vt = GGUFValueType(field.types[1])
+        vt = GGUFValueType(field.types[1]) if len(field.types)>1 else t
         if vt == GGUFValueType.STRING:
             w.add_array(name, [bytes(p).decode() for p in field.parts[1:]], GGUFValueType.STRING)
         else:

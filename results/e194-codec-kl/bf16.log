@@ -1,0 +1,17 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 11905 MiB):
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes, VRAM: 11905 MiB
+common_init_result: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on
+common_params_fit_impl: getting device memory data for initial parameters:
+gguf_init_from_file_ptr: key '' has invalid GGUF type 808348524
+gguf_init_from_file_ptr: failed to read key-value pairs
+llama_model_load: error loading model: llama_model_loader: failed to load model from /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf
+llama_model_load_from_file_impl: failed to load model
+common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
+common_fit_params: fitting params to free memory took 0.12 seconds
+llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3060) (0000:01:00.0) - 10749 MiB free
+gguf_init_from_file_ptr: key '' has invalid GGUF type 808348524
+gguf_init_from_file_ptr: failed to read key-value pairs
+llama_model_load: error loading model: llama_model_loader: failed to load model from /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf
+llama_model_load_from_file_impl: failed to load model
+common_init_from_params: failed to load model '/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf'
+main: unable to load model

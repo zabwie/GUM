@@ -1,0 +1,198 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 11905 MiB):
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes, VRAM: 11905 MiB
+common_init_result: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on
+common_params_fit_impl: getting device memory data for initial parameters:
+common_memory_breakdown_print: | memory breakdown [MiB] | total    free    self   model   context   compute    unaccounted |
+common_memory_breakdown_print: |   - CUDA0 (RTX 3060)   | 11905 = 10340 + (9659 =  8646 +     441 +     571) +       -8093 |
+common_memory_breakdown_print: |   - Host               |                  6106 =  5790 +     284 +      31                |
+common_params_fit_impl: projected to use 9659 MiB of device memory vs. 10340 MiB of free device memory
+common_params_fit_impl: cannot meet free memory target of 1024 MiB, need to reduce device memory by 343 MiB
+common_params_fit_impl: context size set by user to 2048 -> no change
+common_fit_params: failed to fit params to free device memory: n_gpu_layers already set by user to 40, abort
+common_fit_params: fitting params to free memory took 0.54 seconds
+llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3060) (0000:01:00.0) - 10702 MiB free
+llama_model_loader: loaded meta data with 40 key-value pairs and 851 tensors from /home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen35
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                     general.sampling.top_k i32              = 20
+llama_model_loader: - kv   3:                     general.sampling.top_p f32              = 0.950000
+llama_model_loader: - kv   4:                      general.sampling.temp f32              = 1.000000
+llama_model_loader: - kv   5:                               general.name str              = Qwen3.8-27B
+llama_model_loader: - kv   6:                         general.size_label str              = 27B
+llama_model_loader: - kv   7:                            general.license str              = apache-2.0
+llama_model_loader: - kv   8:                               general.tags arr[str,1]       = ["image-text-to-text"]
+llama_model_loader: - kv   9:                         qwen35.block_count u32              = 64
+llama_model_loader: - kv  10:                      qwen35.context_length u32              = 262144
+llama_model_loader: - kv  11:                    qwen35.embedding_length u32              = 5120
+llama_model_loader: - kv  12:                 qwen35.feed_forward_length u32              = 17408
+llama_model_loader: - kv  13:                qwen35.attention.head_count u32              = 24
+llama_model_loader: - kv  14:             qwen35.attention.head_count_kv u32              = 4
+llama_model_loader: - kv  15:             qwen35.rope.dimension_sections arr[i32,4]       = [11, 11, 10, 0]
+llama_model_loader: - kv  16:                      qwen35.rope.freq_base f32              = 10000000.000000
+llama_model_loader: - kv  17:    qwen35.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  18:                qwen35.attention.key_length u32              = 256
+llama_model_loader: - kv  19:              qwen35.attention.value_length u32              = 256
+llama_model_loader: - kv  20:                     qwen35.ssm.conv_kernel u32              = 4
+llama_model_loader: - kv  21:                      qwen35.ssm.state_size u32              = 128
+llama_model_loader: - kv  22:                     qwen35.ssm.group_count u32              = 16
+llama_model_loader: - kv  23:                  qwen35.ssm.time_step_rank u32              = 48
+llama_model_loader: - kv  24:                      qwen35.ssm.inner_size u32              = 6144
+llama_model_loader: - kv  25:          qwen35.attention.recurrent_layers arr[bool,64]     = [true, true, true, false, true, true,...
+llama_model_loader: - kv  26:             qwen35.full_attention_interval u32              = 4
+llama_model_loader: - kv  27:                qwen35.rope.dimension_count u32              = 64
+llama_model_loader: - kv  28:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  29:                         tokenizer.ggml.pre str              = qwen35
+llama_model_loader: - kv  30:                      tokenizer.ggml.tokens arr[str,248320]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  31:                  tokenizer.ggml.token_type arr[i32,248320]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  32:                      tokenizer.ggml.merges arr[str,247587]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  33:                tokenizer.ggml.eos_token_id u32              = 248046
+llama_model_loader: - kv  34:            tokenizer.ggml.padding_token_id u32              = 248044
+llama_model_loader: - kv  35:                tokenizer.ggml.bos_token_id u32              = 248044
+llama_model_loader: - kv  36:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  37:                    tokenizer.chat_template str              = {%- set image_count = namespace(value...
+llama_model_loader: - kv  38:               general.quantization_version u32              = 2
+llama_model_loader: - kv  39:                          general.file_type u32              = 2
+llama_model_loader: - type  f32:  353 tensors
+llama_model_loader: - type q4_0:  498 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = Q4_0
+print_info: file size   = 14.10 GiB (4.50 BPW) 
+load: 0 unused tokens
+load: printing all EOG tokens:
+load:   - 248044 ('<|endoftext|>')
+load:   - 248046 ('<|im_end|>')
+load:   - 248063 ('<|fim_pad|>')
+load:   - 248064 ('<|repo_name|>')
+load:   - 248065 ('<|file_sep|>')
+load: special tokens cache size = 33
+load: token to piece cache size = 1.7581 MB
+print_info: arch                  = qwen35
+print_info: vocab_only            = 0
+print_info: no_alloc              = 0
+print_info: n_ctx_train           = 262144
+print_info: n_embd                = 5120
+print_info: n_embd_inp            = 5120
+print_info: n_layer               = 64
+print_info: n_head                = 24
+print_info: n_head_kv             = 4
+print_info: n_rot                 = 64
+print_info: n_swa                 = 0
+print_info: is_swa_any            = 0
+print_info: n_embd_head_k         = 256
+print_info: n_embd_head_v         = 256
+print_info: n_gqa                 = 6
+print_info: n_embd_k_gqa          = 1024
+print_info: n_embd_v_gqa          = 1024
+print_info: f_norm_eps            = 0.0e+00
+print_info: f_norm_rms_eps        = 1.0e-06
+print_info: f_clamp_kqv           = 0.0e+00
+print_info: f_max_alibi_bias      = 0.0e+00
+print_info: f_logit_scale         = 0.0e+00
+print_info: f_attn_scale          = 0.0e+00
+print_info: n_ff                  = 17408
+print_info: n_expert              = 0
+print_info: n_expert_used         = 0
+print_info: n_expert_groups       = 0
+print_info: n_group_used          = 0
+print_info: causal attn           = 1
+print_info: pooling type          = -1
+print_info: rope type             = 40
+print_info: rope scaling          = linear
+print_info: freq_base_train       = 10000000.0
+print_info: freq_scale_train      = 1
+print_info: n_ctx_orig_yarn       = 262144
+print_info: rope_yarn_log_mul     = 0.0000
+print_info: rope_finetuned        = unknown
+print_info: mrope sections        = [11, 11, 10, 0]
+print_info: ssm_d_conv            = 4
+print_info: ssm_d_inner           = 6144
+print_info: ssm_d_state           = 128
+print_info: ssm_dt_rank           = 48
+print_info: ssm_n_group           = 16
+print_info: ssm_dt_b_c_rms        = 0
+print_info: model type            = 27B
+print_info: model params          = 26.90 B
+print_info: general.name          = Qwen3.8-27B
+print_info: vocab type            = BPE
+print_info: n_vocab               = 248320
+print_info: n_merges              = 247587
+print_info: BOS token             = 248044 '<|endoftext|>'
+print_info: EOS token             = 248046 '<|im_end|>'
+print_info: EOT token             = 248046 '<|im_end|>'
+print_info: PAD token             = 248044 '<|endoftext|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 248060 '<|fim_prefix|>'
+print_info: FIM SUF token         = 248062 '<|fim_suffix|>'
+print_info: FIM MID token         = 248061 '<|fim_middle|>'
+print_info: FIM PAD token         = 248063 '<|fim_pad|>'
+print_info: FIM REP token         = 248064 '<|repo_name|>'
+print_info: FIM SEP token         = 248065 '<|file_sep|>'
+print_info: EOG token             = 248044 '<|endoftext|>'
+print_info: EOG token             = 248046 '<|im_end|>'
+print_info: EOG token             = 248063 '<|fim_pad|>'
+print_info: EOG token             = 248064 '<|repo_name|>'
+print_info: EOG token             = 248065 '<|file_sep|>'
+print_info: max token length      = 256
+load_tensors: loading model tensors, this can take a while... (mmap = true, direct_io = false)
+load_tensors: offloading output layer to GPU
+load_tensors: offloading 39 repeating layers to GPU
+load_tensors: offloaded 40/65 layers to GPU
+load_tensors:   CPU_Mapped model buffer size =  5790.08 MiB
+load_tensors:        CUDA0 model buffer size =  8646.74 MiB
+..............................................................................................
+common_init_result: added <|endoftext|> logit bias = -inf
+common_init_result: added <|im_end|> logit bias = -inf
+common_init_result: added <|fim_pad|> logit bias = -inf
+common_init_result: added <|repo_name|> logit bias = -inf
+common_init_result: added <|file_sep|> logit bias = -inf
+llama_context: constructing llama_context
+llama_context: n_seq_max     = 4
+llama_context: n_ctx         = 2048
+llama_context: n_ctx_seq     = 512
+llama_context: n_batch       = 2048
+llama_context: n_ubatch      = 512
+llama_context: causal_attn   = 1
+llama_context: flash_attn    = auto
+llama_context: kv_unified    = false
+llama_context: freq_base     = 10000000.0
+llama_context: freq_scale    = 1
+llama_context: n_ctx_seq (512) < n_ctx_train (262144) -- the full capacity of the model will not be utilized
+llama_context:  CUDA_Host  output buffer size =     3.79 MiB
+llama_kv_cache:        CPU KV buffer size =    48.00 MiB
+llama_kv_cache:      CUDA0 KV buffer size =    80.00 MiB
+llama_kv_cache: size =  128.00 MiB (   512 cells,  16 layers,  4/4 seqs), K (f16):   64.00 MiB, V (f16):   64.00 MiB
+llama_kv_cache: attn_rot_k = 0, n_embd_head_k_all = 256
+llama_kv_cache: attn_rot_v = 0, n_embd_head_k_all = 256
+llama_memory_recurrent:        CPU RS buffer size =   236.91 MiB
+llama_memory_recurrent:      CUDA0 RS buffer size =   361.59 MiB
+llama_memory_recurrent: size =  598.50 MiB (     4 cells,  64 layers,  4 seqs), R (f32):   22.50 MiB, S (f32):  576.00 MiB
+sched_reserve: reserving ...
+sched_reserve: Flash Attention was auto, set to enabled
+sched_reserve: resolving fused Gated Delta Net support:
+sched_reserve: fused Gated Delta Net (autoregressive) enabled
+sched_reserve: layer 0 is assigned to device CPU but the fused Gated Delta Net tensor is assigned to device CUDA0 (usually due to missing support)
+sched_reserve: fused Gated Delta Net (chunked) not supported, set to disabled
+sched_reserve:      CUDA0 compute buffer size =   571.00 MiB
+sched_reserve:  CUDA_Host compute buffer size =    31.49 MiB
+sched_reserve: graph nodes  = 8345 (with bs=512), 3785 (with bs=1)
+sched_reserve: graph splits = 403 (with bs=512), 52 (with bs=1)
+sched_reserve: reserve took 22.23 ms, sched copies = 1
+common_init_from_params: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+
+system_info: n_threads = 6 (n_threads_batch = 6) / 20 | CUDA : ARCHS = 860 | USE_GRAPHS = 1 | PEER_MAX_BATCH_SIZE = 128 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+perplexity: tokenizing the input ..
+perplexity: tokenization took 455.626 ms
+perplexity: calculating perplexity over 200 chunks, n_ctx=512, batch_size=2048, n_seq=4
+perplexity: 6.77 seconds per pass - ETA 5.63 minutes
+[1]4.5720,[2]6.3855,[3]6.3764,[4]6.1932,[5]6.1409,[6]6.3416,[7]6.4832,[8]7.0252,[9]7.3953,[10]7.7562,[11]7.6508,[12]7.7164,[13]8.0545,[14]7.6074,[15]7.5572,[16]7.6122,[17]7.1895,[18]7.2931,[19]7.2348,[20]7.1806,[21]6.9301,[22]6.8490,[23]6.6241,[24]6.3189,[25]6.1780,[26]6.0226,[27]5.9021,[28]5.8273,[29]5.8541,[30]5.8285,[31]5.7959,[32]5.8295,[33]5.8025,[34]5.8564,[35]5.9282,[36]6.0647,[37]6.1373,[38]6.1147,[39]6.1231,[40]6.1844,[41]6.2016,[42]6.2687,[43]6.2782,[44]6.2563,[45]6.3327,[46]6.2694,[47]6.3623,[48]6.4098,[49]6.3735,[50]6.4116,[51]6.4013,[52]6.4480,[53]6.4815,[54]6.5166,[55]6.5319,[56]6.5688,[57]6.5871,[58]6.6064,[59]6.6010,[60]6.6245,[61]6.6460,[62]6.6975,[63]6.7357,[64]6.7988,[65]6.8534,[66]6.8917,[67]6.9522,[68]6.9952,[69]7.0100,[70]7.0012,[71]7.0601,[72]7.0640,[73]7.1033,[74]7.1008,[75]7.0899,[76]7.0907,[77]7.1118,[78]7.1061,[79]7.0402,[80]6.9700,[81]6.9458,[82]6.9601,[83]6.9615,[84]6.9474,[85]6.9634,[86]6.9902,[87]6.9944,[88]6.9939,[89]6.9655,[90]6.9391,[91]6.9377,[92]6.9080,[93]6.9294,[94]6.9459,[95]6.9554,[96]6.9496,[97]6.9351,[98]6.9161,[99]6.9074,[100]6.9292,[101]6.9451,[102]6.9411,[103]6.9443,[104]6.9267,[105]6.9374,[106]6.9710,[107]7.0053,[108]7.0576,[109]7.0618,[110]7.1133,[111]7.1299,[112]7.1384,[113]7.1821,[114]7.2339,[115]7.2476,[116]7.2172,[117]7.2181,[118]7.2155,[119]7.1875,[120]7.2014,[121]7.1881,[122]7.1680,[123]7.1501,[124]7.1314,[125]7.1106,[126]7.0882,[127]7.0743,[128]7.0412,[129]7.0143,[130]7.0003,[131]6.9854,[132]6.9960,[133]6.9925,[134]6.9956,[135]7.0038,[136]6.9857,[137]6.9627,[138]6.9637,[139]6.9598,[140]6.9623,[141]6.9687,[142]6.9755,[143]6.9616,[144]6.9770,[145]6.9439,[146]6.9249,[147]6.9045,[148]6.8786,[149]6.8450,[150]6.8255,[151]6.8217,[152]6.8071,[153]6.7827,[154]6.7832,[155]6.7641,[156]6.7379,[157]6.7182,[158]6.6988,[159]6.6766,[160]6.6558,[161]6.6480,[162]6.6315,[163]6.6167,[164]6.6218,[165]6.6300,[166]6.6213,[167]6.6415,[168]6.6413,[169]6.6773,[170]6.6940,[171]6.7358,[172]6.7693,[173]6.7889,[174]6.8328,[175]6.8486,[176]6.8850,[177]6.9053,[178]6.9114,[179]6.9188,[180]6.9202,[181]6.9404,[182]6.9362,[183]6.9433,[184]6.9527,[185]6.9439,[186]6.9517,[187]6.9545,[188]6.9684,[189]6.9948,[190]7.0026,[191]7.0082,[192]7.0081,[193]7.0300,[194]7.0479,[195]7.0559,[196]7.0669,[197]7.0530,[198]7.0443,[199]7.0317,[200]7.0410,
+Final estimate: PPL = 7.0410 +/- 0.07725
+
+llama_perf_context_print:        load time =    4711.93 ms
+llama_perf_context_print: prompt eval time =  322858.04 ms / 102400 tokens (    3.15 ms per token,   317.17 tokens per second)
+llama_perf_context_print:        eval time =       0.00 ms /     1 runs   (    0.00 ms per token,      inf tokens per second)
+llama_perf_context_print:       total time =  340804.53 ms / 102401 tokens
+llama_perf_context_print:    graphs reused =         50
+common_memory_breakdown_print: | memory breakdown [MiB] | total   free    self   model   context   compute    unaccounted |
+common_memory_breakdown_print: |   - CUDA0 (RTX 3060)   | 11905 =  900 + (9659 =  8646 +     441 +     571) +        1346 |
+common_memory_breakdown_print: |   - Host               |                 6106 =  5790 +     284 +      31                |
