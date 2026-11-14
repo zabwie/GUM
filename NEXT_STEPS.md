@@ -220,3 +220,20 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     results/e193-cpu-rowsplit-wip-20261113/. Next: dump the GPU's actual slot bytes for
     a broken item and diff against pinned_cache[item1]; suspect the res_off/head
     interaction or a second writer of the cache region.
+58. **Codec suite status (2026-11-13 night):** first run FAILED on three fronts, all
+    diagnosed: (1) Q4_0 run — output lost by the `tail -5` capture, rerun with full log;
+    (2) k3g64 — the suite's gate opened on a PARTIAL requant file → "data not within
+    file bounds"; the requant has since COMPLETED (15.1 GB, "27.8% cut" summary printed)
+    → k3g64 rerun is ready on the complete file; (3) BF16 — llama.cpp's qwen35 loader
+    classifies blk.64 (the source MTP/nextn block, fully exported: eh_proj + a full
+    layer set) as a hybrid repeating layer and demands blk.64.ssm_conv1d.weight which
+    the MTP module doesn't have. FIX (next session): strip the 16 blk.64.* tensors +
+    the qwen35.nextn_predict_layers KV from the BF16 GGUF (they sit at the file END →
+    truncate-friendly), or check convert_hf_to_gguf.py for a nextn-skip option. The
+    ad-hoc python GGUF parser derails on the tokenizer-array KVs — use llama-gguf r n
+    for offsets (works) or pip gguf in a venv.
+59. **Queue order (next session):** (a) rerun ppl: Q4_0 + k3g64 (both ready, full logs);
+    (b) fix BF16 nextn strip → BF16 ppl run; (c) codec verdict → TOLERANCE go/no-go;
+    (d) E193 bug: worker pointer escapes to RAW GGUF data (blk.1.attn_gate row 3491
+    proven exact, nowhere else in file) — print res_off/pin_bytes at split time;
+    (e) capture corpus accumulating (group-012 published 2026-11-13 21:04, 8 seqs).
