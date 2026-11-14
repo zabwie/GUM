@@ -1855,6 +1855,12 @@ int main(int argc, char** argv) {
     const long tier_batch = large_tier ? std::min(B, kPrefillChunk) : B;
     const uint64_t tier_scratch = (uint64_t)m.n_head *
         (B * kTierHead + tier_batch * tier_splits * (kTierHead + 2)) * sizeof(float) + ctx;
+    // Plan-time KV estimate (E195): prompts are not parsed yet, so assume the
+    // compacted protected working set is at most half the context (Vanta's
+    // measured protected overhead was ~5%). The real estimate lands before the
+    // tier allocation; tier_ensure grows the pool if reality exceeds this.
+    if (tier_cache.pooling)
+        tier_cache.capacity = getenv("GUM_TTKV_FULL_ROWS") ? (int)ctx : (int)std::min((long)ctx, ctx / 2 + kTierMidGroup * (gen_tokens + 64));
     const uint64_t kv_vram = tier_kv ? tier_cache.bytes(m.n_attn * m.n_kv) + tier_scratch :
         (uint64_t)m.n_attn * m.n_kv * ctx * m.head_v * 4 * 2 * seqs;
     const long mtp_window = large_tier ? 8192 : ctx;
@@ -1976,18 +1982,24 @@ int main(int argc, char** argv) {
     const uint64_t kv_per_layer = (uint64_t)m.n_kv * ctx * m.head_v * 4;
     float *tier_queries = nullptr, *tier_partial = nullptr;
     uint8_t* tier_protection = nullptr;
+    int* tier_overlay_dev = nullptr;
     std::vector<uint8_t> tier_flags;
     std::vector<uint8_t> tier_structural;
-    long tier_packed = 0, tier_written = 0;
+    std::vector<int> tier_overlay;
+    long tier_packed = 0, tier_written = 0, tier_rows_used = 0;
+    // E195: lowest position whose host overlay value may not have reached the
+    // device yet. Group back-fill can assign members beyond the committing
+    // end, and later commits without new assignments skip the copy entirely,
+    // so the copy range must always start at this cursor, not at overlay_low.
+    long tier_ov_pending = 0;
+    const bool tier_dbg = getenv("GUM_TIER_DEBUG") != nullptr;
     if (tier_kv) {
-        tier_cache.allocate(m.n_attn * m.n_kv);
-        check(cudaMalloc(&tier_queries, (size_t)B * m.n_head * kTierHead * sizeof(float)), "rotated KV queries");
-        check(cudaMalloc(&tier_partial, (size_t)tier_batch * m.n_head * tier_splits * (kTierHead + 2) * sizeof(float)), "tiered attention partials");
-        check(cudaMalloc(&tier_protection, ctx), "TTKV structural protection");
+        // Allocation is deferred until the prompts are known: in pooling mode the
+        // individual-row pool is sized to the protected-token working set (E195),
+        // not to the logical context. span keeps the 16:1 old tier positional.
+        tier_cache.span = (int)ctx;
+        tier_cache.capacity = (int)ctx;   // non-pooling fallback; recomputed below
         tier_flags.resize(ctx);
-        printf("kv_cache,mode=%s,cache_mib=%.1f,scratch_mib=%.1f,recent=%d,old_age=%d\n",
-            kv_mode.c_str(), tier_cache.bytes(m.n_attn * m.n_kv) / 1048576.0, tier_scratch / 1048576.0,
-            tier_cache.recent_tokens, kTierOld);
     } else if (m.n_attn) check(cudaMalloc((void**)&kv_dev, kv_per_layer * 2 * m.n_attn * seqs), "kv cache");
     const uint64_t sss = m.sss_inner / m.sss_dt;
     if (m.n_recr) {
@@ -2246,6 +2258,47 @@ int main(int argc, char** argv) {
     if (show_text) printf("prompt_seqs,%zu,first_len=%zu,ids=%s\n", prompts.size(), prompts[0].size(), prompt_ids_s.c_str());
     if (show_text && batch == 1) printf("prompt_text,%s\n", tok.decode(prompts[0]).c_str());
 
+    // ---- E195 tier KV allocation (deferred until prompts are known) ----
+    if (tier_kv) {
+        if (tier_cache.pooling) {
+            // Compacted individual rows serve protected groups only (Vanta TTKV
+            // geometry): size from the prompts' structural tokens, generation
+            // headroom, and the always-protected first 32 positions. Sessions
+            // that outlive the estimate grow the pool on demand (tier_ensure).
+            long rows_est = kTierOldGroup + kTierMidGroup;
+            for (const auto& p : prompts)
+                for (long id : p) if (tier_structural[id]) rows_est += kTierMidGroup;
+            rows_est += kTierMidGroup * (first_gen_tokens + 64);
+            tier_cache.capacity = (int)std::min((long)ctx, rows_est);
+        }
+        tier_overlay.resize(ctx, -1);
+        // E195: rolling straddler buffer. A position's individual row is read
+        // while it straddles the recent-window boundary (ends t+recent..t+recent+4)
+        // and its slot is only recycled when the commit cursor reaches
+        // t + w1_slots; kTierSplit slots give a wide margin over the ~516-cycle
+        // lifetime even with 256-row grouped prefill commits.
+        tier_cache.w1_slots = getenv("GUM_TTKV_W1_FULL") ? (int)ctx : kTierSplit;
+        tier_cache.allocate(m.n_attn * m.n_kv);
+        check(cudaMalloc(&tier_queries, (size_t)B * m.n_head * kTierHead * sizeof(float)), "rotated KV queries");
+        check(cudaMalloc(&tier_partial, (size_t)tier_batch * m.n_head * tier_splits * (kTierHead + 2) * sizeof(float)), "tiered attention partials");
+        check(cudaMalloc(&tier_protection, ctx), "TTKV structural protection");
+        if (tier_cache.pooling) {
+            check(cudaMalloc(&tier_overlay_dev, ctx * sizeof(int)), "TTKV row overlay");
+            check(cudaMemset(tier_overlay_dev, 0xff, ctx * sizeof(int)), "TTKV row overlay init");
+            tier_cache.overlay = tier_overlay_dev;
+        }
+        if (getenv("GUM_TTKV_PAD")) {
+            void* pad = nullptr;
+            check(cudaMalloc(&pad, 128ull << 20), "TTKV layout pad");
+            check(cudaMemset(pad, 0, 128ull << 20), "TTKV layout pad init");
+        }
+        printf("kv_cache,mode=%s,cache_mib=%.1f,scratch_mib=%.1f,recent=%d,old_age=%d,rows=%d,span=%d,layer_heads=%d\n",
+            kv_mode.c_str(), tier_cache.bytes(m.n_attn * m.n_kv) / 1048576.0, tier_scratch / 1048576.0,
+            tier_cache.recent_tokens, kTierOld, tier_cache.capacity, tier_cache.span,
+            (int)(m.n_attn * m.n_kv));
+        fflush(stdout);
+    }
+
     // ---- CPU reference ----
     CPUModel cm;
     if (validate) {
@@ -2483,8 +2536,26 @@ int main(int argc, char** argv) {
         long split = 0;
         long checkpoint_row = 0;
     };
+    // E195: grow the compacted individual-row pool when a session outlives the
+    // prompt-derived estimate. Copy is D2D on the compute stream, freed after sync.
+    auto tier_ensure = [&](long need) {
+        if (!tier_cache.pooling || need <= tier_cache.capacity) return;
+        const long heads = m.n_attn * m.n_kv;
+        const int grown = (int)std::min((long)ctx, std::max((long)tier_cache.capacity * 2, need));
+        TierRow* rows_new = nullptr;
+        check(cudaMalloc(&rows_new, (size_t)heads * grown * sizeof(TierRow)), "TTKV row pool growth");
+        check(cudaMemcpyAsync(rows_new, tier_cache.rows,
+            (size_t)heads * tier_cache.capacity * sizeof(TierRow), cudaMemcpyDeviceToDevice, stc),
+            "TTKV row pool growth copy");
+        check(cudaStreamSynchronize(stc), "TTKV row pool growth sync");
+        check(cudaFree(tier_cache.rows), "TTKV row pool release");
+        tier_cache.rows = rows_new;
+        tier_cache.capacity = grown;
+        printf("kv_cache,rows_grown,capacity=%d,used=%ld\n", grown, tier_rows_used);
+    };
     auto tier_commit = [&](const std::vector<long>& ids, long end) {
         if (!tier_kv || end <= tier_packed) return;
+        long overlay_low = end;
         if (tier_cache.pooling) {
             const long flag_start = tier_packed / kTierOldGroup * kTierOldGroup;
             for (long pos = flag_start; pos < end; ++pos) {
@@ -2496,15 +2567,51 @@ int main(int argc, char** argv) {
                     tier_flags[pos / kTierMidGroup * kTierMidGroup + 1] = 1;
                 }
             }
+            // Every member of a protected 4-group is read individually by
+            // attention, so the whole group gets compacted row slots. The loop
+            // starts at flag_start (the mask recomputation origin), not
+            // tier_packed: a group fully inside [flag_start, tier_packed) can
+            // have its marker set by this commit's tokens while its members
+            // were committed before, and the attention would otherwise read an
+            // unassigned overlay slot. The width-1 pack below starts at the
+            // earliest newly-assigned member so those rows still get packed
+            // (the re-pack distance stays far inside the ring's fresh window).
+            for (long pos = flag_start; pos < end; ++pos) {
+                if (tier_overlay[pos] < 0 && tier_flags[pos / kTierMidGroup * kTierMidGroup + 1]) {
+                    const long grp = pos / kTierMidGroup * kTierMidGroup;
+                    overlay_low = std::min(overlay_low, grp);
+                    for (long mb = grp; mb < grp + kTierMidGroup; ++mb)
+                        if (tier_overlay[mb] < 0) tier_overlay[mb] = (int)tier_rows_used++;
+                }
+            }
+            for (long pos = flag_start; pos < end; ++pos)
+                if (tier_flags[pos / kTierMidGroup * kTierMidGroup + 1] && tier_overlay[pos] < 0)
+                    printf("HOST_GAP,end=%ld,pos=%ld,tp=%ld,fs=%ld,used=%ld\n", end, pos, tier_packed, flag_start, tier_rows_used);
+            tier_ensure(tier_rows_used);
             const long flag_end = std::min(ctx, (long)align_up(end, kTierOldGroup));
             check(cudaMemcpyAsync(tier_protection + flag_start, tier_flags.data() + flag_start,
                 flag_end - flag_start, cudaMemcpyHostToDevice, stc), "TTKV retention mask");
+            const long ov_from = std::min(overlay_low, tier_ov_pending);
+            if (ov_from < end) {
+                check(cudaMemcpyAsync(tier_overlay_dev + ov_from, tier_overlay.data() + ov_from,
+                    (end - ov_from) * sizeof(int), cudaMemcpyHostToDevice, stc), "TTKV row overlay");
+                tier_ov_pending = end;
+            }
         }
         const int heads = (int)(m.n_attn * m.n_kv);
+        const long w1_first = tier_cache.pooling ? std::min(tier_packed, overlay_low) : tier_packed;
         for (int width : {1, kTierMidGroup, kTierOldGroup}) {
-            const long first = tier_packed / width, count = end / width - first;
-            if (count && (width == 1 || tier_cache.pooling))
-                k_tier_pack<<<dim3(heads, count), kTierHead, 0, stc>>>(tier_cache, first, width, (int)m.n_rot, (float)m.rope_base);
+            const long first = width == 1 ? w1_first : tier_packed / width;
+            const long count = end / width - first / width;
+            if (count && (width == 1 || tier_cache.pooling)) {
+                // Rolling slots recycle every w1_slots positions: re-packing a
+                // position older than one cycle would clobber the slot's current
+                // occupant, so the rolling write starts one cycle back.
+                const int fresh_from = tier_cache.pooling ?
+                    (int)std::max(0L, tier_packed - tier_cache.w1_slots) : 0;
+                k_tier_pack<<<dim3(heads, count), kTierHead, 0, stc>>>(tier_cache, first, width, (int)m.n_rot, (float)m.rope_base, fresh_from);
+                check(cudaGetLastError(), "tier pack launch");
+            }
         }
         tier_packed = end;
     };
@@ -2940,24 +3047,50 @@ int main(int argc, char** argv) {
                 if (dbg_dump && il <= 1 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("v" + std::to_string(il)).c_str(), t_v, nh_k * hd); }
                 const int q_stride = A == "qwen35" ? 2 * (int)hd : (int)hd;
                 k_rms_heads<<<dim3((unsigned)nh_q, (unsigned)B), 128, 0, stc>>>(yA, S(L + ".attn_q_norm.weight"), (int)nh_q, (int)hd, (float)m.eps, q_stride);
+if (tier_dbg) {
+    const cudaError_t sticky = cudaGetLastError();
+    if (sticky != cudaSuccess) {
+        fprintf(stderr, "sticky_rms_q: %s\n", cudaGetErrorString(sticky));
+        exit(3);
+    }
+}
+
                 k_rms_heads<<<dim3((unsigned)nh_k, (unsigned)B), 128, 0, stc>>>(yB, S(L + ".attn_k_norm.weight"), (int)nh_k, (int)hd, (float)m.eps, (int)hd);
+if (tier_dbg) {
+    const cudaError_t sticky = cudaGetLastError();
+    if (sticky != cudaSuccess) {
+        fprintf(stderr, "sticky_rms_k: %s\n", cudaGetErrorString(sticky));
+        exit(3);
+    }
+}
+
                 // ggml uses NEOX half-split pairing for NORMAL?no: NORM is adjacent; NEOX/MROPE/IMROPE
                 // are half-split (ops.cpp rope switch). qwen35 = IMROPE = half-split; for text the
                 // mrope section positions are all equal, so it is plain half-split RoPE.
                 const int rope_style = 0;
                 k_rope<<<dim3((unsigned)(nh_q + nh_k), (unsigned)B), 128, 0, stc>>>(yA, yB, (int)cur_pos, (int)nh_q, (int)nh_k, (int)hd, (int)m.n_rot, (float)m.rope_base, q_stride, rope_style, row_pos, tree ? tree_depth : nullptr);
+if (tier_dbg) {
+    const cudaError_t sticky = cudaGetLastError();
+    if (sticky != cudaSuccess) {
+        fprintf(stderr, "sticky_rope: %s\n", cudaGetErrorString(sticky));
+        exit(3);
+    }
+}
+
                 const long li = A == "qwen35" ? il / 4 : il;
                 if (tier_kv) {
                     const auto layer_cache = tier_cache.layer((int)nh_k, (int)li);
                     const int splits = (int)((cur_pos + B + kTierSplit - 1) / kTierSplit);
                     k_tier_append<<<dim3(nh_k, B), kTierHead, 0, stc>>>(layer_cache, yB, t_v, cur_pos, nh_k);
                     k_tier_query<<<dim3(nh_q, B), kTierHead, 0, stc>>>(tier_queries, yA, nh_q, q_stride);
+                    check(cudaGetLastError(), "tier append/query launch");
                     for (int first_row = 0; first_row < B; first_row += tier_batch) {
                         const int rows = std::min<long>(tier_batch, B - first_row);
                         k_tier_attention<<<dim3(nh_q, rows, splits), kTierHead, 0, stc>>>(
                             t_att, tier_partial, layer_cache, yA, tier_queries, tier_protection, cur_pos,
                             nh_q, nh_k, q_stride, tree ? tree_depth : nullptr,
                             tree ? tree_paths : nullptr, batch, splits, first_row, attn_scale);
+                        check(cudaGetLastError(), "tier attention launch");
                         if (splits > 1)
                             k_tier_merge<<<nh_q * rows, kTierHead, 0, stc>>>(
                                 t_att + (size_t)first_row * nh_q * hd, tier_partial, splits);
@@ -2978,6 +3111,14 @@ int main(int argc, char** argv) {
                     if (dbg_dump && il == 0 && pass == 0) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd); if (B > 1) { dbg2(("att" + std::to_string(il)).c_str(), t_att, nh_q * hd, nh_q * hd, 1); dbg2(("vv" + std::to_string(il)).c_str(), t_v, nh_k * hd, nh_k * hd, 1); } }
                 }
                 if (A == "qwen35") k_attn_gate_apply<<<dim3((unsigned)((nh_q * hd + 255) / 256), (unsigned)B), 256, 0, stc>>>(t_att, yA, (int)nh_q, (int)hd);
+if (tier_dbg) {
+    const cudaError_t sticky = cudaGetLastError();
+    if (sticky != cudaSuccess) {
+        fprintf(stderr, "sticky_gate_apply: %s\n", cudaGetErrorString(sticky));
+        exit(3);
+    }
+}
+
                 mat(L + ".attn_output.weight", t_att, nh_q * hd, yA, 0, max_rows);
                 if (dbg_dump && il == 0 && pass == 0 && B > 1) { check(cudaStreamSynchronize(stc), "dbg sync"); dbg2("wo0", yA, m.n_embd, m.n_embd, 1); dbg2("xpre0", x, m.n_embd, m.n_embd, 1); }
             }
@@ -3984,6 +4125,11 @@ int main(int argc, char** argv) {
             }
         }
         if (session) {
+            // E195: the turn-final tier_commit's pack kernels are still in flight
+            // here. A boundary sync keeps the next turn's async state changes
+            // (fresh overlay/mask copies, ring re-append) ordered behind them;
+            // the cost is one pack latency per turn.
+            check(cudaStreamSynchronize(stc), "session boundary sync");
             if (session_tail) committed_ids.assign(hist.begin(), hist.begin() + cur_pos);
             printf("session_turn,reused_tokens=%zu,completion=%s\n", reused, stop ? "eos" : "length");
             printf("session_ids");

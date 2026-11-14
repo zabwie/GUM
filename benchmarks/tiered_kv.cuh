@@ -1,5 +1,6 @@
 // GUM's CUDA adaptation of Vanta's TurboQuant-MSE keys and TTKV age tiers.
 // Quantized rows stay addressable for prefix replay and for groups with protected tokens.
+#include <cassert>
 static constexpr int kTierHead = 256;
 static constexpr int kTierRecent = 512;
 static constexpr int kTierOld = 4096;
@@ -16,20 +17,37 @@ struct TierRow {
 struct TierCache {
     float2* recent = nullptr;
     TierRow *rows = nullptr, *middle = nullptr, *old = nullptr;
+    // E195: overlay maps a logical position to its compacted individual-row slot
+    // (-1 = no individual row; the position is served by the pooled tiers or the
+    // recent ring). Null in non-pooling modes, where rows stay positional.
+    const int* overlay = nullptr;
+    // E195: rolling buffer serving the transient width==1 reads. Every position
+    // is read as its individual 4-bit row while it straddles the recent-window
+    // boundary (ends [t+recent, t+recent+4)), then forever after by its pooled
+    // group row. Rows are packed at commit into slot t % w1_slots; a slot is
+    // only overwritten when the commit cursor passes t + w1_slots, far beyond
+    // the last straddler read (t + recent + 4). Null in non-pooling modes.
+    TierRow* w1 = nullptr;
+    int w1_slots = 0;
     int ring = 0, capacity = 0, recent_tokens = kTierRecent, middle_groups = 0;
+    // E195: span = logical context the positional old tier must cover. capacity
+    // shrinks to the protected-row working set; span keeps the 16:1 pool sized.
+    int span = 0;
     bool pooling = false;
 
     size_t bytes(int heads) const {
         return (size_t)heads * (ring * sizeof(float2) * kTierHead +
-            (capacity + (pooling ? middle_groups + capacity / kTierOldGroup : 0)) * sizeof(TierRow));
+            ((pooling ? w1_slots : 0) + capacity +
+             (pooling ? middle_groups + span / kTierOldGroup : 0)) * sizeof(TierRow));
     }
 
     void allocate(int heads) {
         check(cudaMalloc(&recent, (size_t)heads * ring * kTierHead * sizeof(float2)), "recent KV");
         check(cudaMalloc(&rows, (size_t)heads * capacity * sizeof(TierRow)), "TurboQuant KV");
         if (pooling) {
+            check(cudaMalloc(&w1, (size_t)heads * w1_slots * sizeof(TierRow)), "TTKV straddler rows");
             check(cudaMalloc(&middle, (size_t)heads * middle_groups * sizeof(TierRow)), "TTKV middle");
-            check(cudaMalloc(&old, (size_t)heads * (capacity / kTierOldGroup) * sizeof(TierRow)), "TTKV old");
+            check(cudaMalloc(&old, (size_t)heads * (span / kTierOldGroup) * sizeof(TierRow)), "TTKV old");
         }
     }
 
@@ -39,8 +57,9 @@ struct TierCache {
         result.recent += base * ring * kTierHead;
         result.rows += base * capacity;
         if (pooling) {
+            result.w1 += base * w1_slots;
             result.middle += base * middle_groups;
-            result.old += base * (capacity / kTierOldGroup);
+            result.old += base * (span / kTierOldGroup);
         }
         return result;
     }
@@ -77,6 +96,7 @@ __device__ float tier_rotate(float x, float* scratch, int i) {
 __global__ void k_tier_append(TierCache cache, const float* k, const float* v, int pos, int heads) {
     const int head = blockIdx.x, row = blockIdx.y, i = threadIdx.x;
     const size_t from = ((size_t)row * heads + head) * kTierHead + i;
+    assert((pos + row) % cache.ring < cache.ring && head < 64);
     cache.recent[((size_t)head * cache.ring + (pos + row) % cache.ring) * kTierHead + i] =
         make_float2(k[from], v[from]);
 }
@@ -91,7 +111,8 @@ __global__ void k_tier_compact(TierCache cache, int pos, int count, const int* p
     }
 }
 
-__global__ void k_tier_pack(TierCache cache, int start_group, int width, int nrot, float rope_base) {
+__global__ void k_tier_pack(TierCache cache, int start_group, int width, int nrot, float rope_base,
+                            int fresh_from) {
     __shared__ float scratch[kTierHead], warp_norm[kTierHead / 32], norm;
     const int head = blockIdx.x, group = start_group + blockIdx.y, i = threadIdx.x;
     const int start = group * width, lane = i & 31;
@@ -101,6 +122,7 @@ __global__ void k_tier_pack(TierCache cache, int start_group, int width, int nro
     const int pair = i < half ? i + half : i - half;
     const float frequency = width > 1 && i < nrot ? powf(rope_base, -2.f * (i % half) / nrot) : 0;
     for (int offset = 0; offset < width; ++offset) {
+        assert(((start + offset) % cache.ring) < cache.ring);
         const float2* row = recent + ((start + offset) % cache.ring) * kTierHead;
         float rotated = row[i].x;
         if (frequency != 0) {
@@ -139,14 +161,47 @@ __global__ void k_tier_pack(TierCache cache, int start_group, int width, int nro
     const int quant_value = scale > 0 ? max(0, min(15, __float2int_rn((value - lo) / scale))) : 0;
     const int next_key = __shfl_xor_sync(0xffffffffu, left, 1);
     const int next_value = __shfl_xor_sync(0xffffffffu, quant_value, 1);
-    TierRow* pool = width == 1 ? cache.rows : width == kTierMidGroup ? cache.middle : cache.old;
-    const int groups = width == kTierMidGroup ? cache.middle_groups : cache.capacity / width;
-    TierRow& out = pool[(size_t)head * groups + group % groups];
-    if (i == 0) out.key_scale = norm / 16.f;
-    if (!lane) out.value_range[i / 32] = make_float2(scale, lo);
-    if (!(i & 1)) {
-        out.keys[i / 2] = left | (next_key << 4);
-        out.values[i / 2] = quant_value | (next_value << 4);
+    assert(head < 64 && group >= 0 && group < cache.span);
+    TierRow* pool = width == 1 ? (cache.w1 ? cache.w1 : cache.rows) :
+        width == kTierMidGroup ? cache.middle : cache.old;
+    const int groups = width == kTierMidGroup ? cache.middle_groups :
+        width == 1 ? (cache.w1 ? cache.w1_slots : cache.capacity) : cache.span / kTierOldGroup;
+    const int slot = group % groups;
+    assert(slot >= 0 && slot < groups);
+    if (width == 1 && cache.overlay) {
+        const int os = cache.overlay[group];
+        if (os >= cache.capacity)
+            printf("BAD_overlay,group=%d,slot=%d,cap=%d,head=%d,width=%d\n", group, os, cache.capacity, head, width);
+        assert(os < cache.capacity);
+    }
+    assert(pool != nullptr);
+    // E195: the rolling straddler buffer recycles slots every w1_slots
+    // positions. Re-packing a position older than one full slot cycle would
+    // clobber the slot's current occupant, so the rolling write only covers
+    // fresh positions; the compacted overlay write has no recycling and is
+    // always safe.
+    const bool fresh = width != 1 || group >= fresh_from;
+    if (fresh) {
+        TierRow& out = pool[(size_t)head * groups + slot];
+        if (i == 0) out.key_scale = norm / 16.f;
+        if (!lane) out.value_range[i / 32] = make_float2(scale, lo);
+        if (!(i & 1)) {
+            out.keys[i / 2] = left | (next_key << 4);
+            out.values[i / 2] = quant_value | (next_value << 4);
+        }
+    }
+    if (width == 1 && cache.overlay) {
+        // E195: old protected groups read compacted rows through the overlay.
+        const int cslot = cache.overlay[group];
+        if (cslot >= 0) {
+            TierRow& comp = cache.rows[(size_t)head * cache.capacity + cslot];
+            if (i == 0) comp.key_scale = norm / 16.f;
+            if (!lane) comp.value_range[i / 32] = make_float2(scale, lo);
+            if (!(i & 1)) {
+                comp.keys[i / 2] = left | (next_key << 4);
+                comp.values[i / 2] = quant_value | (next_value << 4);
+            }
+        }
     }
 }
 
@@ -182,7 +237,7 @@ __global__ void k_tier_attention(float* output, float* partial, TierCache cache,
     const float2* recent = cache.recent + (size_t)kh * cache.ring * kTierHead;
     const TierRow* history = cache.rows + (size_t)kh * cache.capacity;
     const TierRow* middle = cache.pooling ? cache.middle + (size_t)kh * cache.middle_groups : nullptr;
-    const TierRow* old = cache.pooling ? cache.old + (size_t)kh * (cache.capacity / kTierOldGroup) : nullptr;
+    const TierRow* old = cache.pooling ? cache.old + (size_t)kh * (cache.span / kTierOldGroup) : nullptr;
     if (threadIdx.x < 16) centroids[threadIdx.x] = kTierCentroids[threadIdx.x];
     __syncthreads();
     for (int slot = warp; slot < count; slot += kTierHead / 32) {
@@ -196,7 +251,7 @@ __global__ void k_tier_attention(float* output, float* partial, TierCache cache,
             // A protected group keeps its original individual rows at both ages.
             if (tier2 + kTierOldGroup <= old_start && !protected_tokens[tier2])
                 anchor = tier2, width = kTierOldGroup;
-            else if ((cache.middle_groups == cache.capacity / kTierMidGroup || tier2 + kTierOldGroup > old_start)
+            else if ((cache.middle_groups == cache.span / kTierMidGroup || tier2 + kTierOldGroup > old_start)
                      && tier1 + kTierMidGroup <= recent_start && !protected_tokens[tier1 + 1])
                 anchor = tier1, width = kTierMidGroup;
             if (anchor != t) width = 0;
@@ -214,7 +269,18 @@ __global__ void k_tier_attention(float* output, float* partial, TierCache cache,
                     dot += term;
                 }
             } else {
-                const TierRow& packed = width == 1 ? history[t] : width == kTierMidGroup ?
+                // E195: straddling the recent-window boundary reads the rolling
+                // individual row (bit-identical to the full-context layout);
+                // deeper width==1 reads are protected groups via the overlay.
+                const bool straddle = cache.w1 &&
+                    (t & ~(kTierMidGroup - 1)) + kTierMidGroup > recent_start;
+                assert(t >= 0 && t < cache.span);
+                if (width == 1 && !straddle && cache.overlay && cache.overlay[t] < 0)
+                    printf("BAD_ATT,layer_row=%d,t=%d,rs=%d,pos=%d,end=%d,ov=%d,m4=%d,m16=%d,os=%d\n", (int)head, t, recent_start, pos, end, cache.overlay[t], (int)protected_tokens[(t & ~(kTierMidGroup - 1)) + 1], (int)protected_tokens[t & ~(kTierOldGroup - 1)], old_start);
+                const TierRow& packed = width == 1 ?
+                    (straddle ? cache.w1[(size_t)kh * cache.w1_slots + t % cache.w1_slots] :
+                                history[cache.overlay ? cache.overlay[t] : t]) :
+                    width == kTierMidGroup ?
                     middle[(t / kTierMidGroup) % cache.middle_groups] : old[t / kTierOldGroup];
                 for (int i = lane; i < kTierHead; i += 32)
                     dot += rotated[i] * centroids[tier_index(packed.keys, i)];
@@ -249,7 +315,15 @@ __global__ void k_tier_attention(float* output, float* partial, TierCache cache,
             const int slot_pos = branch && t >= pos ? pos + branch[t - pos] : t;
             v = recent[(slot_pos % cache.ring) * kTierHead + i].y;
         } else {
-            const TierRow& packed = width == 1 ? history[t] : width == kTierMidGroup ?
+            const bool straddle = cache.w1 &&
+                (t & ~(kTierMidGroup - 1)) + kTierMidGroup > recent_start;
+            assert(t >= 0 && t < cache.span);
+            if (width == 1 && !straddle && cache.overlay && cache.overlay[t] < 0)
+                printf("BAD_ATT2,layer_row=%d,t=%d,rs=%d,pos=%d,end=%d,ov=%d\n", (int)head, t, recent_start, pos, end, cache.overlay[t]);
+            const TierRow& packed = width == 1 ?
+                (straddle ? cache.w1[(size_t)kh * cache.w1_slots + t % cache.w1_slots] :
+                            history[cache.overlay ? cache.overlay[t] : t]) :
+                width == kTierMidGroup ?
                 middle[(t / kTierMidGroup) % cache.middle_groups] : old[t / kTierOldGroup];
             const float2 range = packed.value_range[i / 32];
             v = tier_index(packed.values, i) * range.x + range.y;
