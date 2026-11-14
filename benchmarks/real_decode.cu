@@ -2767,6 +2767,21 @@ int main(int argc, char** argv) {
                 while (!cpu_job_done.load(std::memory_order_acquire)) std::this_thread::yield();
                 if (getenv("GUM_E193_DEBUG")) E193LOG("main got done tn=%s\n", tn.c_str());
                 if (cpu_verify) {
+                    // post-GEMV snapshot: if xq/xmeta changed between the quant and the
+                    // GEMVs, the worker's snapshot is stale — diff tells us immediately.
+                    check(cudaMemcpyAsync(cpu_xq_stage[cpu_ring ^ 1], xq, (size_t)B * K, cudaMemcpyDeviceToHost, st3), "cpu xq post d2h");
+                    check(cudaMemcpyAsync(cpu_meta_stage[cpu_ring ^ 1], xmeta, (size_t)B * (K / 32) * sizeof(int2), cudaMemcpyDeviceToHost, st3), "cpu meta post d2h");
+                    check(cudaEventRecord(cpu_oh[cpu_ring ^ 1], st3), "cpu post ev");
+                    check(cudaEventSynchronize(cpu_oh[cpu_ring ^ 1]), "cpu post sync");
+                    const size_t qbytes = (size_t)B * K + (size_t)B * (K / 32) * sizeof(int2);
+                    const long qdiff = [&] {
+                        const uint8_t* a = (const uint8_t*)cpu_xq_stage[cpu_ring];
+                        const uint8_t* b = (const uint8_t*)cpu_xq_stage[cpu_ring ^ 1];
+                        for (size_t i = 0; i < qbytes; ++i) if (a[i] != b[i]) return (long)i;
+                        return -1L;
+                    }();
+                    fprintf(stderr, "e193 snapdiff,tn=%s,first=%ld\n", tn.c_str(), qdiff);
+
                     const long w = ystride - cpu_row_start;
                     std::vector<float> g((size_t)B * w);
                     check(cudaMemcpy2DAsync(g.data(), w * 4, out + out_row0 + cpu_row_start, ystride * 4,
@@ -2801,7 +2816,7 @@ int main(int argc, char** argv) {
                                 sref += ((int)(nib[j] & 0xF) - 8) * ax[j];        // weights 0-15 = low nibbles
                                 sref += ((int)(nib[j] >> 4) - 8) * ax[16 + j];    // weights 16-31 = high nibbles
                             }
-                            acc_s += (double)dw * dx * (double)(sref - 8 * mx.y);
+                            acc_s += (double)dw * dx * (double)sref;   // sref = sum((q_w-8)*q_x) already carries the -8 shift
                         }
                         fprintf(stderr, "e193 scalar,gpu=%.9g simd=%.9g scalar=%.9g\n",
                                 (double)g[0], (double)cpu_out_stage[cpu_ring][cpu_row_start], acc_s);
@@ -2809,6 +2824,23 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "e193 verify,tn=%s,w=%ld,maxdiff=%.3e,bad=%ld,firstv=%ld,firstr=%ld,rowsbad=", tn.c_str(), w, maxd, bad, firstv, firstr);
                     for (int v = 0; v < B; ++v) fprintf(stderr, "%d", vbad[v] ? 1 : 0);
                     fprintf(stderr, "\n");
+                    static int dump_n = 0;
+                    if (dump_n < 2 && maxd > 1e-3) {
+                        FILE* f = fopen((std::string("/tmp/e193-dump-") + std::to_string(dump_n) + ".bin").c_str(), "wb");
+                        if (f) {
+                            const int blocks = cpu_job.K / 32;
+                            fwrite(&cpu_job.K, 4, 1, f); fwrite(&B, 4, 1, f);
+                            fwrite(&cpu_row_start, 8, 1, f); fwrite(&ystride, 8, 1, f);
+                            fwrite(cpu_job.w, 1, (size_t)blocks * 288, f);
+                            fwrite(cpu_xq_stage[cpu_ring], 1, (size_t)B * K, f);
+                            fwrite(cpu_meta_stage[cpu_ring], 1, (size_t)B * blocks * sizeof(int2), f);
+                            fwrite(g.data(), 4, (size_t)B * w, f);
+                            fwrite(cpu_out_stage[cpu_ring] + cpu_row_start, 4, (size_t)B * w, f);
+                            fclose(f);
+                            fprintf(stderr, "e193 dumped dump=%d tn=%s\n", dump_n, tn.c_str());
+                            ++dump_n;
+                        }
+                    }
                 } else {
                     check(cudaMemcpy2DAsync(out + out_row0 + cpu_row_start, ystride * 4,
                                             cpu_out_stage[cpu_ring] + cpu_row_start, ystride * 4,
