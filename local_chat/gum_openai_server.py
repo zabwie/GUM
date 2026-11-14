@@ -48,6 +48,7 @@ _pctx, _pgen, _phot, _pcache = _PROFILE[PROFILE]
 CTX = int(os.environ.get("GUM_CTX", str(_pctx)))
 GEN_TOKENS = int(os.environ.get("GUM_GEN_TOKENS", str(_pgen)))
 HOT_MIB = os.environ.get("GUM_HOT_MIB", str(_phot))
+CPU_ROWS = os.environ.get("GUM_CPU_ROWS", "0")   # E193: CPU row-split fraction (0 = off)
 CACHE_MIB = os.environ.get("GUM_CACHE_MIB", str(_pcache))
 API_KEY = os.environ.get("LOCAL_GUM_API_KEY", "local-gum-key")
 MODEL_ID = "qwen3.8-27b-gum"
@@ -135,6 +136,7 @@ class GumSession:
             "--speculate", "32", "--packed-verify", "1", "--pld", "0",
             "--draft-max", "31", "--ctx", str(CTX), "--gen-tokens", str(GEN_TOKENS),
             "--hot-mib", str(hot_mib), "--cache-mib", CACHE_MIB, "--kv-cache", KV_CACHE, "--show-text", "0",
+            "--cpu-rows", CPU_ROWS,
             "--prompt-ids", "-",
         ]
         benchmark_cpus = sorted(os.sched_getaffinity(0) & {0, 1, 2, 3, 4, 5, 6, 7})
@@ -350,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "model": MODEL_ID, "profile": PROFILE,
                              "loaded": SESSION.proc is not None and SESSION.proc.poll() is None,
                              "context": CTX, "max_tokens": GEN_TOKENS, "kv_cache": KV_CACHE,
-                             "hot_mib": SESSION.hot_mib, "adaptive": GUM_ADAPTIVE,
+                             "hot_mib": SESSION.hot_mib, "adaptive": GUM_ADAPTIVE, "cpu_rows": CPU_ROWS,
                              "free_vram_mib": SESSION._free_vram_mib()})
             return
         if self.path == "/v1/models":

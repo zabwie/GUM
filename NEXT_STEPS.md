@@ -191,3 +191,16 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     reverted, patch preserved. The draft-time "idle window" is not free: the tree's
     logits readbacks already own it. If attacking it, batch the readbacks first
     (one pinned buffer per tree level) — that is also the draft-cost audit.
+54. **E193 WIP (2026-11-13):** CPU row-split infrastructure works and is exact in the
+    constrained-pinned regime; open bug = deterministic per-tensor shadow mismatch in
+    full-pin (see EXPERIMENTS.md E193 for the full state + fixed bugs). Next session:
+    isolate the snapshot-vs-GEMV data mismatch (suspects: a second xq writer between
+    cpu_qev and the GEMVs — k_rms_quant at 2842 / k_quant_x at 2752 — or the packed-tile
+    item boundary at non-4848-row items). The scalar-reference tool in --cpu-verify is
+    itself buggy (disagrees even on CLEAN tensors) — fix it first; it is the fastest
+    path to the answer.
+55. **BF16 source downloaded (52 GB):** /home/zabwie/Desktop/Chip/models/bf16-source
+    = Qwen/Qwen3.8-27B @ 1d4bf0f2ff (Chip provenance pin). Codec 3-way KL test
+    (Q4_0→BF16, (3,64)→BF16, teacher-forced) is NOW RUNNABLE — the codec lever (+28%)
+    is live pending that measurement. Also enables true-BF16 quality comparisons for
+    any future TOLERANCE-track work.

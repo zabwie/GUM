@@ -39,6 +39,8 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <immintrin.h>
+#include <atomic>
 #include <vector>
 
 static constexpr size_t kMaxItem = 16u << 20;
@@ -276,6 +278,69 @@ struct Model {
 // ---------------------------------------------------------------------------
 // quantize NB activation vectors: x [NB][K], xq [NB][K], xmeta [NB][K/32]
 // xmeta packs the quant scale bits and sum correction into one aligned 64-bit load.
+
+// ---- E193: CPU row-split compute (GUM-Fuse second stream) --------------------
+// Reads MMA-packed Q4_0 tiles straight from the pinned cache (pack_q4_tiles layout:
+// per 16-row tile and block b, tile[r*16..+16) = the row's nibble bytes (q in 0..15)
+// and tile[256+r*2..+2) = the row's fp16 scale). Activations use the engine scheme:
+// q_x (s8) + per-block meta (d_x, s_x). One output row contribution per block:
+//   d_w * d_x * (sum(q_w*q_x) - 8*s_x)
+// dpbusd: unsigned slot carries q_w (0..15), signed slot carries q_x.
+static double e193_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec*1e-9; }
+#define E193LOG(...) do { if (getenv("GUM_E193_DEBUG")) fprintf(stderr, "e193 %.6f ", e193_now()); if (getenv("GUM_E193_DEBUG")) fprintf(stderr, __VA_ARGS__); } while(0)
+static inline float cpu_fp16_to_f32(uint16_t h) {
+    return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128((int)h)));
+}
+static void cpu_q4_rows(const uint8_t* wpacked, int K, int rows, int B,
+                        const int8_t* xq, const int2* xmeta, float* out, long stride) {
+    const int blocks = K / 32;
+    for (int t = 0; t < rows / 16; ++t) {
+        const uint8_t* tile0 = wpacked + (size_t)t * blocks * 288;
+        const long row0 = (long)t * 16;
+        __m256 vacc[64][2];
+        for (int v = 0; v < B; ++v) { vacc[v][0] = _mm256_setzero_ps(); vacc[v][1] = _mm256_setzero_ps(); }
+        int32_t sv[64][16];
+        for (int b = 0; b < blocks; ++b) {
+            const uint8_t* tb = tile0 + (size_t)b * 288;
+            const uint16_t* scales = (const uint16_t*)(tb + 256);
+            for (int r = 0; r < 16; ++r) {
+                const uint8_t* nib = tb + r * 16;
+                uint8_t wu[32];
+                // GGUF Q4_0 order (matches k_mat_q4_shared): weights 0-15 = LOW nibbles of bytes 0-15, weights 16-31 = HIGH nibbles
+                for (int j = 0; j < 16; ++j) { wu[j] = nib[j] & 0xF; wu[16 + j] = nib[j] >> 4; }
+                const __m128i wl = _mm_loadu_si128((const __m128i*)wu);
+                const __m128i wh = _mm_loadu_si128((const __m128i*)(wu + 16));
+                const int8_t* ax = xq + (size_t)b * 32;
+                for (int v = 0; v < B; ++v) {
+                    const __m128i a0 = _mm_loadu_si128((const __m128i*)(ax + (size_t)v * K));
+                    const __m128i a1 = _mm_loadu_si128((const __m128i*)(ax + (size_t)v * K + 16));
+                    __m128i acc = _mm_add_epi32(_mm_dpbusd_epi32(_mm_setzero_si128(), wl, a0),
+                                                _mm_dpbusd_epi32(_mm_setzero_si128(), wh, a1));
+                    acc = _mm_add_epi32(acc, _mm_shuffle_epi32(acc, _MM_SHUFFLE(1, 0, 3, 2)));
+                    acc = _mm_add_epi32(acc, _mm_shuffle_epi32(acc, _MM_SHUFFLE(2, 3, 0, 1)));
+                    sv[v][r] = _mm_cvtsi128_si32(acc);
+                }
+            }
+            for (int v = 0; v < B; ++v) {
+                const int2 mx = xmeta[(size_t)v * blocks + b];
+                const float dx = *(const float*)&mx.x;
+                const __m256 corr = _mm256_set1_ps(-8.f * (float)mx.y);
+                const __m256 dxv = _mm256_set1_ps(dx);
+                __m256 dw0 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)scales));
+                __m256 dw1 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(scales + 8)));
+                __m256 s0 = _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i*)&sv[v][0]));
+                __m256 s1 = _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i*)&sv[v][8]));
+                vacc[v][0] = _mm256_fmadd_ps(_mm256_mul_ps(_mm256_add_ps(s0, corr), dw0), dxv, vacc[v][0]);
+                vacc[v][1] = _mm256_fmadd_ps(_mm256_mul_ps(_mm256_add_ps(s1, corr), dw1), dxv, vacc[v][1]);
+            }
+        }
+        for (int v = 0; v < B; ++v) {
+            _mm256_storeu_ps(out + (size_t)v * stride + row0, vacc[v][0]);
+            _mm256_storeu_ps(out + (size_t)v * stride + row0 + 8, vacc[v][1]);
+        }
+    }
+}
+
 __global__ void k_quant_x(const float* x, long nb, int8_t* xq, int2* xmeta) {
     long b = (long)blockIdx.x * blockDim.x + threadIdx.x; if (b >= nb) return;
     float amax = 0.f; for (int i = 0; i < 32; ++i) amax = fmaxf(amax, fabsf(x[b * 32 + i]));
@@ -1393,6 +1458,8 @@ int main(int argc, char** argv) {
     int mtp_tree_mode = 1, mtp_group = kMaxDraftGroup, packed_verify = 0;
     int o_direct = 1, validate = 0, readers = 4, show_text = 1, dbg_dump = 0, verify_hot = 0, pld_enabled = 2;
     int l2_win_flag = 0;   // E190/A6: per-tensor persisting window — measured NEGATIVE, off by default
+    float cpu_rows_frac = 0.f;   // E193: fraction of each tensor's rows computed on the CPU (0 = off)
+    int cpu_verify = 0;          // E193: GPU also computes CPU rows; compare on host (debug)
     long chain_min = 0;   // E168: minimum direct-chain length for the deep override (0 = mtp_limit)
     std::string feed_ids_s, oracle_ids_path, parallel_path;
     bool resident_output = false, compress_packed = false, session = false, session_tail = false;
@@ -1436,6 +1503,8 @@ int main(int argc, char** argv) {
         else if (k == "--fuse-prefill-tail") fuse_prefill_tail = atoi(v);
         else if (k == "--measure-h2d") measure_h2d = atoi(v) != 0;
         else if (k == "--l2-win") l2_win_flag = atoi(v) != 0;
+        else if (k == "--cpu-rows") cpu_rows_frac = (float)atof(v);
+        else if (k == "--cpu-verify") cpu_verify = atoi(v) != 0;
         else if (k == "--kv-cache") kv_mode = v;
         else if (k == "--kv-recent") kv_recent = atol(v);
         else if (k == "--prefill-chunks") prefill_chunks = atol(v);
@@ -1945,7 +2014,8 @@ int main(int argc, char** argv) {
     std::vector<char> cached(items.size(), 0);
     int fd = open(model.c_str(), O_RDONLY | (o_direct ? O_DIRECT : 0)); if (fd < 0) { perror("open o_direct"); return 1; }
     int fdc = open(model.c_str(), O_RDONLY); if (fdc < 0) { perror("open"); return 1; }
-    cudaStream_t st, stc; check(cudaStreamCreate(&st), "stream"); check(cudaStreamCreate(&stc), "compute stream");
+    cudaStream_t st, stc, st3; check(cudaStreamCreate(&st), "stream"); check(cudaStreamCreate(&stc), "compute stream");
+    check(cudaStreamCreate(&st3), "cpu exchange stream");   // E193: D2H/H2D for the CPU row split
     check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<16>, cudaSharedMemBankSizeEightByte), "GEMV shared bank mode");
     if (B >= 12) check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<12>, cudaSharedMemBankSizeEightByte), "12-position GEMV shared bank mode");
     if (B >= 24) check(cudaFuncSetSharedMemConfig(k_mat_q4_shared<24>, cudaSharedMemBankSizeEightByte), "24-position GEMV shared bank mode");
@@ -1965,6 +2035,56 @@ int main(int argc, char** argv) {
     } else {
         printf("activation_l2_window,disabled=%s\n", l2_win_flag ? "device" : "flag");
     }
+    // ---- E193: CPU row-split second stream ------------------------------------
+    // Worker thread computes a fraction of each tensor's rows on the CPU (E191
+    // kernel, packed-tile layout straight from pinned_cache) while the GPU streams
+    // the rest. Split is per-tensor at item granularity; activations reach the CPU
+    // via D2H on st (PCIe is full-duplex — this does not steal H2D weight bytes).
+    cudaEvent_t cpu_qev[2], cpu_qh[2], cpu_oh[2];
+    int8_t* cpu_xq_stage[2] = {nullptr, nullptr};
+    int2* cpu_meta_stage[2] = {nullptr, nullptr};
+    float* cpu_out_stage[2] = {nullptr, nullptr};
+    bool cpu_worker_on = false;
+    long cpu_max_N = 0;
+    int cpu_ring = 0;
+    cudaEvent_t cpu_xq_guard = nullptr;   // E193: last outstanding quant D2H; xq must not be overwritten before it lands
+    std::atomic<int> cpu_job_ready{0}, cpu_job_done{1};
+    struct CpuRowJob {
+        const uint8_t* w; int K; int rows; int B; long N; long row_start;
+        const int8_t* xq; const int2* xmeta; float* out;
+        cudaEvent_t qev;
+    } cpu_job{};
+    if (cpu_rows_frac > 0.001f && standard_rows <= 64) {
+        for (const auto& kv : tensor_items) {
+            const Item& it0 = items[kv.second[0]];
+            if (it0.packed) cpu_max_N = std::max<long>(cpu_max_N, m.by_name.at(kv.first)->ne[1]);
+        }
+        if (cpu_max_N > 0) {
+            for (int i = 0; i < 2; ++i) {
+                check(cudaHostAlloc((void**)&cpu_xq_stage[i], (size_t)standard_rows * max_K, cudaHostAllocDefault), "cpu xq stage");
+                check(cudaHostAlloc((void**)&cpu_meta_stage[i], (size_t)standard_rows * (max_K / 32) * sizeof(int2), cudaHostAllocDefault), "cpu meta stage");
+                check(cudaHostAlloc((void**)&cpu_out_stage[i], (size_t)standard_rows * cpu_max_N * 4, cudaHostAllocDefault), "cpu out stage");
+                check(cudaEventCreateWithFlags(&cpu_qev[i], cudaEventDisableTiming), "cpu qev");
+                check(cudaEventCreateWithFlags(&cpu_qh[i], cudaEventDisableTiming), "cpu qh");
+                check(cudaEventCreateWithFlags(&cpu_oh[i], cudaEventDisableTiming), "cpu oh");
+            }
+            cpu_worker_on = true;
+            std::thread([](std::atomic<int>* ready, std::atomic<int>* done, CpuRowJob* job) {
+                for (;;) {
+                    while (!ready->load(std::memory_order_acquire)) std::this_thread::yield();
+                    ready->store(0, std::memory_order_release);
+                    if (getenv("GUM_E193_DEBUG")) E193LOG("worker sync qev\n");
+                    check(cudaEventSynchronize(job->qev), "cpu worker quant sync");
+                    if (getenv("GUM_E193_DEBUG")) E193LOG("worker compute rows=%d K=%d\n", job->rows, job->K);
+                    cpu_q4_rows(job->w, job->K, job->rows, job->B, job->xq, job->xmeta, job->out, job->N);
+                    if (getenv("GUM_E193_DEBUG")) E193LOG("worker done\n");
+                    done->store(1, std::memory_order_release);
+                }
+            }, &cpu_job_ready, &cpu_job_done, &cpu_job).detach();
+            printf("cpu_rows,frac=%.3f,max_N=%ld,stage_K=%ld\n", cpu_rows_frac, cpu_max_N, (long)max_K);
+        }
+    }
+
     cudaEvent_t ev[kStage], evc[kSlots], h2d_start[kStage];
     for (auto& e : ev) check(cudaEventCreate(&e), "event");
     for (auto& e : evc) check(cudaEventCreate(&e), "event");
@@ -2480,8 +2600,14 @@ int main(int argc, char** argv) {
             // batched GEMV writes y[v*ystride + row]; consumers index dense [B][N], so the
             // stride must be this tensor's own row count — NOT the max_rows buffer pitch
             ystride = m.by_name.at(tn)->ne[1];
-            if (!reuse || !reuse_quant)
+            if (!reuse || !reuse_quant) {
+                // E193: a previous split tensor's D2H may still be reading xq — the
+                // event has usually long fired (the D2H raced ahead during the prior
+                // tensor's GEMVs), so this wait is free in the steady state.
+                if (cpu_xq_guard) check(cudaStreamWaitEvent(stc, cpu_xq_guard, 0), "cpu xq guard");
+                cpu_xq_guard = nullptr;
                 k_quant_x<<<dim3((unsigned)((nb * B + 127) / 128)), 128, 0, stc>>>(xin, nb * B, xq, xmeta);
+            }
             if (l2_win && !reuse) {
                 // E190/A6: persist this tensor's quantized-activation slice for the
                 // duration of its GEMV tiles. Weight bytes stream through the remaining
@@ -2497,8 +2623,66 @@ int main(int argc, char** argv) {
                 w.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
                 check(cudaStreamSetAttribute(stc, cudaStreamAttributeAccessPolicyWindow, &w), "per-tensor L2 window");
             }
-            for (int idx : tensor_items.at(tn)) {
+            // E193: per-tensor CPU/GPU item split (item granularity, row-suffix to CPU)
+            long cpu_from = -1, cpu_row_start = 0;
+            if (cpu_worker_on && cpu_rows_frac > 0.001f && !reuse && !dbg_dump
+                && pass > 0 && B <= standard_rows) {
+                uint64_t tbytes = 0;
+                for (int idx : tensor_items.at(tn)) tbytes += items[idx].bytes;
+                const uint64_t cut = (uint64_t)((double)tbytes * (1.0 - (double)cpu_rows_frac));
+                uint64_t cacc = 0;
+                for (size_t ii = 0; ii < tensor_items.at(tn).size(); ++ii) {
+                    const Item& it = items[tensor_items.at(tn)[ii]];
+                    if (cacc >= cut) {
+                        bool ok = true;
+                        for (size_t jj = ii; jj < tensor_items.at(tn).size(); ++jj) {
+                            const Item& cj = items[tensor_items.at(tn)[jj]];
+                            if (!cj.packed || cj.rows % 16
+                                || !(pass > 0 && (uint64_t)cj.res_off + cj.bytes <= pin_bytes
+                                     && cached[tensor_items.at(tn)[jj]])) { ok = false; break; }
+                        }
+                        if (ok && ii < tensor_items.at(tn).size()) {   // E193: cpu_from must index an EXISTING item
+                            cpu_from = (long)ii; cpu_row_start = it.row0;
+                        }
+                        break;
+                    }
+                    cacc += it.bytes;
+                }
+            }
+            if (cpu_from >= 0) {
+                if (getenv("GUM_E193_DEBUG")) E193LOG("split tn=%s from=%ld start=%ld\n", tn.c_str(), cpu_from, cpu_row_start);
+                cpu_ring = (cpu_ring + 1) & 1;
+                check(cudaEventSynchronize(cpu_oh[cpu_ring]), "cpu out ring sync");
+                check(cudaEventRecord(cpu_qev[cpu_ring], stc), "cpu quant ev");
+                check(cudaStreamWaitEvent(st3, cpu_qev[cpu_ring], 0), "cpu quant wait");
+                check(cudaMemcpyAsync(cpu_xq_stage[cpu_ring], xq, (size_t)B * K, cudaMemcpyDeviceToHost, st3), "cpu xq d2h");
+                check(cudaMemcpyAsync(cpu_meta_stage[cpu_ring], xmeta, (size_t)B * (K / 32) * sizeof(int2), cudaMemcpyDeviceToHost, st3), "cpu meta d2h");
+                check(cudaEventRecord(cpu_qh[cpu_ring], st3), "cpu quant d2h ev");
+                // Airtight ordering: EVERY later stc op (k_rms_quant, store_quantized_warp,
+                // next k_quant_x...) is blocked until the D2H snapshot of xq has landed.
+                // The wait is ~0.1 ms (the D2H fires right after the quant kernel); the
+                // worker's compute still overlaps the tensor's GEMVs.
+                check(cudaStreamWaitEvent(stc, cpu_qh[cpu_ring], 0), "stc wait xq d2h");
+                const int first_idx = tensor_items.at(tn)[cpu_from];
+                cpu_job.w = pinned_cache + items[first_idx].res_off;
+                cpu_job.K = (int)K;
+                cpu_job.rows = (int)(ystride - cpu_row_start);
+                cpu_job.B = (int)B;
+                cpu_job.N = ystride;
+                cpu_job.row_start = cpu_row_start;
+                cpu_job.xq = cpu_xq_stage[cpu_ring];
+                cpu_job.xmeta = cpu_meta_stage[cpu_ring];
+                cpu_job.out = cpu_out_stage[cpu_ring] + cpu_row_start;   // E193: kernel writes item-relative rows; stage is read tensor-relative
+                cpu_job.qev = cpu_qh[cpu_ring];
+                cpu_job_done.store(0, std::memory_order_release);
+                cpu_job_ready.store(1, std::memory_order_release);
+            }
+            for (size_t tii = 0; tii < tensor_items.at(tn).size(); ++tii) {
+                const int idx = tensor_items.at(tn)[tii];
                 Item& it = items[idx];
+                const bool cpu_owned = cpu_from >= 0 && (long)tii >= cpu_from;
+                const bool cpu_shadow = cpu_owned && cpu_verify;
+                if (cpu_owned && !cpu_verify) { ++cold_k; continue; }   // E193: worker computes it; no slot, no DMA — but cold_k MUST advance: it is the cold_list position the readers' ready[]/back-pressure index by
                 auto multiply = [&](const uint8_t* weights) {
                     float* output = out + out_row0 + it.row0;
                     if (draft.rows && it.packed && B > kPrefillChunk) {
@@ -2577,6 +2761,62 @@ int main(int argc, char** argv) {
                     released.store((size_t)o + 1);
                 }
                 ++cold_k;
+            }
+                    if (cpu_from >= 0) {
+                if (getenv("GUM_E193_DEBUG")) E193LOG("main waiting done tn=%s rows=%ld\n", tn.c_str(), ystride - cpu_row_start);
+                while (!cpu_job_done.load(std::memory_order_acquire)) std::this_thread::yield();
+                if (getenv("GUM_E193_DEBUG")) E193LOG("main got done tn=%s\n", tn.c_str());
+                if (cpu_verify) {
+                    const long w = ystride - cpu_row_start;
+                    std::vector<float> g((size_t)B * w);
+                    check(cudaMemcpy2DAsync(g.data(), w * 4, out + out_row0 + cpu_row_start, ystride * 4,
+                                            (size_t)w * 4, B, cudaMemcpyDeviceToHost, st3), "cpu verify d2h");
+                    check(cudaEventRecord(cpu_oh[cpu_ring], st3), "cpu oh v");
+                    check(cudaEventSynchronize(cpu_oh[cpu_ring]), "cpu verify sync");
+                    double maxd = 0; long bad = 0; int vbad[64] = {0}; long rbad[2048] = {0};
+                    long firstv = -1, firstr = -1;
+                    for (long v = 0; v < B; ++v)
+                        for (long r = 0; r < w; ++r) {
+                            const double dv = std::fabs((double)g[(size_t)v * w + r]
+                                - (double)cpu_out_stage[cpu_ring][(size_t)v * ystride + cpu_row_start + r]);
+                            if (dv > maxd) maxd = dv;
+                            if (dv > 1e-2 * std::max(1.0, std::fabs((double)g[(size_t)v * w + r]))) {
+                                ++bad; ++vbad[v]; ++rbad[r];
+                                if (firstv < 0) { firstv = v; firstr = r; }
+                            }
+                        }
+                    {   // scalar reference for element (v=0, suffix row 0) from the worker's own snapshot
+                        const int vv = 0;
+                        const int blocks = cpu_job.K / 32;
+                        double acc_s = 0;
+                        for (int b = 0; b < blocks; ++b) {
+                            const uint8_t* tb = cpu_job.w + (size_t)b * 288;
+                            const uint8_t* nib = tb;   // suffix row 0 -> tile row 0
+                            float dw; uint16_t hb; memcpy(&hb, tb + 256, 2); dw = cpu_fp16_to_f32(hb);
+                            const int2 mx = cpu_job.xmeta[(size_t)vv * blocks + b];
+                            const float dx = *(const float*)&mx.x;
+                            const int8_t* ax = cpu_job.xq + (size_t)vv * cpu_job.K + b * 32;
+                            int sref = 0;
+                            for (int j = 0; j < 16; ++j) {
+                                sref += ((int)(nib[j] & 0xF) - 8) * ax[j];        // weights 0-15 = low nibbles
+                                sref += ((int)(nib[j] >> 4) - 8) * ax[16 + j];    // weights 16-31 = high nibbles
+                            }
+                            acc_s += (double)dw * dx * (double)(sref - 8 * mx.y);
+                        }
+                        fprintf(stderr, "e193 scalar,gpu=%.9g simd=%.9g scalar=%.9g\n",
+                                (double)g[0], (double)cpu_out_stage[cpu_ring][cpu_row_start], acc_s);
+                    }
+                    fprintf(stderr, "e193 verify,tn=%s,w=%ld,maxdiff=%.3e,bad=%ld,firstv=%ld,firstr=%ld,rowsbad=", tn.c_str(), w, maxd, bad, firstv, firstr);
+                    for (int v = 0; v < B; ++v) fprintf(stderr, "%d", vbad[v] ? 1 : 0);
+                    fprintf(stderr, "\n");
+                } else {
+                    check(cudaMemcpy2DAsync(out + out_row0 + cpu_row_start, ystride * 4,
+                                            cpu_out_stage[cpu_ring] + cpu_row_start, ystride * 4,
+                                            (size_t)(ystride - cpu_row_start) * 4, B,
+                                            cudaMemcpyHostToDevice, st3), "cpu partials h2d");
+                    check(cudaEventRecord(cpu_oh[cpu_ring], st3), "cpu oh");
+                    check(cudaStreamWaitEvent(stc, cpu_oh[cpu_ring], 0), "stc wait cpu partials");
+                }
             }
         };
         auto dbg2 = [&](const char* tag, const float* dev, long n, long stride, long v) {

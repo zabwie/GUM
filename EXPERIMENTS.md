@@ -2605,3 +2605,36 @@ is still searching for a full-precision source; the 3-way KL test (Q4_0→source
 day the source surfaces. Until then effort concentrates on the live levers.** Effort concentrates on the live levers:
 CPU row-split (E191, +30-45%), W4A8 MMA kernels (prefill + width knee), finetune campaign
 (corpus accumulating via the 20-min automation).
+
+## E193 — CPU row-split second stream: WIP, infrastructure proven, one bug open (2026-11-13)
+
+Built the full integration per the E191 gate: per-tensor item-granularity row split
+(`--cpu-rows F`, default 0), dedicated exchange stream (st3 — full-duplex means the
+activation D2H never steals H2D weight bytes), a worker thread computing the suffix
+rows with the E191 dpbusd kernel reading MMA-packed tiles straight from pinned_cache,
+event-chained quant snapshot + partial H2D, and a `--cpu-verify` shadow mode (GPU
+computes everything; host compares).
+
+**Works:** end-to-end runs complete; token stream EXACT vs the E186 reference in the
+constrained-pinned direct regime (memlock 3.9 GiB, splits limited to the first ~23%
+of the cache); the split machinery costs 0.16 s per pass (nearly free); production
+plumbing (GUM_CPU_ROWS via the server) verified live.
+
+**Bugs found and fixed on the way:** (1) cold_k desync livelock — CPU items must still
+advance the cold_list position the readers index by; (2) st-queue serialization — the
+quant D2H had to move to its own stream; (3) GGUF Q4_0 nibble order — weights 0-15 are
+the LOW nibbles, 16-31 the HIGH (my first unpack was interleaved); (4) cpu_from OOB
+when the cut lands past the last item; (5) an xq snapshot race with later stc writers
+(airtight stc-wait after the D2H). Three debug tools shipped alongside: pattern dump
+(per-v bad rows), timestamped traces, and the shadow-compare mode.
+
+**Open bug:** in the FULL-PIN regime the shadow-compare shows a deterministic,
+per-tensor mismatch — same tensor can be exact (1e-7) in one use and wrong (maxdiff
+~3, ~1/3 of elements, all v-rows) in another; f has no effect because 16 MiB item
+granularity quantizes the split to {item0→GPU, item1→CPU} for 2-item tensors. The
+worker's inputs (pinned packed tiles + D2H'd xq/meta snapshot) look self-consistent,
+and a scalar reference recomputed from the same snapshot disagrees with BOTH the GPU
+and the SIMD in broken cases — pointing at a snapshot-vs-GEMV data mismatch not yet
+isolated. Production RESTORED to the known-good build (E193 inactive at default
+cpu-rows=0; baseline IN BAND). WIP source + debug tooling committed; next session
+picks up from this exact state.
