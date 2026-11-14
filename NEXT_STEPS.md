@@ -204,3 +204,19 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     (Q4_0→BF16, (3,64)→BF16, teacher-forced) is NOW RUNNABLE — the codec lever (+28%)
     is live pending that measurement. Also enables true-BF16 quality comparisons for
     any future TOLERANCE-track work.
+56. **Codec test RUNNING (2026-11-13 evening):** BF16 GGUF exported
+    (~/Desktop/Chip/models/Qwen3.8-27B-BF16.gguf, 54.6 GB, from the provenance-pinned
+    source). (3,64) requant building via scripts/c1_requant.py (losslessly Q4_0-stored).
+    Teacher-forced perplexity suite (llama-perplexity, 200 chunks of wikitext-2-raw test,
+    hybrid GPU offload) running in background: /tmp/codec_ppl.log —
+    models: Q4_0, k3g64, BF16. DECISION RULE: compare each format's distance-from-BF16;
+    if (3,64) ≤ Q4_0's distance → reopen the TOLERANCE track for the +28% codec lever
+    (real 3-bit storage + GPU trellis/LUT kernel build). If (3,64) > Q4_0's distance →
+    lever stays standby. Results land in /tmp/codec_ppl.log — copy them into
+    results/e194-codec-kl/ when done. Runtime ~2-3 h total.
+57. **E193 open bug (see #54):** strongest lead from the offline forensics — broken
+    tensors' CPU output is ~10x smaller than the GPU's (reads like wrong cache region);
+    clean tensors match to 1e-7. The dump tool + dump_analysis.py are in
+    results/e193-cpu-rowsplit-wip-20261113/. Next: dump the GPU's actual slot bytes for
+    a broken item and diff against pinned_cache[item1]; suspect the res_off/head
+    interaction or a second writer of the cache region.
