@@ -248,6 +248,26 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     configs (leaks); 512K/256K acceptable fallbacks. Target: KV 5.6 GiB @256K →
     ~1.3 GiB → adaptive hot tier gets ~4 GiB back → 256K projection ~17-20 tok/s.
     Phase B prefill-overlay (from the Vanta doc) is the follow-on for true 1M.
+60a. **E195 STATUS (2026-11-14 night, WIP commit b423c6b):** the compacted-row
+    overlay is IMPLEMENTED and its core promise MEASURED: at ctx 262144 the
+    baseline ABORTS (VRAM plan 10.79 GiB + 2 GiB floor > 11.63 GiB card) while
+    the compact build BOOTS with the tier pool at 522.9 MiB (span=262144,
+    rows=1060, kv_MiB=2982 in the plan) — 11x smaller than the baseline's
+    ~5.9 GiB tier pool. Needle-recall gate: cache-INDEPENDENT (ttkv 1/5,
+    turboquant no-pooling 1/5, fp32 oracle 0/5 at 13.7K with 5 needles) —
+    the deep misses are model/task, not cache (owner's YaRN-vs-cache warning
+    validated); recall parity holds, no loss from pooling or compaction.
+    Bit-exactness: proven through 2560-token contexts (bisect), plain decode,
+    and the dbg-constant repro; THREE bugs fixed (old-tier kh-stride span/16,
+    overlay-copy pending cursor, W1 fresh_from recycle gate). ONE BUG OPEN:
+    speculative decode diverges from baseline at >2560-token contexts
+    (deterministic, any SP depth, isolated repro = long_canal A/B; layout,
+    growth, capacity, recycling all excluded via GUM_TTKV_FULL_ROWS /
+    GUM_TTKV_W1_FULL / GUM_TTKV_PAD env tests; device asserts clean).
+    NEXT SESSION: chase that one bug (memcheck the isolated repro with
+    matched gen limits), then strip the unconditional device asserts, rerun
+    the full 20-prompt suite + needle gate + 256K throughput run.
+
 61. **BF16 nextn-strip:** gguf-py script committed (scripts/strip_nextn_gguf.py,
     needs PYTHONPATH=/tmp/ggufpkg); FIRST RUN LAUNCHED but unverified — the earlier
     manual splice corrupted the header ("key '' has invalid GGUF type 808348524").

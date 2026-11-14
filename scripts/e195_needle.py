@@ -18,7 +18,7 @@ import sys
 from llama_cpp import Llama
 
 MODEL = "/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"
-TARGETS = [2048, 6144, 12288, 24576, 30720]
+TARGETS = [2048, 5120, 8192, 11264, 13824]
 CODES = ["KITE-7341", "MARBLE-2918", "ORBIT-5603", "VELVET-8472", "CINDER-1096"]
 ITEMS = ["harbor", "orchard", "lantern", "compass", "meadow"]
 
@@ -63,11 +63,23 @@ def main() -> None:
     ntok = len(tok.tokenize(text.encode(), add_bos=False, special=False))
     print(f"prompt_tokens={ntok}", flush=True)
 
-    cmd = ["taskset", "-c", "0-3", binary, "--model", MODEL, "--prompt", text,
+    # Chat-template render (matches the bench protocol); ids fit the argv
+    # limit at the 14K scale.
+    from jinja2 import Environment
+    template = Environment().from_string(tok.metadata["tokenizer.chat_template"])
+    template.globals["raise_exception"] = lambda m: (_ for _ in ()).throw(ValueError(m))
+    rendered = template.render(messages=[{"role": "user", "content": text}],
+                               tools=[], add_generation_prompt=True, enable_thinking=False)
+    ids = tok.tokenize(rendered.encode(), add_bos=False, special=True)
+    cmd = ["stdbuf", "-oL", "-eL", "taskset", "-c", "0-3", binary, "--model", MODEL,
+           "--prompt-ids", ",".join(map(str, ids)),
+           "--mtp", "/home/zabwie/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf",
            "--ctx", "33792", "--gen-tokens", "128", "--hot-mib", "3456",
            "--cache-mib", "10240", "--prefill-chunks", "8", "--show-text", "1",
+           "--speculate", "4", "--packed-verify", "1", "--pld", "0", "--draft-max", "3",
            "--kv-cache", kv_mode, *extra]
-    out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    out = r.stdout + ("\nRC=%d\n%s" % (r.returncode, r.stderr[-2000:]) if r.returncode else "")
     with open(f"results/e195-{prefix}.log", "w") as fh:
         fh.write(out)
     gen = ""
