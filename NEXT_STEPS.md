@@ -237,3 +237,23 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     (d) E193 bug: worker pointer escapes to RAW GGUF data (blk.1.attn_gate row 3491
     proven exact, nowhere else in file) — print res_off/pin_bytes at split time;
     (e) capture corpus accumulating (group-012 published 2026-11-13 21:04, 8 seqs).
+60. **E195 16:1 tier port (QUEUED per owner — start when the codec suite finishes):**
+    port Vanta's tier geometry ((ctx−131k)/16 + 65k/4 + 65k ≈ 0.8 GiB @1M, from
+    ~/Vanta/model/docs/TTKV_1M_DESIGN.md) into the CUDA TTKV, gated on needle recall
+    at depth. OWNER WARNING: previous needle failures were likely MODEL YaRN-training
+    limits, not cache limits (Qwen3.6 was extensible-but-needed-training) — the gate
+    must separate model-context limits from cache-compression limits (test needles
+    WITHIN the trained window first). Qwen3.8 rope_base=10,000,000 in our config =
+    long-context-trained base — promising natively. Qwen4 reportedly ships 1M in
+    configs (leaks); 512K/256K acceptable fallbacks. Target: KV 5.6 GiB @256K →
+    ~1.3 GiB → adaptive hot tier gets ~4 GiB back → 256K projection ~17-20 tok/s.
+    Phase B prefill-overlay (from the Vanta doc) is the follow-on for true 1M.
+61. **BF16 nextn-strip:** gguf-py script committed (scripts/strip_nextn_gguf.py,
+    needs PYTHONPATH=/tmp/ggufpkg); FIRST RUN LAUNCHED but unverified — the earlier
+    manual splice corrupted the header ("key '' has invalid GGUF type 808348524").
+    If the script's output fails llama-gguf validation too, fall back: check
+    convert_hf_to_gguf.py for a nextn-skip flag, or run the BF16 ppl on CPU-only
+    (ngl 0, ~3 h) against the ORIGINAL BF16 gguf — the nextn block is unused during
+    plain perplexity IF the loader tolerates it... it does not; the strip is required.
+    Codec suite (Q4_0 + k3g64 ppl) running in background; BF16 stage auto-fires when
+    the stripped file validates. Verdict rule unchanged (NEXT_STEPS #56).
