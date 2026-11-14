@@ -15,7 +15,6 @@ w = gguf.GGUFWriter(dst, arch=r.fields['general.architecture'].contents[-1].deco
 for name, field in r.fields.items():
     if 'nextn_predict_layers' in name:
         print('dropping KV:', name); continue
-    w.add_key_value(name, field.contents, field.type) if False else None
 # gguf-py wants typed adds; use the reader's parsed contents with the field type
 from gguf import GGUFValueType
 for name, field in r.fields.items():
@@ -30,7 +29,6 @@ for name, field in r.fields.items():
         else:
             w.add_array(name, list(field.contents[1]) if hasattr(field.contents[1],'__len__') else field.contents[1], vt)
     else:
-        w.add_key_value(name, field.contents, field.type)
 
 kept = dropped = 0
 for t in r.tensors:
