@@ -1,0 +1,4 @@
+# Hashes recorded for the full E196 measured build; its binary is not shipped.
+9696cee9b650ef936aaba9741dc1f657d14a50bbe60169f755ba7cf5caae7876  E196 measured decoder binary (local archive)
+20ff44e3fc9f30d5da9dae13c36afe49fd21dd4cc52681302418abbb7ddcd9b8  benchmarks/real_decode.cu at measurement
+15cf200f7442ac141da0818b61e86f9952dbbd0a9a079499995ea2281dee465f  benchmarks/tiered_kv.cuh at measurement

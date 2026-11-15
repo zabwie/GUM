@@ -11,13 +11,18 @@ trained window so a recall failure would point at the cache, not YaRN limits.
 
 Usage: e195_needle.py <decoder-binary> <kv-mode> <out-prefix> [extra decoder flags...]
 """
+import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 
 from llama_cpp import Llama
 
-MODEL = "/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"
+MODEL = os.environ.get(
+    "GUM_TARGET_MODEL", str(Path.home() / "Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"))
+MTP_MODEL = os.environ.get(
+    "GUM_MTP_MODEL", str(Path.home() / "Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"))
 TARGETS = [2048, 5120, 8192, 11264, 13824]
 CODES = ["KITE-7341", "MARBLE-2918", "ORBIT-5603", "VELVET-8472", "CINDER-1096"]
 ITEMS = ["harbor", "orchard", "lantern", "compass", "meadow"]
@@ -73,7 +78,7 @@ def main() -> None:
     ids = tok.tokenize(rendered.encode(), add_bos=False, special=True)
     cmd = ["stdbuf", "-oL", "-eL", "taskset", "-c", "0-3", binary, "--model", MODEL,
            "--prompt-ids", ",".join(map(str, ids)),
-           "--mtp", "/home/zabwie/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf",
+           "--mtp", MTP_MODEL,
            "--ctx", "33792", "--gen-tokens", "128", "--hot-mib", "3456",
            "--cache-mib", "10240", "--prefill-chunks", "8", "--show-text", "1",
            "--speculate", "4", "--packed-verify", "1", "--pld", "0", "--draft-max", "3",

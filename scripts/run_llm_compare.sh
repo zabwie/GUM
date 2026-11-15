@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LLAMA_CLI="${LLAMA_CLI:-/home/zabwie/llama.cpp/build/bin/llama-cli}"
-LLAMA_BENCH="${LLAMA_BENCH:-/home/zabwie/llama.cpp/build/bin/llama-bench}"
+LLAMA_CLI="${LLAMA_CLI:-$HOME/llama.cpp/build/bin/llama-cli}"
+LLAMA_BENCH="${LLAMA_BENCH:-$HOME/llama.cpp/build/bin/llama-bench}"
 MODEL="${MODEL:-$ROOT/models/Qwen3-0.6B-Q4_0.gguf}"
 RUNS="${RUNS:-5}"
 EXPECTED_SHA256="da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4"

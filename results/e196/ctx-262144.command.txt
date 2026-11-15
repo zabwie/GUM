@@ -1,0 +1,14 @@
+# Full E196 rerun: check available RAM and swap before starting. Prefill took
+# about 1 h 34 min on the recorded RTX 3060 host. The original run allowed up
+# to 30 GiB of swap growth; use that tolerance only if the host can support it.
+python3 scripts/build_repeated_prompt_ids.py \
+  --prompt-dir /path/to/the/frozen-e195-prompt-id-set |
+  ./build/real_decode \
+    --model "$GUM_TARGET_MODEL" \
+    --mtp "$GUM_MTP_MODEL" \
+    --session 1 --session-tail 1 --session-stream 1 \
+    --prefill-chunks 8 --speculate 32 --packed-verify 1 \
+    --pld 0 --draft-max 31 --kv-cache turboquant-ttkv \
+    --hot-mib 0 --cache-mib 10240 --measure-h2d 1 \
+    --swap-tol-mib 30000 --prompt-ids - \
+    --ctx 262144 --gen-tokens 256

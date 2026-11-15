@@ -1,0 +1,85 @@
+--- tiered_kv.cuh
++++ tiered_kv.cuh
+@@ -1,6 +1,5 @@
+ // GUM's CUDA adaptation of Vanta's TurboQuant-MSE keys and TTKV age tiers.
+ // Quantized rows stay addressable for prefix replay and for groups with protected tokens.
+-#include <cassert>
+ static constexpr int kTierHead = 256;
+ static constexpr int kTierRecent = 512;
+ static constexpr int kTierOld = 4096;
+@@ -34,7 +33,6 @@
+     // shrinks to the protected-row working set; span keeps the 16:1 pool sized.
+     int span = 0;
+     bool pooling = false;
+-
+     size_t bytes(int heads) const {
+         return (size_t)heads * (ring * sizeof(float2) * kTierHead +
+             ((pooling ? w1_slots : 0) + capacity +
+@@ -45,9 +43,9 @@
+         check(cudaMalloc(&recent, (size_t)heads * ring * kTierHead * sizeof(float2)), "recent KV");
+         check(cudaMalloc(&rows, (size_t)heads * capacity * sizeof(TierRow)), "TurboQuant KV");
+         if (pooling) {
+-            check(cudaMalloc(&w1, (size_t)heads * w1_slots * sizeof(TierRow)), "TTKV straddler rows");
+             check(cudaMalloc(&middle, (size_t)heads * middle_groups * sizeof(TierRow)), "TTKV middle");
+             check(cudaMalloc(&old, (size_t)heads * (span / kTierOldGroup) * sizeof(TierRow)), "TTKV old");
++            check(cudaMalloc(&w1, (size_t)heads * w1_slots * sizeof(TierRow)), "TTKV straddler rows");
+         }
+     }
+ 
+@@ -96,7 +94,6 @@
+ __global__ void k_tier_append(TierCache cache, const float* k, const float* v, int pos, int heads) {
+     const int head = blockIdx.x, row = blockIdx.y, i = threadIdx.x;
+     const size_t from = ((size_t)row * heads + head) * kTierHead + i;
+-    assert((pos + row) % cache.ring < cache.ring && head < 64);
+     cache.recent[((size_t)head * cache.ring + (pos + row) % cache.ring) * kTierHead + i] =
+         make_float2(k[from], v[from]);
+ }
+@@ -122,7 +119,6 @@
+     const int pair = i < half ? i + half : i - half;
+     const float frequency = width > 1 && i < nrot ? powf(rope_base, -2.f * (i % half) / nrot) : 0;
+     for (int offset = 0; offset < width; ++offset) {
+-        assert(((start + offset) % cache.ring) < cache.ring);
+         const float2* row = recent + ((start + offset) % cache.ring) * kTierHead;
+         float rotated = row[i].x;
+         if (frequency != 0) {
+@@ -161,20 +157,11 @@
+     const int quant_value = scale > 0 ? max(0, min(15, __float2int_rn((value - lo) / scale))) : 0;
+     const int next_key = __shfl_xor_sync(0xffffffffu, left, 1);
+     const int next_value = __shfl_xor_sync(0xffffffffu, quant_value, 1);
+-    assert(head < 64 && group >= 0 && group < cache.span);
+     TierRow* pool = width == 1 ? (cache.w1 ? cache.w1 : cache.rows) :
+         width == kTierMidGroup ? cache.middle : cache.old;
+     const int groups = width == kTierMidGroup ? cache.middle_groups :
+         width == 1 ? (cache.w1 ? cache.w1_slots : cache.capacity) : cache.span / kTierOldGroup;
+     const int slot = group % groups;
+-    assert(slot >= 0 && slot < groups);
+-    if (width == 1 && cache.overlay) {
+-        const int os = cache.overlay[group];
+-        if (os >= cache.capacity)
+-            printf("BAD_overlay,group=%d,slot=%d,cap=%d,head=%d,width=%d\n", group, os, cache.capacity, head, width);
+-        assert(os < cache.capacity);
+-    }
+-    assert(pool != nullptr);
+     // E195: the rolling straddler buffer recycles slots every w1_slots
+     // positions. Re-packing a position older than one full slot cycle would
+     // clobber the slot's current occupant, so the rolling write only covers
+@@ -274,9 +261,6 @@
+                 // deeper width==1 reads are protected groups via the overlay.
+                 const bool straddle = cache.w1 &&
+                     (t & ~(kTierMidGroup - 1)) + kTierMidGroup > recent_start;
+-                assert(t >= 0 && t < cache.span);
+-                if (width == 1 && !straddle && cache.overlay && cache.overlay[t] < 0)
+-                    printf("BAD_ATT,layer_row=%d,t=%d,rs=%d,pos=%d,end=%d,ov=%d,m4=%d,m16=%d,os=%d\n", (int)head, t, recent_start, pos, end, cache.overlay[t], (int)protected_tokens[(t & ~(kTierMidGroup - 1)) + 1], (int)protected_tokens[t & ~(kTierOldGroup - 1)], old_start);
+                 const TierRow& packed = width == 1 ?
+                     (straddle ? cache.w1[(size_t)kh * cache.w1_slots + t % cache.w1_slots] :
+                                 history[cache.overlay ? cache.overlay[t] : t]) :
+@@ -317,9 +301,6 @@
+         } else {
+             const bool straddle = cache.w1 &&
+                 (t & ~(kTierMidGroup - 1)) + kTierMidGroup > recent_start;
+-            assert(t >= 0 && t < cache.span);
+-            if (width == 1 && !straddle && cache.overlay && cache.overlay[t] < 0)
+-                printf("BAD_ATT2,layer_row=%d,t=%d,rs=%d,pos=%d,end=%d,ov=%d\n", (int)head, t, recent_start, pos, end, cache.overlay[t]);
+             const TierRow& packed = width == 1 ?
+                 (straddle ? cache.w1[(size_t)kh * cache.w1_slots + t % cache.w1_slots] :
+                             history[cache.overlay ? cache.overlay[t] : t]) :

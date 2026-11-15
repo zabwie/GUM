@@ -1,5 +1,5 @@
 #define main real_decode_main
-#include "../benchmarks/real_decode.cu"
+#include "../../benchmarks/real_decode.cu"
 #undef main
 
 int main() {

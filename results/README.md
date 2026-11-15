@@ -1,10 +1,11 @@
-# results/ — raw evidence
+# Results archive
 
-One file per measured run, named `eXXX-<what>-<date/time>.txt` (plus `.log`, `.nsys-rep`
-profiler captures and a few pre-E000 capability files). This directory is intentionally flat:
-[EXPERIMENTS.md](../EXPERIMENTS.md) cites these files by exact path, so renaming or grouping
-them would break the evidence trail.
+`results/` preserves measured outputs and experiment artifacts. The current
+recommended benchmark is the curated [E196 record](e196/README.md); earlier
+experiment files remain available at their historical paths so references in
+`EXPERIMENTS.md` continue to work.
 
-To find the runs behind a claim, look up the experiment number in EXPERIMENTS.md; the entry
-names its raw result files. `.nsys-rep` files need Nsight Systems to open. Gitignored:
-`*.csv`, `*.sqlite`.
+Raw model files, user captures, live runtime databases, compiled binaries, and
+large machine-local runs are not part of the recommended public package. They
+remain on the research machine and are excluded by `.gitignore`. Do not add
+them to a release unless their provenance and redistribution rights are clear.

@@ -1,0 +1,12 @@
+ctx=262144 pos=262143 verifier_rows=1 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=17.493 mean_ms=19.323
+ctx=262144 pos=262143 verifier_rows=1 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=4.926 mean_ms=5.222
+f9a4453d14deb0afa701c9625cb6d64bda8d9935dab76c16efc48d8cb2b3e8c8  /tmp/gum-e196.foa6in/new.f32
+ctx=262144 pos=262136 verifier_rows=8 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=116.846 mean_ms=118.913
+ctx=262144 pos=262136 verifier_rows=8 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=37.997 mean_ms=39.853
+125f8717767bef8e51bd6bc536517380c30abfa0921c60c9d63c23f30fd15ef5  /tmp/gum-e196.foa6in/new.f32
+ctx=262144 pos=262112 verifier_rows=32 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=454.759 mean_ms=464.514
+ctx=262144 pos=262112 verifier_rows=32 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=153.224 mean_ms=154.840
+f3c96be33e418c2362f1716779f68bd97dda7da3358ae36e9d31dd68007d6029  /tmp/gum-e196.foa6in/new.f32
+ctx=262144 pos=261888 verifier_rows=256 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=3 min_ms=3678.705 mean_ms=3736.715
+ctx=262144 pos=261888 verifier_rows=256 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=3 min_ms=1244.513 mean_ms=1254.087
+8477544914a47bb54a8e73025b76f9851d9507cdf6723443ba696e3d2b18d438  /tmp/gum-e196.foa6in/new.f32

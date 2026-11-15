@@ -123,7 +123,7 @@ Latest exact-gated run: E071 at 9.629 reported tok/s on the agent trace, with an
 lower VRAM headroom. Use E072/E073 for a same-config profiler comparison; see Current status after
 E075 for the measured range and caveats.
 
-**⚠ The old "7.26 tok/s chat at 33% acceptance" was measured on a corrupted stream** (E043
+**Warning: the old "7.26 tok/s chat at 33% acceptance" was measured on a corrupted stream** (E043
 bug 1: the state divergence made the model echo its own repeats, which the n-gram drafter
 then "predicted"). With correct state, PLD drafting quality — not verification — is the
 bottleneck. The verify machinery is now correct and gated; the upside is in drafter quality

@@ -1,0 +1,100 @@
+- id: llm-pi-ai
+  config:
+    providers:
+      gum-local:
+        apiKeyEnv: LOCAL_GUM_API_KEY
+        displayName: GUM local
+        api: openai-completions
+        baseURL: http://127.0.0.1:8765/v1
+        timeoutMs: 172800000
+        streamIdleTimeoutMs: 21600000
+        headers:
+          X-GUM-Output-Budget: server
+        compat:
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+        models:
+          - id: qwen3.8-27b-gum
+            name: Qwen3.8-27B (GUM local)
+            contextWindow: 196608
+            maxTokens: 131072
+            input: [text]
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: gum-local
+    model: qwen3.8-27b-gum
+- id: agent-preset-registry
+  config:
+    default: gum-agent
+- id: session-title-llm
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- insert:
+    - id: preset-gum-agent
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: gum-agent
+        name: GUM Agent
+        description: Local coding and workspace tools with a 192K context window.
+        order: 0
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: >-
+                You are a coding assistant. Use the workspace tools to inspect, edit, and verify the requested work.
+                Use paths in the current workspace. If a tool returns the same result again, change approach or explain
+                what is blocking the task. Once you have the evidence you need, answer directly.
+              complete: true
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 12288
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              readImage: false
+              applyPatch: true
+          - id: tool-fs-search
+            name: "@deepseek-ai/dsh-tool-fs-search"
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-bash
+            name: "@deepseek-ai/dsh-tool-bash"
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: "@deepseek-ai/dsh-compaction-basic"
+                config:
+                  headroomTokens: 1024
+                  retainTokens: 16384
+                  maxTokens: 1536
+              - id: command-compact
+                name: "@deepseek-ai/dsh-command-compact"
+              - id: tool-result-pruner
+                name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
+                config:
+                  thresholdChars: 16384
+                  headChars: 8192
+                  tailChars: 2048
+    - id: preset-gum-chat
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: gum-chat
+        name: GUM Chat
+        description: Text conversation within the local model's context window.
+        order: 1
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: You are a helpful assistant.
+              complete: true
+              includeRuntimeContext: false

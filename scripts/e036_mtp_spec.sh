@@ -4,9 +4,9 @@
 # KPI: effective PCIe bytes per accepted token; outputs must match at temp 0.
 set -u
 cd "$(dirname "$0")/.."
-CLI="${CLI:-/home/zabwie/llama-mtp-build/bin/llama-cli}"
-TARGET=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf
-MTP=/home/zabwie/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf
+CLI="${CLI:-$HOME/llama-mtp-build/bin/llama-cli}"
+TARGET=${GUM_TARGET_MODEL:-"$HOME/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"}
+MTP=${GUM_MTP_MODEL:-"$HOME/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"}
 PROMPT='Explain what a graphics processing unit is, in one paragraph.'
 TAG="$(date +%Y%m%d-%H%M%S)"
 [[ -x "$CLI" ]] || { echo "missing $CLI (build first)"; exit 2; }

@@ -2,8 +2,13 @@
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+decoder=${GUM_DECODER:-"$root/build/real_decode"}
 if (( $# == 0 )); then
     printf 'Usage: %s --prompt "Your prompt" [decoder options]\n' "$0" >&2
+    exit 2
+fi
+if [[ ! -x "$decoder" ]]; then
+    printf 'Decoder not built: run `make decoder` or set GUM_DECODER.\n' >&2
     exit 2
 fi
 
@@ -27,10 +32,10 @@ esac
 # prompts (+0.5-1.2 tok/s, exact-gated); requires prompt+generation <= 384.
 # Default remains the long-context 8064/1024 configuration.
 if [[ ${GUM_RESIDENT:-0} == 1 ]]; then
-    exec "$root/benchmarks/real_decode" \
+    exec "$decoder" \
         --model "$target" "${draft[@]}" --ctx 384 --gen-tokens 256 \
         --hot-mib 8448 --cache-mib 5600 "$@"
 fi
-exec "$root/benchmarks/real_decode" \
+exec "$decoder" \
     --model "$target" "${draft[@]}" --ctx 1024 --gen-tokens 256 \
     --hot-mib 8064 --cache-mib 5600 "$@"

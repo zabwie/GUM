@@ -13,7 +13,7 @@ each path costs, and which assumptions the field (and we) never checked.
 | memlock rlimit | **3.9 GiB hard** (no root to raise) | only ~3.8 GiB of the staged host tier can be pinned; the rest is CPU-memcpy'd through the pinned ring each pass |
 | PCIe | **gen4 x16 to GPU** (CPU-attached, not chipset); **ReBAR active: BAR1 = 16 GiB, ~9.9 GiB currently mapped** | link ceiling measured **24.7–24.9 GB/s** (1-stream = 2-stream: no engine-level gain); theoretical 31.5 GB/s — we run at ~78% of spec, which is normal for this topology |
 | GPU | RTX 3060 12 GiB (GA106), 28 SMs, 2 copy engines, L2 = 3 MiB with **persisting window capped at 1.6 MiB** | decode is DMA-bound; L2 window the decoder wants (5.57 MB) is disabled for capacity — but the xq tensor it needs resident is **1.31 MB, under the cap** (see anomalies) |
-| NVMe | WD Black SN850X, CPU-attached | out of the steady-state loop entirely (`nvme_per_token_GiB=0.00`); cold-start only |
+| NVMe | WD Black SN850X, CPU-attached | absent from the 6.4 GiB-hot chat profile; an explicit tier in the E196 256K run (2.76 GiB per target pass) |
 | iGPU | none enabled (3060 is the only display adapter) | no offload/home for the drafter elsewhere |
 | No root | passwordless sudo unavailable | memlock, swappiness, hugepages reserved pools, swapoff: all out of reach |
 
@@ -21,9 +21,10 @@ each path costs, and which assumptions the field (and we) never checked.
 
 **Weights (15.1 GB Q4_0 file):**
 - **VRAM hot tier** (config, 3.2–6.4 GiB): resident, zero fetch cost, packed into MMA tile layout on load.
-- **Host staged cache** (up to 10.24 GiB in RAM): of which **~3.8 GiB pinned** (memlock cap) → direct DMA source; the unpinned remainder is CPU-memcpy'd into the pinned staging ring (8 × 16 MiB) by 4 reader threads each pass.
-- **Device slot ring** (8 × 16 MiB): landing zone; each item: wait-staging → `cudaMemcpyAsync` (pinned → device) → GEMV/MMA kernel on the compute stream → slot released behind a 6-item window.
-- **NVMe**: only if the working set exceeds RAM (never at these configs).
+- **Host staged cache** (up to 10.24 GiB in RAM): of which **~3.8 GiB can be pinned** under the memlock cap → direct DMA source; the pageable remainder is CPU-copied into the pinned staging ring by 4 reader threads.
+- **Pinned host staging ring**: 16 × 16 MiB buffers. The current source keeps up to 12 weight items in flight while copy and compute streams overlap.
+- **Device slot ring** (16 × 16 MiB): landing zone; each item uses an event-ordered `cudaMemcpyAsync` from pinned host memory, then GEMV/MMA on the compute stream before the slot can be reused.
+- **NVMe**: any weights that do not fit in the configured hot and staged tiers are read again on each target pass. The 256K E196 run used zero hot weights and a 10 GiB staged host cache, leaving 2.76 GiB per pass for NVMe.
 
 **Per decode cycle (the verify pass):**
 - Cold bytes = 15.1 GB − hot tier. At the 196K baseline (hot 3.45 GiB): **10.6 GB @ 24.7 GB/s ≈ 0.47 s**. At the 32K chat profile (hot 6.4 GiB): **~8.7 GB ≈ 0.32–0.35 s**.

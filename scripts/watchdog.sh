@@ -37,8 +37,9 @@ else
 fi
 
 # 3. strip script
-STRIP_OUT=/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf
-if [ -s "$STRIP_OUT" ] && /home/zabwie/llama.cpp/build/bin/llama-gguf "$STRIP_OUT" r n >/dev/null 2>&1; then
+STRIP_OUT=${GUM_STRIPPED_MODEL:-"$HOME/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf"}
+LLAMA_GGUF=${LLAMA_GGUF:-"$HOME/llama.cpp/build/bin/llama-gguf"}
+if [ -s "$STRIP_OUT" ] && "$LLAMA_GGUF" "$STRIP_OUT" r n >/dev/null 2>&1; then
   [ "$(prev strip_state)" != "valid" ] && { okmsg "strip output valid"; setst strip_state=valid; }
 elif pgrep -f strip_nextn_gguf >/dev/null; then
   setst strip_state=running

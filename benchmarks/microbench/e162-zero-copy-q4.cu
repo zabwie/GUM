@@ -64,7 +64,7 @@ int main() {
     printf("e162_zero_copy,size_MiB=%zu\n", bytes >> 20);
 
     const char* model = getenv("GUM_MODEL");
-    std::string path = model ? model : "/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf";
+    std::string path = model ? model : "models/Qwen3.8-27B-STRICT-Q4_0.gguf";
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) { fprintf(stderr, "cannot open model\n"); return 1; }
     fseek(f, 0, SEEK_END);

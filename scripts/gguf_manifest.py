@@ -1,5 +1,6 @@
+import os
 import sys
-sys.path.insert(0, '/home/zabwie/llama.cpp/gguf-py')
+sys.path.insert(0, os.path.expanduser(os.environ.get('GGUF_PYTHON_PATH', '~/llama.cpp/gguf-py')))
 from gguf import GGUFReader
 # Read-only: emits "name K N absolute_offset nbytes" for 2-D Q4_0 tensors, in file order.
 r = GGUFReader(sys.argv[1])

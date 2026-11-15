@@ -76,7 +76,7 @@ static void make_file(const std::string& path, size_t chunks) {
 
 int main(int argc, char** argv) {
     long gib = 24, hot_mib = 4096, cache_mib = 4096, passes = 2, readers = 4;
-    std::string path = "/home/zabwie/tier_data/tier.bin";
+    std::string path = "tier_data/tier.bin";
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i]; const char* v = argv[i + 1];
         if (k == "--gib") gib = atol(v); else if (k == "--hot-mib") hot_mib = atol(v);

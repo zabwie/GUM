@@ -35,7 +35,18 @@
 > SYSTEM_MAP; next experiments: A8 shortlist coverage, A6 L2 persisting window (1.31 MB
 > vs 1.6 MiB cap), A7 drafter-KV audit.
 
-Repo: `/home/zabwie/gpu-unified-memory-research` (git; latest see `git log -1`).
+> **Latest long-context result — E196 (2026-11-15):** on the RTX 3060 12 GiB,
+> Qwen3.8-27B Q4_0 processed the same 261,888-token test prompt, assembled from repeated
+> frozen prose segments, and produced the same 256 greedy token IDs as E195. At 262,144
+> context, prefill was **46.41 tok/s** and decode was **3.258 tok/s**, up from 8.99
+> and 0.761. Decoder peak remained **4,308 MiB**. Total
+> device use peaked at 6,250 MiB, including 1,942 MiB outside the decoder.
+> This custom 256K run used zero hot weights, a 10 GiB host cache, and NVMe for the
+> uncached 2.76 GiB of target weights per verifier pass. It exercises the `stream`
+> weight path at a larger context and is a separate benchmark from the live service's
+> standard context rates. [Full E196 record and paging path](results/e196/README.md).
+
+Repo: `$HOME/gpu-unified-memory-research` (git; latest see `git log -1`).
 Read [AGENT.md](AGENT.md) first for the operating mentality. **[docs/RESEARCH_FUNNEL.md](docs/RESEARCH_FUNNEL.md)
 is the working protocol** — decision-driven funnel, two tracks, scored backlog; every experiment
 enters through it. [docs/RESEARCH_PLAN.md](docs/RESEARCH_PLAN.md) is the strategy record;
@@ -222,7 +233,7 @@ scripts/run_single_user.sh --prompt "Your prompt"
   -o /tmp/gum-decode
 ```
 
-Model: `/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf` (13.42 GiB).
+Model: `$HOME/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf` (13.42 GiB).
 `--prompt-ids` takes the rendered chat template's exact token IDs (preferred over the
 approximate `--prompt` tokenizer). Every speculative run MUST pass `--expect-ids` against a
 dense `--out-ids` reference. Per-experiment commands and raw result paths are in

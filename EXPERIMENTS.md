@@ -347,7 +347,7 @@ Commands were pinned to one CPU core and routed through the resource gate. Repla
 
 ## E036 — real speculative decoding (native MTP head) on the over-VRAM 27B (measured)
 
-- Date: 2026-11-09. First REAL inference (not the weight-streaming proxy) on the 13.42 GiB Qwen3.8-27B with the model exceeding 12 GiB VRAM. Built a fresh MTP-capable llama-cli out-of-source at /home/zabwie/llama-mtp-build (commit d775b8967, b10573; the user's /home/zabwie/llama.cpp checkout was NOT modified — its prebuilt binaries predate MTP and segfaulted loading the 18-tensor head as a full model). Target run with GGML_CUDA_ENABLE_UNIFIED_MEMORY=1, -ngl 99, -c 1024, -n 128, --temp 0, --reasoning off. Arm B adds the model's native NextN/MTP head (mtp-Qwen3.8-27B-Q4_0.gguf, 1.68 GiB) via -md / -ngld 99 / --spec-type draft-mtp / --spec-draft-n-max 8. PCIe logged with nvidia-smi dmon -s t -d 1. Script: scripts/e036_mtp_spec.sh.
+- Date: 2026-11-09. First REAL inference (not the weight-streaming proxy) on the 13.42 GiB Qwen3.8-27B with the model exceeding 12 GiB VRAM. Built a fresh MTP-capable llama-cli out-of-source at $HOME/llama-mtp-build (commit d775b8967, b10573; the user's $HOME/llama.cpp checkout was NOT modified — its prebuilt binaries predate MTP and segfaulted loading the 18-tensor head as a full model). Target run with GGML_CUDA_ENABLE_UNIFIED_MEMORY=1, -ngl 99, -c 1024, -n 128, --temp 0, --reasoning off. Arm B adds the model's native NextN/MTP head (mtp-Qwen3.8-27B-Q4_0.gguf, 1.68 GiB) via -md / -ngld 99 / --spec-type draft-mtp / --spec-draft-n-max 8. PCIe logged with nvidia-smi dmon -s t -d 1. Script: scripts/e036_mtp_spec.sh.
 - Results: baseline generation 0.63 t/s (161.7 s / 103 tok, 1586 ms/tok), prompt 4.33 t/s. MTP generation 1.04 t/s (100.1 s / 105 tok, 962 ms/tok), prompt 4.61 t/s, draft acceptance 0.23026 (70 accepted / 304 generated), mean accepted len 2.84. **Speedup 1.65x.** Both exit 0; swap grew +689 MiB (baseline) and +826 MiB (MTP) from a 7.38 GiB baseline, within the +4 GiB abort guard; MemAvailable stayed >24 GiB.
 - PCIe bytes per token (integrated rxpci over the generation window): baseline ~7.1 GiB/token (steady 4.65 GB/s), MTP ~6.9 GiB/token (steady 7.36 GB/s). Whole-run rx ~759 GiB (baseline) vs ~776 GiB (MTP).
 - KPI verdict (user research doc: "does exact multi-token verification cut bytes/accepted-token by >=3x?"): **NO.** Bytes per accepted token is essentially unchanged (~7 GiB both arms). The 1.65x speedup is amortization of fixed per-pass overhead (kernel launch, attention, page-fault handling) over ~2.84 tokens, NOT a reduction in weight traffic. Low 23% acceptance means most draft tokens are rejected; the target still streams its weights every verification pass and the draft head adds traffic.
@@ -2658,3 +2658,74 @@ previous standby). The TOLERANCE track's own reference measurement now exists; a
 future candidate must beat this bar. Raw: results/e194-codec-kl/. Also: watchdog
 installed (scripts/watchdog.sh + 20-min cron) after it caught two silent failures
 on its first run — empty-result ppl runs and the strip script's AttributeError.
+
+## E195 — Corrected TTKV compact-row commit (2026-11-14)
+
+The first divergence in `long_canal` was at transformer block 3 on the final
+prefill pass. Q, K, V, the protection mask, and positional individual rows had
+identical bytes. The 4-token ring differed at 28 live groups in every KV head.
+The commit had already converted `first` to group indices, then divided it again
+in the count calculation. At cursor 2560, it launched 544 groups in place of 64.
+The extra writes wrapped into groups 0–27. Those writes were inside the allocation,
+which explains the clean memcheck result.
+
+The fix counts groups once, preserves each head's stride when the compact pool
+grows, reserves all 16 individual rows in old protected groups, resets the overlay
+when a session starts a fresh prefix, and sizes the pool once per logical prompt.
+E195 tracing and device asserts were removed.
+
+The stripped build reproduced all 256 `long_canal` IDs. A 7,840-token
+prefix on the corrected cache path matched 48 continuation IDs against the
+pre-E195 decoder. A kernel fixture at positions 262140–262143 matched all 4,096
+analytic outputs across recent, straddling, middle, old, and protected rows, with
+zero errors under unfiltered CUDA initcheck. A filtered initcheck of the decoder
+was discarded because initcheck did not observe writes from excluded producer
+kernels. The paired two-kernel control confirmed this behavior.
+
+Evidence: [first-pass comparison](results/e195-corrected-20261114/final-prefill-diff.txt),
+[`long_canal` gate](results/e195-corrected-20261114/quick.jsonl),
+[7,840-token baseline](results/e195-corrected-20261114/depth-base.log),
+[corrected replay](results/e195-corrected-20261114/depth-fixed.log),
+[262K CUDA fixture](results/e195-corrected-20261114/high-position-initcheck.log).
+
+The full frozen prompt suite subsequently passed **20/20**, all 5,120 output
+IDs exact. At a 33,792-token context limit, a 0 MiB hot tier and a 10 GiB host
+cache, median prefill/decode rates were 91.72/3.63 tok/s for short prompts,
+126.14/3.52 for mid prompts, and 117.83/3.55 for long prompts. These runs used
+3,658 MiB pinned for weights and 2.76 GiB of NVMe-tier weights per verifier pass.
+[Per-prompt rows](results/e195-corrected-20261114/full.jsonl).
+
+## E196 — 4.28× decode at 256K by sharing old KV reads (2026-11-15)
+
+The E195 256K streaming run spent about 7.52 s on a full 32-position
+verification pass, with about 0.57 s of weight DMA. The old attention tiles
+tested all 1,024 logical positions per split and loaded packed history
+separately for each query head. E196 enumerates the surviving rows directly,
+loads all eight key codes per warp lane in one word, and shares packed KV
+between the six query heads attached to each KV head. The attention split
+geometry and reduction order stay the same.
+
+On the RTX 3060, the 256K attention fixture with 32 verifier positions went
+from 454.759 ms to 56.137 ms per layer with bitwise-identical output and
+identical cache and scratch allocation sizes. The 7,840-token decoder gate
+matched all 48 E195 output IDs.
+[Fixture, integration logs, and full-context reproduction](results/e196/README.md).
+
+The full repeat processed the same 261,888-token test prompt, assembled by
+concatenating and repeating prose segments from the frozen prompt set to fill
+the context. It matched all 256 E195-generated IDs. On E195's 0 MiB hot /
+10 GiB host streaming setup,
+prefill improved from 8.99 to 46.41 tok/s and decode from 0.761 to 3.258
+tok/s. Mean verifier time fell from 6.863 to 1.512 s across the same 48
+cycles. NVML measured a 4,308 MiB decoder peak on both runs. Total-device
+peak was 6,211.31 MiB for E195 and 6,250.38 MiB for E196, with the full
+39.06 MiB difference outside the decoder.
+[Comparison](results/e196-old-tier-20261115/compare.log) and
+[raw run summary](results/e196-old-tier-20261115/ctx-262144.json).
+
+Each pass streamed 12.76 GiB of target weights: 10 GiB from the staged host
+cache (3,658 MiB pinned, about 6.34 GiB pageable) and 2.76 GiB from NVMe.
+The measured H2D part was about 0.56 s per pass. Grouped prefill processed
+256 positions per weight pass for 1,023 passes. This was a constructed
+long-context repeat prompt and a comparison to E195's token stream, not a
+novel 256K prompt suite.

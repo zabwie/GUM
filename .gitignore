@@ -1,18 +1,51 @@
+# Local builds and CUDA probe executables
+/build/
+/build-*/
+*.o
+*.a
+*.so
+/benchmarks/real_decode
 /benchmarks/memory_paths
 /benchmarks/managed_paths
 /benchmarks/reuse_paths
 /benchmarks/mixed_residency
 /benchmarks/vmm_mixed_probe
-/models/*.gguf
-/models/*.vpd
-/results/*.csv
-/results/*.sqlite
-/logs/*.log
-tier_data/
+/benchmarks/host_latency
+/benchmarks/oversubscribe
+/benchmarks/streamed_decode
+/benchmarks/tiered_stream
+/benchmarks/probes/gemv_probe
+/benchmarks/probes/h2d_d2h_probe
+/benchmarks/probes/managed_paths
+/benchmarks/probes/memory_paths
+/benchmarks/probes/mixed_residency
+/benchmarks/probes/residency_manager
+/benchmarks/probes/reuse_paths
+/benchmarks/probes/streamed_decode
+/benchmarks/probes/tiered_stream
+/benchmarks/probes/oversubscribe
+/benchmarks/probes/vmm_mixed_probe
+/benchmarks/probes/.real_decode-e172-*
 
-# python
-__pycache__/
-
-# E167 capture pipeline (EAGLE-scale drafter training data)
+# Machine-local models, capture data, and runtime state
+/models/
 /capture/
-benchmarks/.real_decode-e172-*
+/profile.sqlite
+*.sqlite
+/scripts/capture_seeds.txt
+/logs/*.log
+/logs/*.state
+/.zcode/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Research output: preserve the curated E196 record; ignore local run dumps.
+/results/*
+!/results/README.md
+!/results/e196/
+!/results/e196/**
+
+# Scratch tier data
+/tier_data/

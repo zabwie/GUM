@@ -27,9 +27,11 @@ from qwen_tools import TOOL_START, normalize_messages, parse_reply
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = Path(os.environ.get("GUM_TARGET_MODEL", "/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"))
-MTP = Path(os.environ.get("GUM_MTP_MODEL", "/home/zabwie/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"))
-DECODER = Path(os.environ.get("GUM_DECODER", ROOT / "benchmarks/real_decode"))
+TARGET = Path(os.environ.get(
+    "GUM_TARGET_MODEL", Path.home() / "Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"))
+MTP = Path(os.environ.get(
+    "GUM_MTP_MODEL", Path.home() / "Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"))
+DECODER = Path(os.environ.get("GUM_DECODER", ROOT / "build/real_decode"))
 PORT = int(os.environ.get("GUM_API_PORT", "8765"))
 KV_CACHE = os.environ.get("GUM_KV_CACHE", "turboquant-ttkv")
 # GUM_PROFILE picks the residency/context split. "chat" right-sizes the context to the

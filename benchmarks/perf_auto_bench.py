@@ -44,9 +44,9 @@ from perf_auto_prompts_long import PROMPTS_LONG    # 6 prompts, ~4k tokens
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = Path(os.environ.get("GUM_TARGET_MODEL",
-    "/home/zabwie/Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"))
+    Path.home() / "Desktop/Chip/models/Qwen3.8-27B-STRICT-Q4_0.gguf"))
 MTP = Path(os.environ.get("GUM_MTP_MODEL",
-    "/home/zabwie/Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"))
+    Path.home() / "Desktop/Chip/models/mtp-Qwen3.8-27B-Q4_0.gguf"))
 DECODER = Path(os.environ.get("GUM_DECODER", ROOT / "benchmarks/real_decode"))
 OUT = ROOT / "results/perf-auto"
 SEED = 20261113

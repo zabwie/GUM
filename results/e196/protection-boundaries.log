@@ -1,0 +1,6 @@
+ctx=262144 pos=262143 verifier_rows=1 protected_rows=0 cache_bytes=32876960 scratch_bytes=202899456 samples=9 min_ms=9.297 mean_ms=9.315
+ctx=262144 pos=262143 verifier_rows=1 protected_rows=0 cache_bytes=32876960 scratch_bytes=202899456 samples=9 min_ms=0.834 mean_ms=0.836
+protection=0% exact output
+ctx=262144 pos=262143 verifier_rows=1 protected_rows=262144 cache_bytes=376808576 scratch_bytes=202899456 samples=9 min_ms=37.115 mean_ms=38.578
+ctx=262144 pos=262143 verifier_rows=1 protected_rows=262144 cache_bytes=376808576 scratch_bytes=202899456 samples=9 min_ms=4.872 mean_ms=4.993
+protection=100% exact output

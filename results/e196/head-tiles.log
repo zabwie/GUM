@@ -1,0 +1,12 @@
+head_tile=1 ctx=262144 pos=262136 verifier_rows=8 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=38.443 mean_ms=41.154
+head_tile=2 ctx=262144 pos=262136 verifier_rows=8 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=22.790 mean_ms=24.605
+head_tile=3 ctx=262144 pos=262136 verifier_rows=8 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=17.733 mean_ms=19.340
+head_tile=6 ctx=262144 pos=262136 verifier_rows=8 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=14.175 mean_ms=14.954
+head_tile=1 ctx=262144 pos=262112 verifier_rows=32 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=156.323 mean_ms=160.915
+head_tile=2 ctx=262144 pos=262112 verifier_rows=32 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=95.761 mean_ms=97.354
+head_tile=3 ctx=262144 pos=262112 verifier_rows=32 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=73.467 mean_ms=75.665
+head_tile=6 ctx=262144 pos=262112 verifier_rows=32 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=9 min_ms=56.137 mean_ms=57.121
+head_tile=1 ctx=262144 pos=261888 verifier_rows=256 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=3 min_ms=1221.060 mean_ms=1236.210
+head_tile=2 ctx=262144 pos=261888 verifier_rows=256 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=3 min_ms=764.935 mean_ms=767.911
+head_tile=3 ctx=262144 pos=261888 verifier_rows=256 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=3 min_ms=595.517 mean_ms=626.050
+head_tile=6 ctx=262144 pos=261888 verifier_rows=256 protected_rows=84304 cache_bytes=143482496 scratch_bytes=202899456 samples=3 min_ms=492.203 mean_ms=511.355

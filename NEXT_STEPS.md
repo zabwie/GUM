@@ -24,7 +24,7 @@
 21. **Completed (E031, measured):** Streamed decode proxy on the 13.42 GiB Qwen3.8-27B STRICT Q4_0 GGUF (497 tensors, per-token Q4_0 GEMV over every weight, CPU-reference validated, 3,976 rows, zero mismatches in every config). Steady state: 0.721 tok/s all-cold host-resident (3.57 GiB pinned mapped + 1.85 GiB managed), 0.744 tok/s with a 4.5 GiB RAM cache + 0.93 GiB NVMe per token, 1.021 tok/s with a 5.55 GiB RAM cache covering every cold weight (zero NVMe in steady state). The full-cache rate's 14.7 GB/s effective bandwidth matches the pinned H2D rate from E021 (14.738 GB/s), consistent with the H2D copy of the cold set being the dominant serialized cost; copy and GEMV run on one CUDA stream and cannot overlap in the current pipeline.
 22. **Completed (E032, measured):** Copy/compute overlap in the streamed decode proxy (H2D on one stream, GEMV on another). First build had a slot-reuse event bug (event indexed by staging-buffer modulus kStage=8 while slots cycle by kSlots=4; kHot items recorded no event) and FAILED verification (13 mismatches, 1.240 tok/s invalid). Fixed with one event per slot, primed at startup: now PASS, zero mismatches, 3976 rows. Steady state 1.247 tok/s (up from 1.021, ~22% faster), effective 17.9 GB/s.
 23. **Completed (E033/E034, measured):** Speed optimization. dp4a int8 GEMV (~275 GB/s vs 24.6 fp32), decode batching (NB vectors share one weight pass), hot-arena GEMVs on a third stream, and a pinned RAM-cache head (3658 MiB within the 3978 MiB memlock hard cap; no CPU memcpy for pinned items in steady state). Final binary, all PASS zero mismatches: batch 1 = 1.951 tok/s single-stream, batch 16 = 31.8 aggregate, **batch 32 = 43.8 aggregate tok/s** (127,232 rows checked), batch 64 = 37.9 (occupancy regression). 43x the E031 baseline; meets the 20-40 tok/s target as serving-style aggregate throughput. Single-stream ceiling is ~2.5 tok/s (5.82 GB cold set/token over PCIe at ~11.5-14.7 GB/s) — physics, not software. Negative result: packed float2 scales 27% slower at batch 32, reverted.
-24. **Completed (E036, measured):** Real-inference speculative decoding on the over-VRAM 27B. Built MTP-capable llama-cli out-of-source at /home/zabwie/llama-mtp-build (d775b8967; user's checkout untouched, its prebuilt binaries predate MTP). Target via GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 -ngl 99; arm B adds the native NextN/MTP head (-md mtp-Qwen3.8-27B-Q4_0.gguf -ngld 99 --spec-type draft-mtp --spec-draft-n-max 8). Result: baseline 0.63 t/s, MTP 1.04 t/s = **1.65x**; acceptance 23% (70/304), mean len 2.84. **KPI verdict: the >=3x bytes/accepted-token reduction is NOT met** — PCIe H2D is ~7 GiB/token in BOTH arms (managed-memory thrashing: weights+KV+draft > 12 GiB VRAM, pages evicted/re-faulted every token). The 1.65x is per-pass overhead amortization, not traffic reduction. Temp-0 outputs diverge ("the massive number of"/"massive amounts of") from batched-verification FP nondeterminism. Real inference (0.6-1.0 t/s) is far below the staged proxy (~2 t/s single / 43.8 batch) because llama.cpp unified memory demand-migrates blindly with no intelligent residency. Raw: results/e036-{baseline,mtp}-20261109-171251.txt + -pcie.txt; script scripts/e036_mtp_spec.sh.
+24. **Completed (E036, measured):** Real-inference speculative decoding on the over-VRAM 27B. Built MTP-capable llama-cli out-of-source at $HOME/llama-mtp-build (d775b8967; user's checkout untouched, its prebuilt binaries predate MTP). Target via GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 -ngl 99; arm B adds the native NextN/MTP head (-md mtp-Qwen3.8-27B-Q4_0.gguf -ngld 99 --spec-type draft-mtp --spec-draft-n-max 8). Result: baseline 0.63 t/s, MTP 1.04 t/s = **1.65x**; acceptance 23% (70/304), mean len 2.84. **KPI verdict: the >=3x bytes/accepted-token reduction is NOT met** — PCIe H2D is ~7 GiB/token in BOTH arms (managed-memory thrashing: weights+KV+draft > 12 GiB VRAM, pages evicted/re-faulted every token). The 1.65x is per-pass overhead amortization, not traffic reduction. Temp-0 outputs diverge ("the massive number of"/"massive amounts of") from batched-verification FP nondeterminism. Real inference (0.6-1.0 t/s) is far below the staged proxy (~2 t/s single / 43.8 batch) because llama.cpp unified memory demand-migrates blindly with no intelligent residency. Raw: results/e036-{baseline,mtp}-20261109-171251.txt + -pcie.txt; script scripts/e036_mtp_spec.sh.
 25. **Completed (E037, measured; user-approved kernel change):** `iommu=pt` applied + reboot. All 20 IOMMU groups flipped DMA-FQ -> identity (GPU group 16); link Gen4 x16 under load. **H2D 14.33 -> 24.61 GB/s (1.72x), D2H 12.67 -> 25.87 (2.04x)** — the IOMMU was a ~42% bandwidth tax, a config limiter not silicon (validates the user's challenge to the "physics" framing). Proxy throughput doubled: single-stream 1.951 -> **4.009 tok/s**, batch-16 31.8 -> **64.1 aggregate** (both PASS, zero mismatches). Single-stream now near the Gen4-passthrough ceiling (4.23 theoretical). Change is persistent in GRUB; revert by removing iommu=pt + update-grub + reboot. Raw: results/h2d-d2h-iommu-pt-*.txt, results/streamed-decode-27b-iommu-pt-batch{1,16}-20261109-172744.txt.
 26. **Next (highest leverage):** The IOMMU bandwidth lever is now exhausted (E037); single-stream proxy is at the Gen4-passthrough ceiling (~4 tok/s, 5.8 GB cold/token). Two remaining paths: (a) port the staged-proxy's intelligent residency (hot VRAM arena + pinned RAM cache + overlapped H2D, E032-E034/E037) into a REAL decode loop with attention/SSM math + KV state, to close the gap between the 4 tok/s proxy and the 0.6-1.0 t/s llama.cpp unified-memory thrashing (E036); (b) read fewer bytes per accepted token via approximate-layer drafting + exact multi-token verification done right (E036's naive MTP did NOT cut traffic). Path (a) is the more direct win.
 27. **Optional:** Close the batch-32 compute gap (0.73 s/pass vs ~0.5 s copy-bound, ceiling ~64 tok/s) with a tensor-core int8 MMQ kernel; requires Q4_0 fragment layout work and full CPU-reference revalidation.
@@ -199,7 +199,7 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     item boundary at non-4848-row items). The scalar-reference tool in --cpu-verify is
     itself buggy (disagrees even on CLEAN tensors) — fix it first; it is the fastest
     path to the answer.
-55. **BF16 source downloaded (52 GB):** /home/zabwie/Desktop/Chip/models/bf16-source
+55. **BF16 source downloaded (52 GB):** $HOME/Desktop/Chip/models/bf16-source
     = Qwen/Qwen3.8-27B @ 1d4bf0f2ff (Chip provenance pin). Codec 3-way KL test
     (Q4_0→BF16, (3,64)→BF16, teacher-forced) is NOW RUNNABLE — the codec lever (+28%)
     is live pending that measurement. Also enables true-BF16 quality comparisons for
@@ -237,7 +237,7 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     (d) E193 bug: worker pointer escapes to RAW GGUF data (blk.1.attn_gate row 3491
     proven exact, nowhere else in file) — print res_off/pin_bytes at split time;
     (e) capture corpus accumulating (group-012 published 2026-11-13 21:04, 8 seqs).
-60. **E195 16:1 tier port (QUEUED per owner — start when the codec suite finishes):**
+60. **E195 16:1 tier port (COMPLETED; corrected and measured 2026-11-14):**
     port Vanta's tier geometry ((ctx−131k)/16 + 65k/4 + 65k ≈ 0.8 GiB @1M, from
     ~/Vanta/model/docs/TTKV_1M_DESIGN.md) into the CUDA TTKV, gated on needle recall
     at depth. OWNER WARNING: previous needle failures were likely MODEL YaRN-training
@@ -245,10 +245,12 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     must separate model-context limits from cache-compression limits (test needles
     WITHIN the trained window first). Qwen3.8 rope_base=10,000,000 in our config =
     long-context-trained base — promising natively. Qwen4 reportedly ships 1M in
-    configs (leaks); 512K/256K acceptable fallbacks. Target: KV 5.6 GiB @256K →
-    ~1.3 GiB → adaptive hot tier gets ~4 GiB back → 256K projection ~17-20 tok/s.
+    configs (leaks); 512K/256K acceptable fallbacks. The measured 256K KV pool is
+    2.23 GiB, with a 199.8 MiB attention scratch allocation; the 17-20 tok/s projection
+    was not achieved. E196's separate old-KV attention reuse experiment raised full-run
+    decode to 3.258 tok/s at the same 4,308 MiB decoder peak.
     Phase B prefill-overlay (from the Vanta doc) is the follow-on for true 1M.
-60a. **E195 STATUS (2026-11-14 night, WIP commit b423c6b):** the compacted-row
+60a. **E195 WIP history (superseded by 60b):** the compacted-row
     overlay is IMPLEMENTED and its core promise MEASURED: at ctx 262144 the
     baseline ABORTS (VRAM plan 10.79 GiB + 2 GiB floor > 11.63 GiB card) while
     the compact build BOOTS with the tier pool at 522.9 MiB (span=262144,
@@ -263,10 +265,24 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     speculative decode diverges from baseline at >2560-token contexts
     (deterministic, any SP depth, isolated repro = long_canal A/B; layout,
     growth, capacity, recycling all excluded via GUM_TTKV_FULL_ROWS /
-    GUM_TTKV_W1_FULL / GUM_TTKV_PAD env tests; device asserts clean).
-    NEXT SESSION: chase that one bug (memcheck the isolated repro with
-    matched gen limits), then strip the unconditional device asserts, rerun
-    the full 20-prompt suite + needle gate + 256K throughput run.
+    GUM_TTKV_W1_FULL / GUM_TTKV_PAD env tests; device asserts clean). The initial
+    divergence was closed by the pack-range correction in 60b. The final corrected
+    build passed the 20-prompt suite and the 256K run. Retain this entry as debugging
+    history.
+
+60b. **E195 pack-range fix (2026-11-14):** The 4:1 and 16:1 launch counts
+    divided the starting group twice. The extra writes wrapped the middle
+    tier and changed the final prefill pass. The corrected, stripped binary
+    matched all 256 `long_canal` IDs. The corrected cache also matched the
+    pre-E195 decoder on a 7,840-token prefix with 48 generated IDs. The
+    256K attention fixture passed under unfiltered initcheck. See E195 in
+    [EXPERIMENTS.md](EXPERIMENTS.md#e195--corrected-ttkv-compact-row-commit-2026-11-14).
+60c. **E196 (2026-11-15):** shared old-KV attention work across six query heads per
+    KV head and enumerated retained rows directly. On the 261,888-token constructed
+    repeat prompt, prefill rose from 8.99 to 46.41 tok/s and decode from 0.761 to
+    3.258 tok/s; all 256 IDs
+    matched E195 and decoder peak stayed at 4,308 MiB. Full details and raw results:
+    [E196 record](results/e196/README.md).
 
 61. **BF16 nextn-strip:** gguf-py script committed (scripts/strip_nextn_gguf.py,
     needs PYTHONPATH=/tmp/ggufpkg); FIRST RUN LAUNCHED but unverified — the earlier
@@ -277,7 +293,7 @@ For Q4_0 and host_latency runs, `MIB` is bounded at 960; the allocation estimate
     plain perplexity IF the loader tolerates it... it does not; the strip is required.
     Codec suite (Q4_0 + k3g64 ppl) running in background; BF16 stage auto-fires when
     the stripped file validates. Verdict rule unchanged (NEXT_STEPS #56).
-62. **QTIP-class 3-bit test (QUEUED behind E195, owner-approved 2026-11-13):** E194
+62. **QTIP-class 3-bit test (QUEUED; E195 is complete; owner-approved 2026-11-13):** E194
     closed the NAIVE uniform 3-bit grid (PPL 8.75 vs Q4_0 7.04) but NOT the trellis/VQ
     class. Two-step falsification path, each cheap: (1) run an open-source QTIP/QuIP#
     pipeline on the BF16 source (~/Desktop/Chip/models/Qwen3.8-27B-BF16-nonextn.gguf,

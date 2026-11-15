@@ -1,140 +1,93 @@
-# GUM — GPU Unified Memory
+# GUM
 
-Run large quantized LLMs on small-GPU machines at usable speeds, by treating system RAM as a
-designed tier of GPU memory — then making every generated token cost as few of those bytes
-as possible. Built for the RTX 3060 12 GB class of machine; open source; single-user latency
-is the product. Formerly "Vanta".
+GUM is an experimental CUDA inference runtime for running quantized language
+models whose weights exceed available GPU memory. It treats VRAM, pinned and
+pageable system RAM, and NVMe as explicit memory tiers, then reduces the cost
+of moving weights by reusing each transfer across more verified work.
 
-## Current configuration: pure streaming (2026-11-13)
+The project is built around one measurable objective: lower single-user
+latency while preserving the target model's greedy token stream on gated
+inputs. Every published throughput figure is tied to its hardware, model,
+context, and memory profile.
 
-The installed default is **`GUM_PROFILE=stream`**: no resident weight tier at all — every
-weight byte streams from pinned system RAM over PCIe (24.7 GB/s measured) on every pass.
-The GPU holds only the machinery (KV tier, drafter, buffers):
+## Best-supported result
 
-| profile | engine VRAM | free for your tools | decode tok/s |
-|---|---|---|---|
-| **stream** (default) | **~3.0 GiB** | **~9 GiB** | **~5.5** |
-| nano | ~4.6 GiB | ~7.1 GiB | 6.27 |
-| lean | ~6.1 GiB | ~5.3 GiB | 7.19 |
-| chat | ~10.2 GiB | ~2.1 GiB | 10.79 |
-| 196k | ~10.4 GiB | ~1.5 GiB | long-output profile (E181) |
+E196 is the strongest verified long-context result in this repository. It ran
+Qwen3.8-27B STRICT Q4_0 on an RTX 3060 12 GiB with a 261,888-token prompt and
+256 generated tokens. Against E195 on the same input and settings, all 256
+output token IDs matched.
 
-Switch with `GUM_PROFILE=<name>`; the API runs as `gum-openai.service` (systemd,
-`LimitMEMLOCK=infinity`). Lossless always: greedy token IDs identical to the exact
-Q4_0 checkpoint — the streaming profile is gated 256/256 token-exact against the
-baseline golden stream.
+| Profile and metric | E195 | E196 |
+|---|---:|---:|
+| Prefill, 256K context; zero hot weights, 10 GiB host cache | 8.99 tok/s | 46.41 tok/s |
+| Decode, same profile and workload | 0.761 tok/s | 3.258 tok/s |
+| Decoder-process peak VRAM | 4,308 MiB | 4,308 MiB |
+| Total-device peak VRAM | 6,211 MiB | 6,250 MiB |
 
-**Historical baselines (E149/E177, 2026-11-12: 16.99–23.87 tok/s) were different
-configurations** — ~8 GiB resident hot tier and 2K bench contexts, not the current
-pure-streaming stack. Do not compare numbers across eras without reading
-[docs/SYSTEM_MAP.md](docs/SYSTEM_MAP.md) and [RESULTS.md](RESULTS.md).
+The E196 run used native MTP drafting, TurboQuant-TTKV, eight grouped
+prefill chunks, and `--hot-mib 0 --cache-mib 10240`. Each verifier pass
+streamed 12.76 GiB of target weights. The speedup came from reusing packed old
+KV reads across query heads; the weight-paging profile stayed the same as the
+baseline.
 
-## Navigating this repo
+The 256K prompt was constructed by repeating prose segments from a frozen
+prompt set. This is a controlled same-input comparison, not a diverse 256K
+quality evaluation. Device-wide memory includes the desktop and other CUDA
+processes; it is reported separately from decoder-process memory. See the
+[benchmark record](results/e196/README.md) for run details, raw summaries,
+and limits. The full-run build hashes are recorded there; the current checkout
+passed the shorter 48-token gate but has not repeated the 256K benchmark. The
+prompt-construction helper accepts the original frozen
+token-ID corpus; that corpus is not distributed. The short release gate uses
+separate included fixtures.
 
-Start here:
+## Build and run the validation gate
 
-1. **[AGENT.md](AGENT.md)** — operating mentality for any AI or human working on GUM: ambition
-   + defiance, disciplined by measurement. Read first.
-2. **[HANDOFF.md](HANDOFF.md)** — current machine state, baseline, validated components,
-   correctness guards, reproduction commands.
-3. **[docs/RESEARCH_FUNNEL.md](docs/RESEARCH_FUNNEL.md)** — the working protocol: every
-   experiment enters through the decision-driven funnel; established bounds with citations.
-4. **[docs/RESEARCH_PLAN.md](docs/RESEARCH_PLAN.md)** — strategy record.
-5. **[NEXT_STEPS.md](NEXT_STEPS.md)** — task ladder. **[EXPERIMENTS.md](EXPERIMENTS.md)** —
-   the evidence log, E000–E165, indexed against `results/`.
-
-Reference: **[docs/DESIGN.md](docs/DESIGN.md)** (technical reference for `real_decode.cu`:
-architecture, kernels, ggml semantics, buffer layouts, bug classes),
-**[docs/HARDWARE.md](docs/HARDWARE.md)** (machine baseline).
-
-Frozen study docs from the E001–E026 memory-mechanics era live in **[docs/archive/](docs/archive/)**
-(AGENT_STATE, BENCHMARKS, FINDINGS, HYPOTHESES, OVERSUBSCRIPTION_PLAN, HANDOFF_HISTORY) —
-historical record, superseded where they disagree with the docs above.
-
-## Quickstart
+The recommended release check is one end-to-end exact-token gate. It rebuilds
+the decoder and compares 48 generated token IDs from a frozen 7,840-token
+prompt against the E195 reference. It requires Linux, a compatible NVIDIA GPU
+and CUDA toolkit, the Qwen3.8-27B STRICT Q4_0 model, and its matching native
+MTP model. Model files are not included.
 
 ```sh
-scripts/run_single_user.sh --prompt "Your prompt"
-# GUM_RESIDENT=1  → validated 8448/ctx-384 short-sequence mode (E156a)
-# GUM_DRAFTER=eagle4 → optional EAGLE4 drafter
+make decoder
+GUM_TARGET_MODEL=/path/to/Qwen3.8-27B-STRICT-Q4_0.gguf \
+GUM_MTP_MODEL=/path/to/mtp-Qwen3.8-27B-Q4_0.gguf \
+make test
 ```
 
-The launcher defaults to native MTP drafting with grouped trees, a packed verifier,
-256 generated tokens, context capacity 1024, and 8064 MiB resident target weights.
-It can verify up to 64 positions on supported GPUs. Model paths can be overridden with
-`GUM_TARGET_MODEL` and `GUM_MTP_MODEL` (EAGLE4: `GUM_EAGLE_MODEL`; build it once with
-`python3 scripts/prepare_eagle4.py --output models/Qwen3.8-27B-EAGLE4-Q4_0.gguf` — requires
-NumPy and the `gguf` package; [EAGLE4 checkpoint and license](https://huggingface.co/EAGLE-Corp/Qwen3.8-27B-EAGLE4)).
+The build prefers `/usr/local/cuda/bin/nvcc` when present and otherwise uses
+`nvcc` from `PATH`. It defaults to `CUDA_ARCH=sm_86` and the host flags used
+on the RTX 3060 test machine. Set `NVCC` for a different toolkit, `CUDA_ARCH`
+for a different GPU, and `HOST_FLAGS` for a different x86 CPU. The defaults
+expect AVX2 and AVX-VNNI.
 
-Direct invocation of the experiment decoder:
+This is a hardware integration check, not a portable CPU-only test. The
+recorded 256K benchmark is separate and takes substantially longer. See
+[the validation and benchmark notes](docs/BENCHMARKS.md) before comparing
+results across machines.
 
-```sh
-/usr/local/cuda/bin/nvcc -O2 -std=c++17 -arch=sm_86 -lpthread benchmarks/real_decode.cu \
-  -o benchmarks/real_decode
-# 27B on a 12 GB card (needs ~21 GB free RAM; adjust --prompt-ids to your chat template):
-taskset -c 0-3 benchmarks/real_decode --model /path/to/Qwen3.8-27B-STRICT-Q4_0.gguf \
-  --prompt-ids "<token ids>" --gen-tokens 32 --ctx 256 --hot-mib 7424 --cache-mib 6144 --readers 4
-# lossless speculation (ALWAYS gate with --expect-ids against a dense --out-ids reference):
-... --speculate 8 --expect-ids /tmp/expect.txt
-# batch serving:
-... --batch 8
-```
+## Design and research record
 
-`tok_per_s` includes drafting, verification, and state repair; `request_tok_per_s` also
-includes prompt evaluation after model loading. `--prompt` uses the decoder's approximate
-tokenizer — prefer passing the rendered chat template's exact token IDs with `--prompt-ids`.
-Per-experiment commands live in [EXPERIMENTS.md](EXPERIMENTS.md).
+- [GUM philosophy](docs/PHILOSOPHY.md): the design objective and evidence rules.
+- [Architecture](docs/DESIGN.md): runtime, weight tiers, KV cache, and kernels.
+- [Benchmark sources](benchmarks/README.md): active runtime versus archived probes.
+- [Benchmark methodology](docs/BENCHMARKS.md): selected measurements and
+  reproduction limits.
+- [Local chat adapter](local_chat/README.md): connect the decoder to the local
+  OpenAI-compatible harness.
+- [Scripts](scripts/README.md): supported entry points and research helpers.
+- [Contributing](CONTRIBUTING.md): correctness and benchmark requirements.
+- [Archive guide](archive/README.md): where historical experiments and
+  supporting probes are retained.
 
-For a multi-turn client, pass `--session 1` with the first rendered prompt
-in `--prompt-ids`. After each `session_ids,<ids>` line on stdout, send the
-next full rendered prompt as comma-separated token IDs on one stdin line.
-The model stays loaded. When the next prompt starts with the saved prefix,
-the decoder reuses its completed prefill chunks and evaluates the new
-suffix. Closing stdin exits. Set `--ctx` to fit the longest turn plus
-`--gen-tokens`. Session mode supports packed native MTP and EAGLE4.
+The research ledger includes 103 experiment entries numbered through E196.
+They are historical evidence, not 200 separate tests. The primary public
+validation path is `make test`; earlier probes and one-off tests are retained
+for audit and reproduction.
 
-The E171 single-user configuration on the RTX 3060 used
-`--session 1 --session-tail 1 --prefill-chunks 4 --speculate 32 --packed-verify 1 --pld 0 --draft-max 31`
-with `--ctx 2048 --gen-tokens 384`. It keeps the target state through the
-previous answer's committed tokens while that full token prefix matches. A changed prefix
-uses the last matching prompt checkpoint or starts a fresh prefill.
+## License
 
-Use `--prefill-chunks 8` with that configuration to process up to 256 prompt
-tokens per target weight pass. The RTX 3060 repository-job benchmark includes
-startup and prompt processing. See [E173](EXPERIMENTS.md#e173--wider-exact-prefill).
-
-E177 merges the final short prompt chunk with its preceding group when they
-fit in the same pass. This is enabled for grouped native MTP sessions with
-`--session-tail 1`. The original prompt checkpoint remains available when a
-later request edits the suffix. Use `--fuse-prefill-tail 0` for the separate-pass
-control. Explicit shared-prefix checkpoints and draft-hint sessions use their
-existing prefill paths. See [E177](results/e177-general-20261112/README.md).
-
-For separate requests that share an initial block of repository or tool
-context, add `--session-prefix-tokens N` to the native MTP session command
-above. Set `N` to a multiple of 32 within the shared rendered token prefix.
-The decoder retains a checkpoint there and verifies all prefix IDs before
-reusing it. An edit inside that prefix triggers fresh evaluation and rebuilds
-the checkpoint when the new prompt reaches the boundary. See
-[E174](EXPERIMENTS.md#e174--reuse-shared-context-across-separate-requests).
-
-Clients that can propose an answer from tool output can use
-`--session-draft-hints 1` with the E171 or E173 launcher settings. Append
-`|<draft token IDs>` to the first `--prompt-ids` value or to any later
-prompt line. Both lists are comma-separated. The draft starts at the first
-generated token and excludes the prompt. A request without a draft uses
-the ordinary decoder. The target checks each proposed token and confirms
-EOS itself. See [E175](EXPERIMENTS.md#e175--verify-tool-drafts-during-prefill).
-
-Correctness is the gate: every mode is checked against a CPU fp32 reference and/or the
-validated token stream before its numbers count. See [docs/DESIGN.md](docs/DESIGN.md) §6.
-
-## The short version of the science
-
-RAM extends VRAM capacity, but not bandwidth (PCIe ≈ 1/14th of VRAM reads) — so the
-architecture is a software-defined memory hierarchy (hot arena / RAM cache / NVMe) with
-copy-compute overlap, and speed comes from **amortizing the cable**: batched decode shares
-one weight streaming across sequences, and speculative decoding shares it across guessed
-tokens (measured: 8 positions per crossing cost +7.4 ms over one). On hybrid
-transformer/SSM models, speculation additionally requires recurrent-state snapshot/rollback —
-rejected guesses corrupt cumulative SSM state in ways KV overwrite cannot fix.
+This repository does not yet include a license. No general permission to use,
+modify, or redistribute the code has been granted. A license must be selected
+before publishing it as an open-source project.

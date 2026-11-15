@@ -1,9 +1,9 @@
 # GUM Technical Design — real_decode.cu reference
 
-The technical reference for `benchmarks/real_decode.cu` (~1,600 lines). Everything here was
-learned the hard way — mostly by per-op bisection against llama.cpp. A cold-start reader
-should NOT have to re-derive any of it. Read AGENT.md (mentality) and HANDOFF.md (state)
-first; this file is the "how it works."
+This document describes the runtime in `benchmarks/real_decode.cu` and its supporting
+headers. The source code is authoritative; verify line-level details against the current
+implementation when changing a runtime path. The E-numbered ledger preserves the
+diagnostic history behind the design.
 
 ## 1. The model: Qwen3.8-27B ("qwen35" arch)
 
@@ -91,10 +91,15 @@ ri = il − (il+1)/4** — indexing state arrays by raw il overflows (48 allocat
   silently degrade).
 - SSM state: [B][n_recr][48][128×128] + conv [B][n_recr][10240][3]; spec mode adds
   snapshot buffers for rollback.
-- Weight tiers: hot arena (VRAM, loaded once) → staged cache (RAM, 3658 MiB pinned head) →
-  NVMe (first pass only). Slots: 4×32 MiB pinned ring, 8-deep staging, reader threads.
+- Weight tiers: hot arena (VRAM, loaded once) → staged cache (RAM, with as much of its
+  head pinned as the memlock limit allows) → NVMe for any weight items the host cache
+  cannot hold. For example, the E196 256K run kept a 10 GiB host cache with 3,658 MiB
+  pinned and fetched the remaining 2.76 GiB from NVMe on each target verifier pass.
+  The current source uses four reader threads, a 16×16 MiB pinned host staging ring,
+  a 16×16 MiB device slot ring, and a 12-item overlap window. See the
+  [E196 paging record](../results/e196/README.md).
 
-## 5. Bug classes (EVERY one was a real bug — check new code against all)
+## 5. Previously observed bug classes
 
 1. **Flat-index RMW race**: grid (x, B) elementwise kernels with
    `i = blockIdx.x*blockDim.x + threadIdx.x` — every blockIdx.y block touches the same i.

@@ -1,0 +1,7 @@
+prefill_tok_s: 8.994054245616333 -> 46.41442340684363
+decode_tok_s: 0.761 -> 3.258
+engine_peak_MiB: 4308.0 -> 4308.0
+device_peak_MiB: 6211.3125 -> 6250.375
+E195 at total device peak: 4308.00 MiB engine, 1903.31 MiB elsewhere
+E196 at total device peak: 4308.00 MiB engine, 1942.38 MiB elsewhere
+Same input and 256/256 exact output IDs.

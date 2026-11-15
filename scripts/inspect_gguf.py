@@ -1,5 +1,5 @@
-import sys, re
-sys.path.insert(0, '/home/zabwie/llama.cpp/gguf-py')
+import os, sys, re
+sys.path.insert(0, os.path.expanduser(os.environ.get('GGUF_PYTHON_PATH', '~/llama.cpp/gguf-py')))
 from collections import Counter
 from gguf import GGUFReader
 r = GGUFReader(sys.argv[1])
