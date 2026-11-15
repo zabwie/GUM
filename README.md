@@ -10,6 +10,16 @@ latency while preserving the target model's greedy token stream on gated
 inputs. Every published throughput figure is tied to its hardware, model,
 context, and memory profile.
 
+## Project status and hardware scope
+
+GUM is experimental research software developed for my hardware: an NVIDIA
+RTX 3060 with 12 GiB of VRAM, running Linux and CUDA, with an x86 CPU whose
+default build flags assume AVX2, AVX-VNNI, F16C, and FMA. It is not a stable,
+general-purpose package, and I do not promise it will build or run on other
+hardware. Current benchmarks and build defaults document my setup; they do
+not establish compatibility elsewhere. Once I achieve a stable version, I
+plan to work toward support for a broader range of hardware.
+
 ## Best-supported result
 
 E196 is the strongest verified long-context result in this repository. It ran

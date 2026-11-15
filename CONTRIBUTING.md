@@ -4,6 +4,14 @@ GUM is research software. Contributions should improve useful single-user
 latency or make the runtime easier to reproduce without weakening its
 correctness contract.
 
+## Hardware scope
+
+The current project targets my NVIDIA RTX 3060 12 GiB machine and its
+Linux/CUDA/x86 CPU environment. Default host flags assume AVX2, AVX-VNNI,
+F16C, and FMA. It is experimental and is not promised to build or run on other
+systems or GPUs. After I achieve a stable version, I plan to work toward
+support for a broader range of hardware.
+
 ## Before changing a kernel or runtime path
 
 1. Identify the active model, hardware, and memory profile.
